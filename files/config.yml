@@ -2,16 +2,28 @@ order_management:
   trace_generation:
     perform: True
   ocel_path: "files/databases/order_management.sqlite"
-  output_path: "files/databases/order_management.csv"
+  ev_output_path: "files/output_tables/om_ev_table.csv"
+  ob_output_path: "files/output_tables/om_ob_table.csv"
 
 
 logistics:
   trace_generation:
     perform: True
   ocel_path: "files/databases/logistics.sqlite"
-  output_path: "files/databases/logistics.csv"
+  ev_output_path: "files/output_tables/log_ev_table.csv"
+  ob_output_path: "files/output_tables/log_ob_table.csv"
 
 
 iot:
   trace_generation:
-    perform: False
+      perform:True
+  ocel_path: "files/databases/CargoPickup_IoT.sqlite"
+  ev_output_path: "files/output_tables/iot_ev_table.csv"
+  ob_output_path: "files/output_tables/iot_ob_table.csv"
+
+aoe:
+  trace_generation:
+      perform:True
+  ocel_path: "files/databases/aoe.sqlite"
+  ev_output_path: "files/output_tables/aoe_ev_table.csv"
+  ob_output_path: "files/output_tables/aoe_ob_table.csv"
