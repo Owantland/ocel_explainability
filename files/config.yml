@@ -1,0 +1,17 @@
+order_management:
+  trace_generation:
+    perform: True
+  ocel_path: "files/databases/order_management.sqlite"
+  output_path: "files/databases/order_management.csv"
+
+
+logistics:
+  trace_generation:
+    perform: True
+  ocel_path: "files/databases/logistics.sqlite"
+  output_path: "files/databases/logistics.csv"
+
+
+iot:
+  trace_generation:
+    perform: False
