@@ -4,6 +4,7 @@ order_management:
   ocel_path: "files/databases/order_management.sqlite"
   ev_output_path: "files/output_tables/om_ev_table.csv"
   ob_output_path: "files/output_tables/om_ob_table.csv"
+  filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
 
 
 logistics:
@@ -12,11 +13,12 @@ logistics:
   ocel_path: "files/databases/logistics.sqlite"
   ev_output_path: "files/output_tables/log_ev_table.csv"
   ob_output_path: "files/output_tables/log_ob_table.csv"
+  filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
 
 
 iot:
   trace_generation:
-      perform:True
+      perform: True
   ocel_path: "files/databases/CargoPickup_IoT.sqlite"
   ev_output_path: "files/output_tables/iot_ev_table.csv"
   ob_output_path: "files/output_tables/iot_ob_table.csv"
