@@ -22,6 +22,7 @@ iot:
   ocel_path: "files/databases/CargoPickup_IoT.sqlite"
   ev_output_path: "files/output_tables/iot_ev_table.csv"
   ob_output_path: "files/output_tables/iot_ob_table.csv"
+  filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type', 'event_IoTobject', 'object_IoTobject']
 
 aoe:
   trace_generation:
@@ -29,3 +30,4 @@ aoe:
   ocel_path: "files/databases/aoe.sqlite"
   ev_output_path: "files/output_tables/aoe_ev_table.csv"
   ob_output_path: "files/output_tables/aoe_ob_table.csv"
+  filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
