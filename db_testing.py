@@ -11,7 +11,7 @@ import pandas as pd
 class generateTables():
     def __init__(self, database):
         self.database = database
-        self.ocel_path, self.ob_output, self.ev_output, self.filtered_tbls = self.obtain_paths()
+        self.obtain_paths()
         conn = sqlite3.connect(self.ocel_path)
         self.cursor = conn.cursor()
         self.tabl_nms = self.table_names()
@@ -20,11 +20,11 @@ class generateTables():
         with open('files/config.yml', 'r') as file:
             db_configs = yaml.safe_load(file)
 
-        ocel_path = db_configs[self.database]['ocel_path']
-        ob_output = db_configs[self.database]['ob_output_path']
-        ev_output = db_configs[self.database]['ev_output_path']
-        filtrd_tbls = db_configs[self.database]['filtered_tables']
-        return ocel_path, ob_output, ev_output, filtrd_tbls
+        self.ocel_path = db_configs[self.database]['ocel_path']
+        self.ob_output = db_configs[self.database]['ob_output_path']
+        self.ev_output = db_configs[self.database]['ev_output_path']
+        self.ocel_output = db_configs[self.database]['ocel_output_path']
+        self.filtrd_tbls = db_configs[self.database]['filtered_tables']
 
     def col_names(self, table_name):
         self.cursor.execute(f"PRAGMA table_info({table_name});")
@@ -60,6 +60,7 @@ class generateTables():
         col_names = list(cols)
         col_names.append('type')
         ev_df = pd.DataFrame(columns=col_names)
+
         for table in tables:
             qry_cols = ""
             columns = self.col_names(table)
@@ -77,39 +78,38 @@ class generateTables():
                         JOIN event ON {table}.ocel_id = event.ocel_id
                         ORDER BY 1;
                     '''
-            print(query)
             self.cursor.execute(query)
             columns_info = self.cursor.fetchall()
             for column in columns_info:
                 ev_df.loc[len(ev_df.index)] = column
 
-            ev_df.to_csv(self.ev_output, sep=',', index=False)
+        ev_df.to_csv(self.ev_output, sep=',', index=False)
+        return ev_df
 
     # Obtain the objects associated with each event in a column wise placement
-    def object_columns(self):
+    def generate_ocel(self):
         qry = "SELECT * FROM OBJECT_MAP_TYPE"
         self.cursor.execute(qry)
         ob_types = self.cursor.fetchall()
 
         # Get a list of all possible objects in the database
         ev_ob = {}
-        ev_ob['ocel_event_id'] = []
+        ev_ob['ocel_id'] = []
+        ev_ob['timestamp'] = []
         for column in ob_types:
             ev_ob[column[1]] = []
 
         # Create a list of all events
-        qry = f'''
-                SELECT DISTINCT
-                    E.ocel_id
-                FROM EVENT E
-                ORDER BY 1;
-                '''
-        self.cursor.execute(qry)
-        columns_info = self.cursor.fetchall()
+        ev_log = self.event_log()
+        # ev_log  = pd.read_csv(self.ev_output)
+        events = ev_log['ocel_id']
+        timestamps = ev_log['ocel_time']
 
-        for column in columns_info:
-            ev = column[0]
-            ev_ob['ocel_event_id'].append(ev)
+
+        for idx, ev in enumerate(events):
+            timestamp = timestamps[idx]
+            ev_ob['ocel_id'].append(ev)
+            ev_ob['timestamp'].append(timestamp)
 
             ev_dict = {}
             for ob in ob_types:
@@ -139,12 +139,8 @@ class generateTables():
                 ob_type = ob[1]
                 ev_ob[ob_type].append(ev_dict[ob_type])
 
-        evob = pd.DataFrame.from_dict(ev_ob)
-
-        # Now, we join this table with the event log timestamps to get the whole table
-
-        evob.to_csv("tst.csv", sep=',', index=False)
-
+        ev_ob = pd.DataFrame.from_dict(ev_ob)
+        ev_ob.to_csv(self.ocel_output, sep=',', index=False)
 
     def generate_table(self, type):
         # Get a list of all object tables
@@ -228,9 +224,6 @@ class generateTables():
         ob_df.to_csv(self.ob_output, sep=',', index=False)
 
 # MAIN
-database = 'iot'
+database = 'logistics'
 tbl = generateTables(database)
-tbl.object_columns()
-# tbl.event_log()
-# tbl.generate_table('event')
-# tbl.generate_table('object')
+tbl.generate_ocel()
