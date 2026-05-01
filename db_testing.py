@@ -24,7 +24,46 @@ class generateTables():
         self.ob_output = db_configs[self.database]['ob_output_path']
         self.ev_output = db_configs[self.database]['ev_output_path']
         self.ocel_output = db_configs[self.database]['ocel_output_path']
-        self.filtrd_tbls = db_configs[self.database]['filtered_tables']
+        self.filtered_tbls = db_configs[self.database]['filtered_tables']
+        self.viewpoint = db_configs[self.database]['viewpoint']
+        self.depth = db_configs[self.database]['added_depth']
+
+    def get_attributes(self, node_id, type, attributes):
+        if len(attributes) > 1:
+            attributes = ','.join(attributes)
+        else:
+            attributes = attributes[0]
+
+        table = f'object_{type}'
+        cols = self.col_names(table)
+
+        if len(cols) == 0:
+            table = f'event_{type}'
+            cols = self.col_names(table)
+
+        qry = f'''
+                SELECT {attributes}
+                FROM {table}
+                WHERE {cols[0]} = '{node_id}'
+               '''
+
+        self.cursor.execute(qry)
+        attrs = self.cursor.fetchall()
+        return attrs[0]
+
+    def get_ev_encoding(self, type):
+        qry = f'''
+               SELECT DISTINCT OCEL_TYPE_MAP
+               FROM EVENT_MAP_TYPE
+               ORDER BY 1;
+               '''
+        self.cursor.execute(qry)
+        types = self.cursor.fetchall()
+        types = [type[0] for type in types]
+        events = [[0] * len(types)]
+        events[0][types.index(type)] = 1
+        return events[0]
+
 
     def col_names(self, table_name):
         self.cursor.execute(f"PRAGMA table_info({table_name});")
@@ -223,7 +262,165 @@ class generateTables():
                 ob_df.loc[len(ob_df.index)] = column
         ob_df.to_csv(self.ob_output, sep=',', index=False)
 
+    def related_nodes(self):
+        # Generate a list of all objects of the chosen viewpoint
+        qry = f'''
+                    SELECT *
+                    FROM OBJECT_{self.viewpoint}
+                    ORDER BY 1
+                    LIMIT 10;
+               '''
+        self.cursor.execute(qry)
+        vwpnt_objects = self.cursor.fetchall()
+
+        rltd_nodes = {}
+        # For each viewpoint object obtain a list of related objects
+        for vwpnt_object in vwpnt_objects:
+            rltd_objects = set()
+            rltd_objects.add(vwpnt_object[0])
+            rltd_nodes[vwpnt_object[0]] = {'related_objects':[], 'related_events':[]}
+            cols = self.col_names('object_object')
+            qry = f'''
+                        SELECT *
+                        FROM OBJECT_OBJECT
+                        WHERE {cols[0]} = '{vwpnt_object[0]}' 
+                        ORDER BY 1;
+                   '''
+            self.cursor.execute(qry)
+            objects = self.cursor.fetchall()
+            for rltd_object in objects:
+                rltd_objects.add(rltd_object[1])
+                rltd_objects.add(rltd_object[0])
+
+                if self.depth:
+                    qry = f'''
+                                SELECT *
+                                FROM OBJECT_OBJECT
+                                WHERE {cols[0]} = '{rltd_object[1]}'
+                                      OR {cols[1]} = '{rltd_object[1]}'
+                                ORDER BY 1;
+                           '''
+                    self.cursor.execute(qry)
+                    objects = self.cursor.fetchall()
+                    for rltd_object in objects:
+                        rltd_objects.add(rltd_object[1])
+                        rltd_objects.add(rltd_object[0])
+
+            # Generate a list of related events to the viewpoint object
+            rltd_events = set()
+            for rltd_object in rltd_objects:
+                cols = self.col_names('event_object')
+                ev_cols = self.col_names('event')
+                mp_cols = self.col_names('event_map_type')
+                # Obtain the event_id and its type
+                qry = f'''
+                            SELECT EO.{cols[0]}, M.{mp_cols[1]} 
+                            FROM EVENT_OBJECT EO
+                            JOIN EVENT E ON EO.{cols[0]} = E.{ev_cols[0]}
+                            JOIN EVENT_MAP_TYPE M ON E.{ev_cols[1]} = M.{mp_cols[0]}
+                            WHERE EO.{cols[1]} = '{rltd_object}'
+                            ORDER BY 1;
+                       '''
+                self.cursor.execute(qry)
+                events = self.cursor.fetchall()
+                # Add a timestamp to each event
+                for event in events:
+                    ev_id = event[0]
+                    ev_type = event[1]
+                    ev_table = f'event_{ev_type}'
+                    cols = self.col_names(ev_table)
+
+                    qry = f'''
+                                SELECT {cols[-1]}
+                                FROM {ev_table} E
+                                WHERE E.{cols[0]} = '{ev_id}'
+                           '''
+                    self.cursor.execute(qry)
+                    timestamp = self.cursor.fetchall()
+                    timestamp = timestamp[0][0]
+                    event = (ev_id, ev_type, timestamp)
+                    rltd_events.add(event)
+
+            # Obtain a list of all objects related to the events
+            rltd_objects = set()
+            for event in rltd_events:
+                ev_id = event[0]
+                cols = self.col_names('event_object')
+                ob_cols = self.col_names('object')
+                mp_cols = self.col_names('object_map_type')
+
+                qry = f'''
+                            SELECT EO.{cols[1]}, M.{mp_cols[1]}
+                            FROM EVENT_OBJECT EO
+                            JOIN OBJECT O ON EO.{cols[1]} = O.{ob_cols[0]}
+                            JOIN OBJECT_MAP_TYPE M ON O.{ob_cols[1]} = M.{mp_cols[0]}
+                            WHERE {cols[0]} = '{ev_id}'
+                            ORDER BY 1;
+                       '''
+                self.cursor.execute(qry)
+                objects = self.cursor.fetchall()
+                for object in objects:
+                    rltd_objects.add(object)
+            rltd_nodes[vwpnt_object[0]]['related_events'].extend(rltd_events)
+            rltd_nodes[vwpnt_object[0]]['related_objects'].extend(rltd_objects)
+        return rltd_nodes
+
+    def create_graph(self):
+        nodes = self.related_nodes()
+
+        for vwpnt_object in nodes.keys():
+            graph = {}
+            rltd_objects = nodes[vwpnt_object]['related_objects']
+            rltd_events = nodes[vwpnt_object]['related_events']
+
+            for rltd_object in rltd_objects:
+                ob_id = rltd_object[0]
+                ob_type = rltd_object[1]
+
+                # Check if the graph already has a list for the object type and, if not, create an empty list
+                try:
+                    len(graph[ob_type]) > 0
+                except KeyError:
+                    graph[ob_type] = []
+
+                # Add the desired attributes for each object type
+                if ob_type == 'Items':
+                    attributes = self.get_attributes(ob_id, ob_type, ['weight', 'price'])
+                    ob = []
+                    ob.extend(attributes)
+                    ob.append(ob_id)
+                    graph[ob_type].append(ob)
+                elif ob_type == 'Orders':
+                    attributes = self.get_attributes(ob_id, ob_type, ['price', 'ocel_time'])
+                    ob = []
+                    ob.extend(attributes)
+                    ob.append(ob_id)
+                    graph[ob_type].append(ob)
+                else:
+                    graph[ob_type].append([ob_id])
+
+
+            for rltd_event in sorted(rltd_events, key=lambda x: x[2]):
+                ev_id = rltd_event[0]
+                ev_type = rltd_event[1]
+                timestamp = rltd_event[2]
+
+                # Check if the graph already has a list for the object type and, if not, create an empty list
+                try:
+                    len(graph['Events']) > 0
+                except KeyError:
+                    graph['Events'] = []
+
+                # Perform One Hot Encoding on the event type and add it to the graph
+                encode = self.get_ev_encoding(ev_type)
+                encode.append(ev_id)
+                encode.append(timestamp)
+                graph['Events'].append(encode)
+            print(graph)
+
 # MAIN
-database = 'logistics'
+database = 'order_management'
 tbl = generateTables(database)
-tbl.generate_ocel()
+# tbl.related_nodes()
+tbl.create_graph()
+# tbl.generate_ocel()

@@ -1,6 +1,6 @@
 order_management:
-  trace_generation:
-    perform: True
+  viewpoint: "Orders"
+  added_depth: False
   ocel_path: "files/databases/order_management.sqlite"
   ev_output_path: "files/output_tables/om_ev_table.csv"
   ob_output_path: "files/output_tables/om_ob_table.csv"
@@ -9,8 +9,8 @@ order_management:
 
 
 logistics:
-  trace_generation:
-    perform: True
+  viewpoint: "CustomerOrder"
+  added_depth: True
   ocel_path: "files/databases/logistics.sqlite"
   ev_output_path: "files/output_tables/log_ev_table.csv"
   ob_output_path: "files/output_tables/log_ob_table.csv"
@@ -19,8 +19,8 @@ logistics:
 
 
 aoe:
-  trace_generation:
-      perform:True
+  viewpoint: "Session"
+  added_depth: False
   ocel_path: "files/databases/aoe.sqlite"
   ev_output_path: "files/output_tables/aoe_ev_table.csv"
   ob_output_path: "files/output_tables/aoe_ob_table.csv"
@@ -29,8 +29,8 @@ aoe:
 
 
 iot:
-  trace_generation:
-      perform: True
+  viewpoint: "Pickupplan"
+  added_depth: False
   ocel_path: "files/databases/CargoPickup_IoT.sqlite"
   ev_output_path: "files/output_tables/iot_ev_table.csv"
   ob_output_path: "files/output_tables/iot_ob_table.csv"
