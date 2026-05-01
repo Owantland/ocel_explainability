@@ -49,7 +49,8 @@ class generateTables():
 
         self.cursor.execute(qry)
         attrs = self.cursor.fetchall()
-        return attrs[0]
+        attrs = [attr for attr in attrs[0]]
+        return attrs
 
     def get_ev_encoding(self, type):
         qry = f'''
@@ -278,7 +279,7 @@ class generateTables():
         for vwpnt_object in vwpnt_objects:
             rltd_objects = set()
             rltd_objects.add(vwpnt_object[0])
-            rltd_nodes[vwpnt_object[0]] = {'related_objects':[], 'related_events':[]}
+            rltd_nodes[vwpnt_object[0]] = {'related_objects':[], 'related_events':[], 'events_by_objects':[]}
             cols = self.col_names('object_object')
             qry = f'''
                         SELECT *
@@ -312,7 +313,7 @@ class generateTables():
                 cols = self.col_names('event_object')
                 ev_cols = self.col_names('event')
                 mp_cols = self.col_names('event_map_type')
-                # Obtain the event_id and its type
+                # Obtain the event_id and its type as well as it's index in the timeline
                 qry = f'''
                             SELECT EO.{cols[0]}, M.{mp_cols[1]} 
                             FROM EVENT_OBJECT EO
@@ -323,6 +324,7 @@ class generateTables():
                        '''
                 self.cursor.execute(qry)
                 events = self.cursor.fetchall()
+
                 # Add a timestamp to each event
                 for event in events:
                     ev_id = event[0]
@@ -341,10 +343,20 @@ class generateTables():
                     event = (ev_id, ev_type, timestamp)
                     rltd_events.add(event)
 
+            # Sort the events chronologically and add an index
+            rltd_events = sorted(rltd_events, key=lambda x: x[2])
+            for idx, event in enumerate(rltd_events):
+                ev_id = event[0]
+                ev_type = event[1]
+                ev_timestamp = event[2]
+                rltd_events[idx] = (idx+1, ev_id, ev_type, ev_timestamp)
+
             # Obtain a list of all objects related to the events
             rltd_objects = set()
+            events_by_objects = {}
             for event in rltd_events:
-                ev_id = event[0]
+                ev_idx = event[0]
+                ev_id = event[1]
                 cols = self.col_names('event_object')
                 ob_cols = self.col_names('object')
                 mp_cols = self.col_names('object_map_type')
@@ -361,43 +373,53 @@ class generateTables():
                 objects = self.cursor.fetchall()
                 for object in objects:
                     rltd_objects.add(object)
+
+                    # Get a list of related events to each object
+                    obj = object[0]
+                    if obj not in events_by_objects:
+                        events_by_objects[obj] = [ev_idx]
+                    else:
+                        events_by_objects[obj].append(ev_idx)
+            # Update the dictionary
             rltd_nodes[vwpnt_object[0]]['related_events'].extend(rltd_events)
             rltd_nodes[vwpnt_object[0]]['related_objects'].extend(rltd_objects)
+            rltd_nodes[vwpnt_object[0]]['events_by_objects'].append(events_by_objects)
         return rltd_nodes
 
     def create_graph(self):
         nodes = self.related_nodes()
 
         for vwpnt_object in nodes.keys():
+            # Add all nodes to the graph
             graph = {}
             rltd_objects = nodes[vwpnt_object]['related_objects']
             rltd_events = nodes[vwpnt_object]['related_events']
+
+            # Always add the viewpoint object first
+            attributes = self.get_attributes(vwpnt_object, self.viewpoint, ['price', 'ocel_time'])
+            attributes.append(vwpnt_object)
+            graph[self.viewpoint] = [(attributes)]
 
             for rltd_object in rltd_objects:
                 ob_id = rltd_object[0]
                 ob_type = rltd_object[1]
 
-                # Check if the graph already has a list for the object type and, if not, create an empty list
-                try:
-                    len(graph[ob_type]) > 0
-                except KeyError:
-                    graph[ob_type] = []
-
-                # Add the desired attributes for each object type
-                if ob_type == 'Items':
-                    attributes = self.get_attributes(ob_id, ob_type, ['weight', 'price'])
-                    ob = []
-                    ob.extend(attributes)
-                    ob.append(ob_id)
-                    graph[ob_type].append(ob)
-                elif ob_type == 'Orders':
-                    attributes = self.get_attributes(ob_id, ob_type, ['price', 'ocel_time'])
-                    ob = []
-                    ob.extend(attributes)
-                    ob.append(ob_id)
-                    graph[ob_type].append(ob)
+                if ob_type == self.viewpoint:
+                    pass
                 else:
-                    graph[ob_type].append([ob_id])
+                    # Check if the graph already has a list for the object type and, if not, create an empty list
+                    try:
+                        len(graph[ob_type]) > 0
+                    except KeyError:
+                        graph[ob_type] = []
+
+                    # Add the desired attributes for each object type
+                    if ob_type == 'Items':
+                        attributes = self.get_attributes(ob_id, ob_type, ['weight', 'price'])
+                        attributes.append(ob_id)
+                        graph[ob_type].append(attributes)
+                    else:
+                        graph[ob_type].append([ob_id])
 
 
             for rltd_event in sorted(rltd_events, key=lambda x: x[2]):
@@ -418,9 +440,11 @@ class generateTables():
                 graph['Events'].append(encode)
             print(graph)
 
+            # Add the edges
+
 # MAIN
 database = 'order_management'
 tbl = generateTables(database)
-# tbl.related_nodes()
-tbl.create_graph()
+tbl.related_nodes()
+# tbl.create_graph()
 # tbl.generate_ocel()
