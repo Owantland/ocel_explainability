@@ -27,6 +27,7 @@ class generateTables():
         self.filtered_tbls = db_configs[self.database]['filtered_tables']
         self.viewpoint = db_configs[self.database]['viewpoint']
         self.depth = db_configs[self.database]['added_depth']
+        self.attributes = db_configs[self.database]['attributes']
 
     def get_attributes(self, node_id, type, attributes):
         if len(attributes) > 1:
@@ -64,7 +65,6 @@ class generateTables():
         events = [[0] * len(types)]
         events[0][types.index(type)] = 1
         return events[0]
-
 
     def col_names(self, table_name):
         self.cursor.execute(f"PRAGMA table_info({table_name});")
@@ -362,7 +362,7 @@ class generateTables():
                 mp_cols = self.col_names('object_map_type')
 
                 qry = f'''
-                            SELECT EO.{cols[1]}, M.{mp_cols[1]}
+                            SELECT DISTINCT EO.{cols[1]}, M.{mp_cols[1]}
                             FROM EVENT_OBJECT EO
                             JOIN OBJECT O ON EO.{cols[1]} = O.{ob_cols[0]}
                             JOIN OBJECT_MAP_TYPE M ON O.{ob_cols[1]} = M.{mp_cols[0]}
@@ -396,7 +396,7 @@ class generateTables():
             rltd_events = nodes[vwpnt_object]['related_events']
 
             # Always add the viewpoint object first
-            attributes = self.get_attributes(vwpnt_object, self.viewpoint, ['price', 'ocel_time'])
+            attributes = self.get_attributes(vwpnt_object, self.viewpoint, self.attributes[self.viewpoint])
             attributes.append(vwpnt_object)
             graph[self.viewpoint] = [(attributes)]
 
@@ -414,18 +414,21 @@ class generateTables():
                         graph[ob_type] = []
 
                     # Add the desired attributes for each object type
-                    if ob_type == 'Items':
-                        attributes = self.get_attributes(ob_id, ob_type, ['weight', 'price'])
+                    try:
+                        attr = self.attributes[ob_type]
+                        attributes = self.get_attributes(ob_id, ob_type, attr)
                         attributes.append(ob_id)
                         graph[ob_type].append(attributes)
-                    else:
+                    except KeyError:
                         graph[ob_type].append([ob_id])
 
 
-            for rltd_event in sorted(rltd_events, key=lambda x: x[2]):
-                ev_id = rltd_event[0]
-                ev_type = rltd_event[1]
-                timestamp = rltd_event[2]
+            # for rltd_event in sorted(rltd_events, key=lambda x: x[2]):
+            for rltd_event in rltd_events:
+                ev_idx = rltd_event[0]
+                ev_id = rltd_event[1]
+                ev_type = rltd_event[2]
+                timestamp = rltd_event[3]
 
                 # Check if the graph already has a list for the object type and, if not, create an empty list
                 try:
@@ -439,12 +442,13 @@ class generateTables():
                 encode.append(timestamp)
                 graph['Events'].append(encode)
             print(graph)
+            print(nodes[vwpnt_object]['events_by_objects'])
 
             # Add the edges
 
 # MAIN
 database = 'order_management'
 tbl = generateTables(database)
-tbl.related_nodes()
-# tbl.create_graph()
+# tbl.related_nodes()
+tbl.create_graph()
 # tbl.generate_ocel()
