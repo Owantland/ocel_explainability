@@ -349,7 +349,7 @@ class generateTables():
                 ev_id = event[0]
                 ev_type = event[1]
                 ev_timestamp = event[2]
-                rltd_events[idx] = (idx+1, ev_id, ev_type, ev_timestamp)
+                rltd_events[idx] = (idx, ev_id, ev_type, ev_timestamp)
 
             # Obtain a list of all objects related to the events
             rltd_objects = set()
@@ -376,10 +376,13 @@ class generateTables():
 
                     # Get a list of related events to each object
                     obj = object[0]
+                    obj_type = object[1]
                     if obj not in events_by_objects:
-                        events_by_objects[obj] = [ev_idx]
+                        events_by_objects[obj] = {}
+                        events_by_objects[obj]['Events'] = [ev_idx]
+                        events_by_objects[obj]['Type'] = [obj_type]
                     else:
-                        events_by_objects[obj].append(ev_idx)
+                        events_by_objects[obj]['Events'].append(ev_idx)
             # Update the dictionary
             rltd_nodes[vwpnt_object[0]]['related_events'].extend(rltd_events)
             rltd_nodes[vwpnt_object[0]]['related_objects'].extend(rltd_objects)
@@ -394,6 +397,7 @@ class generateTables():
             graph = {}
             rltd_objects = nodes[vwpnt_object]['related_objects']
             rltd_events = nodes[vwpnt_object]['related_events']
+            ev_by_ob = nodes[vwpnt_object]['events_by_objects']
 
             # Always add the viewpoint object first
             attributes = self.get_attributes(vwpnt_object, self.viewpoint, self.attributes[self.viewpoint])
@@ -441,10 +445,15 @@ class generateTables():
                 encode.append(ev_id)
                 encode.append(timestamp)
                 graph['Events'].append(encode)
-            print(graph)
-            print(nodes[vwpnt_object]['events_by_objects'])
 
             # Add the edges
+            # Need to ensure the objects are properly ordered
+            for ev_ob in ev_by_ob:
+                for ob in ev_ob:
+                    print(ob)
+                    type = ev_ob[ob]['Type'][0].lower()
+                    print(f"{type}_to_event")
+
 
 # MAIN
 database = 'order_management'
