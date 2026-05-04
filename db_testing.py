@@ -414,17 +414,21 @@ class generateTables():
             # Add all nodes to the graph
             graph = {}
             rltd_objects = nodes[vwpnt_object]['related_objects']
+            ob_df = pd.DataFrame(rltd_objects, columns=['index', 'ocel_id', 'type'])
+
             rltd_events = nodes[vwpnt_object]['related_events']
+            ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
+
             ev_by_ob = nodes[vwpnt_object]['events_by_objects']
 
             # Always add the viewpoint object first
             attributes = self.get_attributes(vwpnt_object, self.viewpoint, self.attributes[self.viewpoint])
             attributes.append(vwpnt_object)
-            graph[self.viewpoint] = [(attributes)]
+            graph[self.viewpoint] = [attributes]
 
-            for rltd_object in rltd_objects:
-                ob_id = rltd_object[0]
-                ob_type = rltd_object[1]
+            for i, row in ob_df.iterrows():
+                ob_id = row['ocel_id']
+                ob_type = row['type']
 
                 if ob_type == self.viewpoint:
                     pass
@@ -444,13 +448,12 @@ class generateTables():
                     except KeyError:
                         graph[ob_type].append([ob_id])
 
-
-            # for rltd_event in sorted(rltd_events, key=lambda x: x[2]):
-            for rltd_event in rltd_events:
-                ev_idx = rltd_event[0]
-                ev_id = rltd_event[1]
-                ev_type = rltd_event[2]
-                timestamp = rltd_event[3]
+            # Add the events
+            for i, row in ev_df.iterrows():
+                ev_idx = row['index']
+                ev_id = row['ocel_id']
+                ev_type = row['type']
+                timestamp = row['timestamp']
 
                 # Check if the graph already has a list for the object type and, if not, create an empty list
                 try:
@@ -465,17 +468,29 @@ class generateTables():
                 graph['Events'].append(encode)
 
             # Add the edges
-            # Need to ensure the objects are properly ordered
-            for ev_ob in ev_by_ob:
-                for ob in ev_ob:
-                    print(ob)
-                    type = ev_ob[ob]['Type'][0].lower()
-                    print(f"{type}_to_event")
+            for i, row in ob_df.iterrows():
+                ob_id = row['ocel_id']
+                ob_type = row['type']
+                ob_idx = row['index']
 
+                events = ev_by_ob[0][ob_id]
+                events = events['Events']
+                object = [ob_idx for a in range(len(events))]
+                edge_type = f"{ob_type}_to_event"
+
+                # If edge type doesn't exist then it's created
+                try:
+                    len(graph[edge_type]) > 0
+                except KeyError:
+                    graph[edge_type] = [[], []]
+
+                graph[edge_type][0].extend(object)
+                graph[edge_type][1].extend(events)
+            print(graph)
 
 # MAIN
 database = 'order_management'
 tbl = generateTables(database)
-tbl.related_nodes()
-# tbl.create_graph()
+# tbl.related_nodes()
+tbl.create_graph()
 # tbl.generate_ocel()
