@@ -374,7 +374,7 @@ class generateTables():
                 for object in objects:
                     rltd_objects.add(object)
 
-                    # Get a list of related events to each object
+                    # # Get a list of related events to each object
                     obj = object[0]
                     obj_type = object[1]
                     if obj not in events_by_objects:
@@ -383,6 +383,24 @@ class generateTables():
                         events_by_objects[obj]['Type'] = [obj_type]
                     else:
                         events_by_objects[obj]['Events'].append(ev_idx)
+
+            # Order the object list and add an index
+            sorted_objects = sorted(rltd_objects, key=lambda x: (x[1], x[0]))
+            pst_type = ''
+            ob_index = 0
+            rltd_objects = set()
+            for rltd_object in sorted_objects:
+                ob_type = rltd_object[1]
+                if ob_type != pst_type:
+                    ob_index = 0
+                    pst_type = ob_type
+                else:
+                    ob_index += 1
+                object = (ob_index, rltd_object[0], rltd_object[1])
+                rltd_objects.add(object)
+
+            rltd_objects = sorted(rltd_objects, key=lambda x: (x[2], x[1]))
+
             # Update the dictionary
             rltd_nodes[vwpnt_object[0]]['related_events'].extend(rltd_events)
             rltd_nodes[vwpnt_object[0]]['related_objects'].extend(rltd_objects)
@@ -458,6 +476,6 @@ class generateTables():
 # MAIN
 database = 'order_management'
 tbl = generateTables(database)
-# tbl.related_nodes()
-tbl.create_graph()
+tbl.related_nodes()
+# tbl.create_graph()
 # tbl.generate_ocel()
