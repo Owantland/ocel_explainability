@@ -5,6 +5,8 @@ import sqlite3
 import yaml
 import pandas as pd
 
+from collections import defaultdict
+
 '''
     Creating a unified Event table
 '''
@@ -84,6 +86,51 @@ class generateTables():
         for table in self.filtered_tbls:
             tbl_nms = list(filter(lambda nm: nm != table, tbl_nms))
         return tbl_nms
+
+    def generate_adjacency_list_with_k(self, events_by_objects_copy, par):
+        """
+        Generate an adjacency list from events_by_objects, linking events up to the K-th event.
+
+        Parameters:
+        - events_by_objects: dict, mapping objects to their respective events.
+        - K: int, maximum index of events to include in the adjacency list.
+
+        Returns:
+        - adjacency_list: list of two lists [source_nodes, target_nodes].
+        """
+
+        def generate_consecutive_pairs(events):
+            """Generate pairs of consecutive events."""
+            pairs = []
+            n = len(events)
+            for i in range(n - 1):
+                pairs.append((events[i], events[i + 1]))
+            return pairs
+
+        events_by_objects = {}
+        for k, v in events_by_objects_copy.items():
+            v = v['Events']
+            events_by_objects[k] = [a for a in v if a <= par]
+
+        subsequences_by_object = {}
+        for obj, events in events_by_objects.items():
+            subsequences_by_object[obj] = generate_consecutive_pairs(events)
+
+        event_links = defaultdict(set)
+        for subseq in subsequences_by_object.values():
+            for e1, e2 in subseq:
+                event_links[e1].add(e2)
+
+        source_nodes = []
+        target_nodes = []
+
+        # Iterate over the event links and create the source-target pairs
+        for source, targets in event_links.items():
+            for target in targets:
+                source_nodes.append(source)
+                target_nodes.append(target)
+
+        return [source_nodes, target_nodes]
 
     # Obtain the timestamped series of events present in the event data set
     def event_log(self):
@@ -269,7 +316,7 @@ class generateTables():
                     SELECT *
                     FROM OBJECT_{self.viewpoint}
                     ORDER BY 1
-                    LIMIT 10;
+                    LIMIT 105;
                '''
         self.cursor.execute(qry)
         vwpnt_objects = self.cursor.fetchall()
@@ -419,7 +466,7 @@ class generateTables():
             rltd_events = nodes[vwpnt_object]['related_events']
             ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
 
-            ev_by_ob = nodes[vwpnt_object]['events_by_objects']
+            ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
 
             # Always add the viewpoint object first
             attributes = self.get_attributes(vwpnt_object, self.viewpoint, self.attributes[self.viewpoint])
@@ -468,12 +515,13 @@ class generateTables():
                 graph['Events'].append(encode)
 
             # Add the edges
+            # Objects to Events
             for i, row in ob_df.iterrows():
                 ob_id = row['ocel_id']
                 ob_type = row['type']
                 ob_idx = row['index']
 
-                events = ev_by_ob[0][ob_id]
+                events = ev_by_ob[ob_id]
                 events = events['Events']
                 object = [ob_idx for a in range(len(events))]
                 edge_type = f"{ob_type}_to_event"
@@ -486,6 +534,17 @@ class generateTables():
 
                 graph[edge_type][0].extend(object)
                 graph[edge_type][1].extend(events)
+
+            # Event to Event
+            for i, row in ev_df.iterrows():
+                ev_idx = row['index']
+                ev_id = row['ocel_id']
+                ev_type = row['type']
+                timestamp = row['timestamp']
+
+                graph['event_to_event'] = self.generate_adjacency_list_with_k(ev_by_ob, ev_idx)
+
+
             print(graph)
 
 # MAIN
