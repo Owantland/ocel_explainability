@@ -13,13 +13,14 @@ from collections import defaultdict
 class generateTables():
     def __init__(self, database):
         self.database = database
-        self.obtain_paths()
+        self.get_paths()
         conn = sqlite3.connect(self.ocel_path)
         self.cursor = conn.cursor()
         self.tabl_nms = self.table_names()
         self.o2o_relations = self.get_o2o_relations()
+        self.get_encodings()
 
-    def obtain_paths(self):
+    def get_paths(self):
         with open('files/config.yml', 'r') as file:
             db_configs = yaml.safe_load(file)
 
@@ -31,6 +32,14 @@ class generateTables():
         self.viewpoint = db_configs[self.database]['viewpoint']
         self.depth = db_configs[self.database]['added_depth']
         self.attributes = db_configs[self.database]['attributes']
+        self.to_encode = db_configs[self.database]['encoding']
+
+    def get_encodings(self):
+        self.encodings = {}
+        for encoding in self.to_encode:
+            encod_dict = self.get_1h_encoding(encoding)
+            self.encodings[encoding] = encod_dict
+        print(self.encodings)
 
     def get_attributes(self, node_id, type, attributes):
         if len(attributes) > 1:
@@ -68,6 +77,30 @@ class generateTables():
         events = [[0] * len(types)]
         events[0][types.index(type)] = 1
         return events[0]
+
+    def get_1h_encoding(self, type):
+        oh_dict = {}
+        table = f'object_{type}'
+        cols = self.col_names(table)
+
+        if len(cols) == 0:
+            table = f'event_{type}'
+            cols = self.col_names(table)
+
+        qry = f'''
+                SELECT DISTINCT OCEL_ID
+                FROM {table}
+                ORDER BY 1;
+               '''
+        self.cursor.execute(qry)
+        types = self.cursor.fetchall()
+        types = [type[0] for type in types]
+        binary = [[0] * len(types) for _ in range(len(types))]
+        for idx, a in enumerate(binary):
+            a[idx] = 1
+            oh_dict[types[idx]] = a
+
+        return oh_dict
 
     def col_names(self, table_name):
         self.cursor.execute(f"PRAGMA table_info({table_name});")
@@ -600,8 +633,7 @@ class generateTables():
                             graph[edge_name][0].append(src_index)
                             graph[edge_name][1].append(tg_index)
 
-
-            print(graph)
+            # print(graph)
 
 # MAIN
 database = 'order_management'

@@ -10,6 +10,7 @@ order_management:
     Orders: ['price', 'ocel_time']
     Items: ['weight', 'price']
     Packages: ['weight']
+  encoding: ['Customers', 'Employees']
 
 
 logistics:
