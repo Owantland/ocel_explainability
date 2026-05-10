@@ -9,6 +9,7 @@ order_management:
   attributes:
     Orders: ['price', 'ocel_time']
     Items: ['weight', 'price']
+    Packages: ['weight']
 
 
 logistics:

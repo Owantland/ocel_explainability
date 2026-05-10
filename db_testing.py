@@ -17,6 +17,7 @@ class generateTables():
         conn = sqlite3.connect(self.ocel_path)
         self.cursor = conn.cursor()
         self.tabl_nms = self.table_names()
+        self.o2o_relations = self.get_o2o_relations()
 
     def obtain_paths(self):
         with open('files/config.yml', 'r') as file:
@@ -131,6 +132,24 @@ class generateTables():
                 target_nodes.append(target)
 
         return [source_nodes, target_nodes]
+
+    # Run a query to find all the object to object relations present in the data
+    def get_o2o_relations(self):
+        qry = f'''
+                WITH ob2ob AS (
+                    SELECT DISTINCT O.OCEL_TYPE AS SOURCE, O3.OCEL_TYPE AS TARGET
+                    FROM OBJECT_OBJECT OO
+                    JOIN OBJECT O ON O.OCEL_ID = OO.ocel_source_id
+                    JOIN OBJECT O3 ON O3.OCEL_ID = OO.OCEL_TARGET_ID
+                )
+                SELECT M.OCEL_TYPE_MAP AS SOURCE, M2.OCEL_TYPE_MAP AS TARGET
+                FROM OB2OB O
+                JOIN OBJECT_MAP_TYPE M ON O.SOURCE = M.OCEL_TYPE
+                JOIN OBJECT_MAP_TYPE M2 ON O.TARGET = M2.OCEL_TYPE;
+               '''
+        self.cursor.execute(qry)
+        o2o_relations = self.cursor.fetchall()
+        return o2o_relations
 
     # Obtain the timestamped series of events present in the event data set
     def event_log(self):
@@ -316,7 +335,7 @@ class generateTables():
                     SELECT *
                     FROM OBJECT_{self.viewpoint}
                     ORDER BY 1
-                    LIMIT 105;
+                    LIMIT 95;
                '''
         self.cursor.execute(qry)
         vwpnt_objects = self.cursor.fetchall()
@@ -445,7 +464,6 @@ class generateTables():
                     ob_index += 1
                 object = (ob_index, rltd_object[0], rltd_object[1])
                 rltd_objects.add(object)
-
             rltd_objects = sorted(rltd_objects, key=lambda x: (x[2], x[1]))
 
             # Update the dictionary
@@ -458,6 +476,7 @@ class generateTables():
         nodes = self.related_nodes()
 
         for vwpnt_object in nodes.keys():
+            print(f'{vwpnt_object}')
             # Add all nodes to the graph
             graph = {}
             rltd_objects = nodes[vwpnt_object]['related_objects']
@@ -543,6 +562,43 @@ class generateTables():
                 timestamp = row['timestamp']
 
                 graph['event_to_event'] = self.generate_adjacency_list_with_k(ev_by_ob, ev_idx)
+
+            # Object to object
+            for relation in self.o2o_relations:
+                ob_source = relation[0]
+                ob_target = relation[1]
+
+                edge_name = f'{ob_source}_to_{ob_target}'
+                graph[edge_name] = [[],[]]
+
+                sources = ob_df[ob_df['type'] == ob_source]
+                targets = ob_df[ob_df['type'] == ob_target]
+
+                for i, row in sources.iterrows():
+                    src_id = row['ocel_id']
+                    src_index = row['index']
+                    qry = f'''
+                            SELECT
+                                -- OO.OCEL_SOURCE_ID,
+                                OO.OCEL_TARGET_ID
+                                -- ,M.OCEL_TYPE_MAP
+                            FROM OBJECT_OBJECT OO
+                            JOIN OBJECT O ON OO.ocel_target_id = O.OCEL_ID
+                            JOIN OBJECT_MAP_TYPE M ON O.OCEL_TYPE = M.OCEL_TYPE
+                            WHERE
+                                ocel_source_id = '{src_id}' AND
+                                M.OCEL_TYPE_MAP = '{ob_target}'
+                           '''
+                    self.cursor.execute(qry)
+                    trgt_ids = self.cursor.fetchall()
+
+                    for trgt_id in trgt_ids:
+                        trgt_id = trgt_id[0]
+                        tg_info = targets[targets['ocel_id'] == trgt_id].values
+                        if len(tg_info) > 0:
+                            tg_index = tg_info[0][0]
+                            graph[edge_name][0].append(src_index)
+                            graph[edge_name][1].append(tg_index)
 
 
             print(graph)
