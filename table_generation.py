@@ -13,8 +13,9 @@ from collections import defaultdict
     Creating a unified Event table
 '''
 class generateTables():
-    def __init__(self, database):
+    def __init__(self, database, cant):
         self.database = database
+        self.cant = cant
         self.get_paths()
         conn = sqlite3.connect(self.ocel_path)
         self.cursor = conn.cursor()
@@ -312,8 +313,7 @@ class generateTables():
                                     {type}.ocel_type
                                 FROM {table}
                                 JOIN {type} ON {table}.ocel_id = {type}.ocel_id
-                                ORDER BY 1
-                                LIMIT 10;
+                                ORDER BY 1;
                             '''
             self.cursor.execute(query)
             columns_info = self.cursor.fetchall()
@@ -354,8 +354,7 @@ class generateTables():
                                     object.ocel_type
                                 FROM {table}
                                 JOIN OBJECT ON {table}.ocel_id = OBJECT.ocel_id
-                                ORDER BY 1
-                                LIMIT 10;
+                                ORDER BY 1;
                             '''
             self.cursor.execute(query)
             columns_info = self.cursor.fetchall()
@@ -369,7 +368,7 @@ class generateTables():
                     SELECT *
                     FROM OBJECT_{self.viewpoint}
                     ORDER BY 1
-                    LIMIT 95;
+                    LIMIT {self.cant};
                '''
         self.cursor.execute(qry)
         vwpnt_objects = self.cursor.fetchall()
