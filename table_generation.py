@@ -375,6 +375,7 @@ class generateTables():
         vwpnt_objects = self.cursor.fetchall()
 
         rltd_nodes = {}
+        event_log = []
         # For each viewpoint object obtain a list of related objects
         for vwpnt_object in vwpnt_objects:
             rltd_objects = set()
@@ -511,6 +512,8 @@ class generateTables():
         all_graphs = {}
         all_timestamps = []
         all_idx = []
+        vwpnt_cnt = 1
+        log_frames = []
 
         for vwpnt_object in nodes.keys():
             # Add all nodes to the graph
@@ -525,6 +528,14 @@ class generateTables():
             ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
 
             ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
+
+            # Create the event log file
+            id_col = [vwpnt_cnt for _ in range(len(ev_df.index))]
+            ev_log = ev_df[['ocel_id', 'type', 'timestamp']]
+            ev_log['vwpnt_id'] = id_col
+            log_frames.append(ev_log)
+            vwpnt_cnt += 1
+
 
             # Always add the viewpoint object first
             attributes = self.get_attributes(vwpnt_object, self.viewpoint, self.attributes[self.viewpoint])
@@ -650,4 +661,6 @@ class generateTables():
             graph_dict['timestamps'] = timestamps
 
             all_graphs[vwpnt_object] = graph_dict
+        ev_log = pd.concat(log_frames)
+        ev_log.to_csv(self.ev_output, index=False)
         return all_graphs
