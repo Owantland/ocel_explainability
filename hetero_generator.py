@@ -49,7 +49,10 @@ class HeteroGraphsGenerator():
         active_orders = []
         for i in range(self.num_vp_obj):
             temp = self.pd_df[self.pd_df['vwpnt_id'] == i + 1]
-            active_orders.append([i + 1, temp.iloc[0, 2], temp.iloc[-1, 2]])
+            strt_time = temp.iloc[0, 2]
+            end_time = temp.iloc[-1, 2]
+            ob_id = temp.iloc[0, 4]
+            active_orders.append([ob_id, strt_time, end_time])
 
         self.pd_active_orders = pd.DataFrame(active_orders)
         self.pd_active_orders.sort_values(by=2, inplace=True)
@@ -57,7 +60,43 @@ class HeteroGraphsGenerator():
         # Create a dictionary of delivery times
         self.active_orders_dict = {}
         for idx in range(1, self.num_vp_obj + 1):
-            self.active_orders_dict[idx] = self.pd_df[self.pd_df['vwpnt_id'] == idx].iloc[-1, 2]
+            delivery_time = self.pd_df[self.pd_df['vwpnt_id'] == idx].iloc[-1, 2]
+            ob_id = self.pd_df[self.pd_df['vwpnt_id'] == idx].iloc[0, 4]
+            self.active_orders_dict[ob_id] = delivery_time
+
+    def builder(self, timestamp):
+        # Get a list of orders that begin delivery before the timestamp and finish after the timestamp
+        # can be complicated by items related to one order that are sent in a later package
+        active_orders = self.pd_active_orders[(self.pd_active_orders[1] <= timestamp) & (self.pd_active_orders[2] >= timestamp)][0]
+
+        # Runs a query for finding the products shipped closest to the timestamp and obtains their weight and price
+        # Here we can create a function that works for any time-dependent values aside from price.
+
+        # Return the graphs for only the active orders
+        active_graphs = [self.all_graphs[order]['graph'] for order in active_orders]
+
+        current_time = pd.to_datetime(timestamp)
+        # Calculates the time difference between the selected timestamp and the final delivery time for a package
+        # assigned to the order
+        # print(f'Active order time: {self.active_orders_dict}')
+        y_order = [pd.to_datetime(self.active_orders_dict[order]) - current_time for order in active_orders]
+        y_order = [a.total_seconds() for a in y_order]
+        mask_order = np.array(y_order) > 0
+
+
+        # # Calculates the time difference between the selected timestamp and the final delivery time for the package
+        # # carrying the item
+        # # print(f'Active item time: {self.active_item_dict}')
+        # y_item = [pd.to_datetime(self.active_item_dict[item]) - current_time for item in active_items]
+        # y_item = [a.total_seconds() for a in y_item]
+        # mask_item = np.array(y_item) > 0
+        #
+        # # Calculates the time difference between the selected timestamp and the final delivery time for the package
+        # # print(f'Active package time: {self.active_packages_dict}')
+        # y_package = [pd.to_datetime(self.active_packages_dict[package]) - current_time for package in active_packages]
+        # y_package = [a.total_seconds() for a in y_package]
+        # mask_package = np.array(y_package) > 0
+        # return merged_graph, [(y_order, mask_order), (y_item, mask_item), (y_package, mask_package)], single_graphs
 
     def generate_graphs(self):
         y_train = []
@@ -71,7 +110,6 @@ class HeteroGraphsGenerator():
             if idx % int(len(self.train_sampled_timestamps) / 5) == 0:
                 print(int(idx * 20 / int(len(self.train_sampled_timestamps) / 5)), '%')
             print(f'IDX: {idx}/ Timestamp: {timestamp}')
-            # temp = [merged_graph, [order, item and package time differences and mask], single graphs]
-            # temp = self.builder(timestamp)
+            temp = self.builder(timestamp)
             # train_graphs.append(self.hetero_converter(temp[0], temp[1]))
             # train_graphs_sg.extend(self.hetero_converter_sg(temp[-1], temp[1], timestamp))

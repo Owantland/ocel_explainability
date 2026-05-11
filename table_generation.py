@@ -530,8 +530,10 @@ class generateTables():
 
             # Create the event log file
             id_col = [vwpnt_cnt for _ in range(len(ev_df.index))]
+            ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
             ev_log = ev_df[['ocel_id', 'type', 'timestamp']]
             ev_log['vwpnt_id'] = id_col
+            ev_log['ob_id'] = ob_id
             log_frames.append(ev_log)
             vwpnt_cnt += 1
 
