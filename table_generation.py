@@ -537,7 +537,6 @@ class generateTables():
             log_frames.append(ev_log)
             vwpnt_cnt += 1
 
-
             # Always add the viewpoint object first
             attributes = self.get_attributes(vwpnt_object, self.viewpoint, self.attributes[self.viewpoint])
             attributes.append(vwpnt_object)
@@ -591,6 +590,15 @@ class generateTables():
                 timestamps.append(timestamp)
 
             # Add the edges
+            # Event to Event
+            for i, row in ev_df.iterrows():
+                ev_idx = row['index']
+                ev_id = row['ocel_id']
+                ev_type = row['type']
+                timestamp = row['timestamp']
+
+                graph['event_to_event'] = self.generate_adjacency_list_with_k(ev_by_ob, ev_idx)
+
             # Objects to Events
             for i, row in ob_df.iterrows():
                 ob_id = row['ocel_id']
@@ -610,15 +618,6 @@ class generateTables():
 
                 graph[edge_type][0].extend(object)
                 graph[edge_type][1].extend(events)
-
-            # Event to Event
-            for i, row in ev_df.iterrows():
-                ev_idx = row['index']
-                ev_id = row['ocel_id']
-                ev_type = row['type']
-                timestamp = row['timestamp']
-
-                graph['event_to_event'] = self.generate_adjacency_list_with_k(ev_by_ob, ev_idx)
 
             # Object to object
             for relation in self.o2o_relations:
