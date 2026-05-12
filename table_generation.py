@@ -601,9 +601,9 @@ class generateTables():
                     graph['Events'] = []
 
                 # Perform One Hot Encoding on the event type and add it to the graph
-                encode = self.get_ev_encoding(ev_type)
-                encode.append(ev_id)
-                encode.append(timestamp)
+                # encode = self.get_ev_encoding(ev_type)
+                # encode.append(ev_id)
+                encode = [ev_type, timestamp]
                 graph['Events'].append(encode)
                 all_timestamps.append(timestamp)
                 all_idx.append(vwpnt_cnt)
@@ -663,7 +663,8 @@ class generateTables():
                     # Add the object to event edges
                     ob_events = [ev for ev in evs_by_ob if ev in past_events]
                     if len(ob_events) > 0: # Only add edge if objects are present
-                        object = [ob_id for a in range(len(ob_events))]
+                        ob_idx = ob_df[ob_df['ocel_id'] == ob_id]['index'].values[0]
+                        object = [int(ob_idx) for a in range(len(ob_events))]
                         edge_type = f"{ob_type}_to_event"
 
                         # If edge type doesn't exist then it's created
@@ -714,6 +715,7 @@ class generateTables():
                                     tmp_graph[edge_name][1].append(tg_index)
 
                 # Add the event as a step
+                print(all_graphs)
                 all_graphs.append(tmp_graph)
 
         ev_log = pd.concat(log_frames)

@@ -13,9 +13,9 @@ from collections import defaultdict
 CANT = 5
 database = 'order_management'
 tbl = tg.generateTables(database, CANT)
-# all_graphs = tbl.create_graph()
-tbl.create_graph()
+all_graphs, all_timestamps, all_idx = tbl.create_graph()
 
+# We have the step by step for each graph, now we can work with the timestamps
 # ttb = tb.TrainTestBuilder(database, CANT)
 # train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps = ttb.timestamps_generator()
 #

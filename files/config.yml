@@ -11,7 +11,7 @@ order_management:
     Items: ['weight', 'price']
     Packages: ['weight']
   time_attributes:
-    Products: ['weight', 'price']
+    Products: ['weight', 'price'] # First value is the set attribute and the second one is the time sensitive one
 #  encoding: ['Customers', 'Employees']
   encoding: []
 
