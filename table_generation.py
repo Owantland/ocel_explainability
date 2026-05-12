@@ -519,7 +519,7 @@ class generateTables():
             print(f'Order: {vwpnt_object}')
             # Add all nodes to the graph
             graph = {}
-            ev_ids = []
+            past_events = []
             graph_dict = {}
             timestamps = []
 
@@ -565,7 +565,7 @@ class generateTables():
                 graph['Events'].append(encode)
                 all_timestamps.append(timestamp)
                 all_idx.append(vwpnt_cnt)
-                ev_ids.append(ev_idx)
+                past_events.append(ev_idx)
 
                 # Add the event_to_event edges to the graph
                 graph['event_to_event'] = self.generate_adjacency_list_with_k(ev_by_ob, ev_idx)
@@ -575,11 +575,12 @@ class generateTables():
                 tmp_graph = copy.deepcopy(graph)
                 for key in ev_by_ob.keys():
                     ob_id = key
-                    evs = ev_by_ob[ob_id]['Events']
+                    evs_by_ob = ev_by_ob[ob_id]['Events']
                     ob_type = ev_by_ob[ob_id]['Type'][0]
 
-                    for ev in evs:
-                        if ev in ev_ids:
+                    # Add the objects related to the event step
+                    for event_by_object in evs_by_ob:
+                        if event_by_object in past_events:
                             contained = True
                             break
                         else:
@@ -608,6 +609,23 @@ class generateTables():
                                     tmp_graph[ob_type].extend([ob_id])
                                 else:
                                     tmp_graph[ob_type].append([ob_id])
+
+                    # Add the object to event edges
+                    ob_events = [ev for ev in evs_by_ob if ev in past_events]
+                    if len(ob_events) > 0: # Only add edge if objects are present
+                        object = [ob_id for a in range(len(ob_events))]
+                        edge_type = f"{ob_type}_to_event"
+
+                        # If edge type doesn't exist then it's created
+                        try:
+                            len(tmp_graph[edge_type]) > 0
+                        except KeyError:
+                            tmp_graph[edge_type] = [[], []]
+
+                        tmp_graph[edge_type][0].extend(object)
+                        tmp_graph[edge_type][1].extend(ob_events)
+
+
                 # Add the event as a step
                 all_graphs.append(tmp_graph)
             print(all_graphs)
@@ -616,15 +634,6 @@ class generateTables():
 
 
             # # Add the edges
-            # # Event to Event
-            # for i, row in ev_df.iterrows():
-            #     ev_idx = row['index']
-            #     ev_id = row['ocel_id']
-            #     ev_type = row['type']
-            #     timestamp = row['timestamp']
-            #
-            #     graph['event_to_event'] = self.generate_adjacency_list_with_k(ev_by_ob, ev_idx)
-            #
             # # Objects to Events
             # for i, row in ob_df.iterrows():
             #     ob_id = row['ocel_id']
