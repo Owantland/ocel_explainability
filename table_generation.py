@@ -551,6 +551,7 @@ class generateTables():
                 ev_id = row['ocel_id']
                 ev_type = row['type']
                 timestamp = row['timestamp']
+                objects_in_event = []
 
                 # Check if the graph already has a list for the object type and, if not, create an empty list
                 try:
@@ -582,6 +583,7 @@ class generateTables():
                     for event_by_object in evs_by_ob:
                         if event_by_object in past_events:
                             contained = True
+                            objects_in_event.append(ob_id)
                             break
                         else:
                             contained = False
@@ -625,71 +627,49 @@ class generateTables():
                         tmp_graph[edge_type][0].extend(object)
                         tmp_graph[edge_type][1].extend(ob_events)
 
+                # Add object to object edge
+                objects_in_event= ob_df.loc[ob_df['ocel_id'].isin(objects_in_event)]
+                for relation in self.o2o_relations:
+                    ob_source = relation[0]
+                    ob_target = relation[1]
+                    sources = objects_in_event[objects_in_event['type'] == ob_source]
+                    targets = objects_in_event[objects_in_event['type'] == ob_target]
+
+                    if len(sources) > 0 and len(targets) > 0:
+                        edge_name = f'{ob_source}_to_{ob_target}'
+                        tmp_graph[edge_name] = [[],[]]
+
+                        for i, row in sources.iterrows():
+                            src_id = row['ocel_id']
+                            src_index = row['index']
+                            qry = f'''
+                                    SELECT
+                                        -- OO.OCEL_SOURCE_ID,
+                                        OO.OCEL_TARGET_ID
+                                        -- ,M.OCEL_TYPE_MAP
+                                    FROM OBJECT_OBJECT OO
+                                    JOIN OBJECT O ON OO.ocel_target_id = O.OCEL_ID
+                                    JOIN OBJECT_MAP_TYPE M ON O.OCEL_TYPE = M.OCEL_TYPE
+                                    WHERE
+                                        ocel_source_id = '{src_id}' AND
+                                        M.OCEL_TYPE_MAP = '{ob_target}'
+                                   '''
+                            self.cursor.execute(qry)
+                            trgt_ids = self.cursor.fetchall()
+
+                            for trgt_id in trgt_ids:
+                                trgt_id = trgt_id[0]
+                                tg_info = targets[targets['ocel_id'] == trgt_id].values
+                                if len(tg_info) > 0:
+                                    tg_index = tg_info[0][0]
+                                    tmp_graph[edge_name][0].append(src_index)
+                                    tmp_graph[edge_name][1].append(tg_index)
 
                 # Add the event as a step
                 all_graphs.append(tmp_graph)
             print(all_graphs)
             print(all_timestamps)
             print(all_idx)
-
-
-            # # Add the edges
-            # # Objects to Events
-            # for i, row in ob_df.iterrows():
-            #     ob_id = row['ocel_id']
-            #     ob_type = row['type']
-            #     ob_idx = row['index']
-            #
-            #     events = ev_by_ob[ob_id]
-            #     events = events['Events']
-            #     object = [ob_idx for a in range(len(events))]
-            #     edge_type = f"{ob_type}_to_event"
-            #
-            #     # If edge type doesn't exist then it's created
-            #     try:
-            #         len(graph[edge_type]) > 0
-            #     except KeyError:
-            #         graph[edge_type] = [[], []]
-            #
-            #     graph[edge_type][0].extend(object)
-            #     graph[edge_type][1].extend(events)
-            #
-            # # Object to object
-            # for relation in self.o2o_relations:
-            #     ob_source = relation[0]
-            #     ob_target = relation[1]
-            #
-            #     edge_name = f'{ob_source}_to_{ob_target}'
-            #     graph[edge_name] = [[],[]]
-            #
-            #     sources = ob_df[ob_df['type'] == ob_source]
-            #     targets = ob_df[ob_df['type'] == ob_target]
-            #
-            #     for i, row in sources.iterrows():
-            #         src_id = row['ocel_id']
-            #         src_index = row['index']
-            #         qry = f'''
-            #                 SELECT
-            #                     -- OO.OCEL_SOURCE_ID,
-            #                     OO.OCEL_TARGET_ID
-            #                     -- ,M.OCEL_TYPE_MAP
-            #                 FROM OBJECT_OBJECT OO
-            #                 JOIN OBJECT O ON OO.ocel_target_id = O.OCEL_ID
-            #                 JOIN OBJECT_MAP_TYPE M ON O.OCEL_TYPE = M.OCEL_TYPE
-            #                 WHERE
-            #                     ocel_source_id = '{src_id}' AND
-            #                     M.OCEL_TYPE_MAP = '{ob_target}'
-            #                '''
-            #         self.cursor.execute(qry)
-            #         trgt_ids = self.cursor.fetchall()
-            #
-            #         for trgt_id in trgt_ids:
-            #             trgt_id = trgt_id[0]
-            #             tg_info = targets[targets['ocel_id'] == trgt_id].values
-            #             if len(tg_info) > 0:
-            #                 tg_index = tg_info[0][0]
-            #                 graph[edge_name][0].append(src_index)
-            #                 graph[edge_name][1].append(tg_index)
 
             # # Update the dictionary with the graph and its associated timestamps
             # graph_dict['graph'] = graph
