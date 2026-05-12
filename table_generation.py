@@ -511,11 +511,12 @@ class generateTables():
         nodes = self.related_nodes()
         all_timestamps = []
         all_idx = []
-        vwpnt_cnt = 1
+        vwpnt_cnt = 0
         log_frames = []
         all_graphs = []
 
         for vwpnt_object in nodes.keys():
+            print(f'Order: {vwpnt_object}')
             # Add all nodes to the graph
             graph = {}
             ev_ids = []
@@ -531,13 +532,13 @@ class generateTables():
             ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
 
             # Create the event log file
+            vwpnt_cnt += 1
             id_col = [vwpnt_cnt for _ in range(len(ev_df.index))]
             ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
             ev_log = ev_df[['ocel_id', 'type', 'timestamp']]
             ev_log['vwpnt_id'] = id_col
             ev_log['ob_id'] = ob_id
             log_frames.append(ev_log)
-            vwpnt_cnt += 1
 
             # Always add the viewpoint object first
             attributes = self.get_attributes(vwpnt_object, self.viewpoint, self.attributes[self.viewpoint])
@@ -563,10 +564,15 @@ class generateTables():
                 encode.append(timestamp)
                 graph['Events'].append(encode)
                 all_timestamps.append(timestamp)
+                all_idx.append(vwpnt_cnt)
                 ev_ids.append(ev_idx)
 
-                contained = False
+                # Add the event_to_event edges to the graph
+                graph['event_to_event'] = self.generate_adjacency_list_with_k(ev_by_ob, ev_idx)
+
                 # We've got the events step by step, now we add the objects related to each step
+                contained = False
+                tmp_graph = copy.deepcopy(graph)
                 for key in ev_by_ob.keys():
                     ob_id = key
                     evs = ev_by_ob[ob_id]['Events']
@@ -575,18 +581,19 @@ class generateTables():
                     for ev in evs:
                         if ev in ev_ids:
                             contained = True
-                            break # Finish checking as soon as we see the object should be included
+                            break
                         else:
                             contained = False
+
                     if contained:
                         if ob_type == self.viewpoint:
                             pass
                         else:
                             # Check if the graph already has a list for the object type and, if not, create an empty list
                             try:
-                                len(graph[ob_type]) > 0
+                                len(tmp_graph[ob_type]) > 0
                             except KeyError:
-                                graph[ob_type] = []
+                                tmp_graph[ob_type] = []
 
                             # Add the desired attributes for each object type
                             # Need to remove the one hot encoding
@@ -594,48 +601,20 @@ class generateTables():
                                 attr = self.attributes[ob_type]
                                 attributes = self.get_attributes(ob_id, ob_type, attr)
                                 attributes.append(ob_id)
-                                graph[ob_type].append(attributes)
+                                tmp_graph[ob_type].append(attributes)
                             except KeyError:
                                 if ob_type in self.to_encode:
                                     ob_id = self.encodings[ob_type][ob_id]
-                                    graph[ob_type].extend([ob_id])
+                                    tmp_graph[ob_type].extend([ob_id])
                                 else:
-                                    graph[ob_type].append([ob_id])
+                                    tmp_graph[ob_type].append([ob_id])
                 # Add the event as a step
-                tmp_graph = copy.deepcopy(graph)
                 all_graphs.append(tmp_graph)
-                print(tmp_graph)
-        # print(all_graphs)
-        # print(all_timestamps)
+            print(all_graphs)
+            print(all_timestamps)
+            print(all_idx)
 
 
-            # # Add objects
-            # for i, row in ob_df.iterrows():
-            #     ob_id = row['ocel_id']
-            #     ob_type = row['type']
-            #
-            #     if ob_type == self.viewpoint:
-            #         pass
-            #     else:
-            #         # Check if the graph already has a list for the object type and, if not, create an empty list
-            #         try:
-            #             len(graph[ob_type]) > 0
-            #         except KeyError:
-            #             graph[ob_type] = []
-            #
-            #         # Add the desired attributes for each object type
-            #         try:
-            #             attr = self.attributes[ob_type]
-            #             attributes = self.get_attributes(ob_id, ob_type, attr)
-            #             attributes.append(ob_id)
-            #             graph[ob_type].append(attributes)
-            #         except KeyError:
-            #             if ob_type in self.to_encode:
-            #                 ob_id = self.encodings[ob_type][ob_id]
-            #                 graph[ob_type].extend([ob_id])
-            #             else:
-            #                 graph[ob_type].append([ob_id])
-            #
             # # Add the edges
             # # Event to Event
             # for i, row in ev_df.iterrows():

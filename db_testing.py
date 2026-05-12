@@ -10,7 +10,7 @@ import hetero_generator as hg
 from collections import defaultdict
 
 # MAIN
-CANT = 20
+CANT = 5
 database = 'order_management'
 tbl = tg.generateTables(database, CANT)
 # all_graphs = tbl.create_graph()
