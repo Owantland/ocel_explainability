@@ -36,6 +36,7 @@ class generateTables():
         self.viewpoint = db_configs[self.database]['viewpoint']
         self.depth = db_configs[self.database]['added_depth']
         self.attributes = db_configs[self.database]['attributes']
+        self.time_attributes = db_configs[self.database]['time_attributes']
         self.to_encode = db_configs[self.database]['encoding']
 
     def get_encodings(self):
@@ -63,6 +64,47 @@ class generateTables():
                 WHERE {cols[0]} = '{node_id}'
                '''
 
+        self.cursor.execute(qry)
+        attrs = self.cursor.fetchall()
+        attrs = [attr for attr in attrs[0]]
+        return attrs
+
+    def get_time_attributes(self, node_id, type, fixed_attr, time_attr, timestamp):
+        table = f'object_{type}'
+        cols = self.col_names(table)
+
+        if len(cols) == 0:
+            table = f'event_{type}'
+            cols = self.col_names(table)
+
+        qry = f"""
+                WITH RankedData AS (
+                SELECT
+                    {cols[0]},
+                    {fixed_attr},
+                    {time_attr},
+                    ROW_NUMBER() OVER (
+                        PARTITION BY {cols[0]}
+                        ORDER BY ABS(STRFTIME('%s', {cols[1]}) - STRFTIME('%s', '{timestamp}')) ASC
+                    ) AS rank
+                FROM {table}
+                ),
+                FixedWeights AS (
+                    SELECT
+                        {cols[0]} AS item,
+                        {fixed_attr} 
+                    FROM {table}
+                    WHERE {cols[3]} IS NOT NULL
+                    GROUP BY {cols[0]}
+                )
+                SELECT
+                    COALESCE(RankedData.{fixed_attr}, FixedWeights.{fixed_attr}) AS {fixed_attr},
+                    RankedData.{cols[4]}
+                FROM RankedData
+                LEFT JOIN FixedWeights
+                ON RankedData.{cols[0]} = FixedWeights.item
+                WHERE RankedData.rank = 1 AND {cols[0]} = '{node_id}';
+                """
         self.cursor.execute(qry)
         attrs = self.cursor.fetchall()
         attrs = [attr for attr in attrs[0]]
@@ -516,7 +558,6 @@ class generateTables():
         all_graphs = []
 
         for vwpnt_object in nodes.keys():
-            print(f'Order: {vwpnt_object}')
             # Add all nodes to the graph
             graph = {}
             past_events = []
@@ -599,18 +640,25 @@ class generateTables():
                                 tmp_graph[ob_type] = []
 
                             # Add the desired attributes for each object type
-                            # Need to remove the one hot encoding
+                            # Need to add time sensitive attributes like the one for product
                             try:
                                 attr = self.attributes[ob_type]
                                 attributes = self.get_attributes(ob_id, ob_type, attr)
                                 attributes.append(ob_id)
                                 tmp_graph[ob_type].append(attributes)
                             except KeyError:
-                                if ob_type in self.to_encode:
-                                    ob_id = self.encodings[ob_type][ob_id]
-                                    tmp_graph[ob_type].extend([ob_id])
-                                else:
-                                    tmp_graph[ob_type].append([ob_id])
+                                try:
+                                    attr = self.time_attributes[ob_type]
+                                    time_attr = attr[1]
+                                    fixed_attrs = attr[0]
+                                    attributes = self.get_time_attributes(ob_id, ob_type, fixed_attrs, time_attr, timestamp)
+                                    tmp_graph[ob_type].append(attributes)
+                                except KeyError:
+                                    if ob_type in self.to_encode:
+                                        ob_id = self.encodings[ob_type][ob_id]
+                                        tmp_graph[ob_type].extend([ob_id])
+                                    else:
+                                        tmp_graph[ob_type].append([ob_id])
 
                     # Add the object to event edges
                     ob_events = [ev for ev in evs_by_ob if ev in past_events]
@@ -667,16 +715,7 @@ class generateTables():
 
                 # Add the event as a step
                 all_graphs.append(tmp_graph)
-            print(all_graphs)
-            print(all_timestamps)
-            print(all_idx)
 
-            # # Update the dictionary with the graph and its associated timestamps
-            # graph_dict['graph'] = graph
-            # graph_dict['timestamps'] = timestamps
-            #
-            # all_graphs[vwpnt_object] = graph_dict
-            # print(all_graphs)
-        # ev_log = pd.concat(log_frames)
-        # ev_log.to_csv(self.ev_output, index=False)
-        # return all_graphs
+        ev_log = pd.concat(log_frames)
+        ev_log.to_csv(self.ev_output, index=False)
+        return all_graphs, all_timestamps, all_idx
