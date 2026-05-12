@@ -10,8 +10,8 @@ order_management:
     Orders: ['price', 'ocel_time']
     Items: ['weight', 'price']
     Packages: ['weight']
-  encoding: ['Customers', 'Employees']
-
+#  encoding: ['Customers', 'Employees']
+  encoding: []
 
 logistics:
   viewpoint: "CustomerOrder"
@@ -23,6 +23,7 @@ logistics:
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:
     CustomerOrder: ['AmountofGoods']
+  encoding: []
 
 
 aoe:
@@ -33,6 +34,7 @@ aoe:
   ob_output_path: "files/output_tables/aoe_ob_table.csv"
   ocel_output_path: "files/output_tables/aoe_ocel.csv"
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
+  encoding: []
 
 
 iot:
@@ -43,3 +45,4 @@ iot:
   ob_output_path: "files/output_tables/iot_ob_table.csv"
   ocel_output_path: "files/output_tables/iot_ocel.csv"
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type', 'event_IoTobject', 'object_IoTobject']
+  encoding: []

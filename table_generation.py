@@ -6,6 +6,7 @@ import sqlite3
 import numpy as np
 import yaml
 import pandas as pd
+import copy
 
 from collections import defaultdict
 
@@ -508,18 +509,19 @@ class generateTables():
 
     def create_graph(self):
         nodes = self.related_nodes()
-        all_graphs = {}
         all_timestamps = []
         all_idx = []
         vwpnt_cnt = 1
         log_frames = []
+        all_graphs = []
 
         for vwpnt_object in nodes.keys():
             # Add all nodes to the graph
-            graph_dict = {}
             graph = {}
+            ev_ids = []
+            graph_dict = {}
             timestamps = []
-            idx = []
+
             rltd_objects = nodes[vwpnt_object]['related_objects']
             ob_df = pd.DataFrame(rltd_objects, columns=['index', 'ocel_id', 'type'])
 
@@ -542,34 +544,7 @@ class generateTables():
             attributes.append(vwpnt_object)
             graph[self.viewpoint] = [attributes]
 
-            # Add objects
-            for i, row in ob_df.iterrows():
-                ob_id = row['ocel_id']
-                ob_type = row['type']
-
-                if ob_type == self.viewpoint:
-                    pass
-                else:
-                    # Check if the graph already has a list for the object type and, if not, create an empty list
-                    try:
-                        len(graph[ob_type]) > 0
-                    except KeyError:
-                        graph[ob_type] = []
-
-                    # Add the desired attributes for each object type
-                    try:
-                        attr = self.attributes[ob_type]
-                        attributes = self.get_attributes(ob_id, ob_type, attr)
-                        attributes.append(ob_id)
-                        graph[ob_type].append(attributes)
-                    except KeyError:
-                        if ob_type in self.to_encode:
-                            ob_id = self.encodings[ob_type][ob_id]
-                            graph[ob_type].extend([ob_id])
-                        else:
-                            graph[ob_type].append([ob_id])
-
-            # Add the events
+            # Create a new graph for every event in the process
             for i, row in ev_df.iterrows():
                 ev_idx = row['index']
                 ev_id = row['ocel_id']
@@ -587,80 +562,153 @@ class generateTables():
                 encode.append(ev_id)
                 encode.append(timestamp)
                 graph['Events'].append(encode)
-                timestamps.append(timestamp)
+                all_timestamps.append(timestamp)
+                ev_ids.append(ev_idx)
 
-            # Add the edges
-            # Event to Event
-            for i, row in ev_df.iterrows():
-                ev_idx = row['index']
-                ev_id = row['ocel_id']
-                ev_type = row['type']
-                timestamp = row['timestamp']
+                contained = False
+                # We've got the events step by step, now we add the objects related to each step
+                for key in ev_by_ob.keys():
+                    ob_id = key
+                    evs = ev_by_ob[ob_id]['Events']
+                    ob_type = ev_by_ob[ob_id]['Type'][0]
 
-                graph['event_to_event'] = self.generate_adjacency_list_with_k(ev_by_ob, ev_idx)
+                    for ev in evs:
+                        if ev in ev_ids:
+                            contained = True
+                            break # Finish checking as soon as we see the object should be included
+                        else:
+                            contained = False
+                    if contained:
+                        if ob_type == self.viewpoint:
+                            pass
+                        else:
+                            # Check if the graph already has a list for the object type and, if not, create an empty list
+                            try:
+                                len(graph[ob_type]) > 0
+                            except KeyError:
+                                graph[ob_type] = []
 
-            # Objects to Events
-            for i, row in ob_df.iterrows():
-                ob_id = row['ocel_id']
-                ob_type = row['type']
-                ob_idx = row['index']
+                            # Add the desired attributes for each object type
+                            # Need to remove the one hot encoding
+                            try:
+                                attr = self.attributes[ob_type]
+                                attributes = self.get_attributes(ob_id, ob_type, attr)
+                                attributes.append(ob_id)
+                                graph[ob_type].append(attributes)
+                            except KeyError:
+                                if ob_type in self.to_encode:
+                                    ob_id = self.encodings[ob_type][ob_id]
+                                    graph[ob_type].extend([ob_id])
+                                else:
+                                    graph[ob_type].append([ob_id])
+                # Add the event as a step
+                tmp_graph = copy.deepcopy(graph)
+                all_graphs.append(tmp_graph)
+                print(tmp_graph)
+        # print(all_graphs)
+        # print(all_timestamps)
 
-                events = ev_by_ob[ob_id]
-                events = events['Events']
-                object = [ob_idx for a in range(len(events))]
-                edge_type = f"{ob_type}_to_event"
 
-                # If edge type doesn't exist then it's created
-                try:
-                    len(graph[edge_type]) > 0
-                except KeyError:
-                    graph[edge_type] = [[], []]
+            # # Add objects
+            # for i, row in ob_df.iterrows():
+            #     ob_id = row['ocel_id']
+            #     ob_type = row['type']
+            #
+            #     if ob_type == self.viewpoint:
+            #         pass
+            #     else:
+            #         # Check if the graph already has a list for the object type and, if not, create an empty list
+            #         try:
+            #             len(graph[ob_type]) > 0
+            #         except KeyError:
+            #             graph[ob_type] = []
+            #
+            #         # Add the desired attributes for each object type
+            #         try:
+            #             attr = self.attributes[ob_type]
+            #             attributes = self.get_attributes(ob_id, ob_type, attr)
+            #             attributes.append(ob_id)
+            #             graph[ob_type].append(attributes)
+            #         except KeyError:
+            #             if ob_type in self.to_encode:
+            #                 ob_id = self.encodings[ob_type][ob_id]
+            #                 graph[ob_type].extend([ob_id])
+            #             else:
+            #                 graph[ob_type].append([ob_id])
+            #
+            # # Add the edges
+            # # Event to Event
+            # for i, row in ev_df.iterrows():
+            #     ev_idx = row['index']
+            #     ev_id = row['ocel_id']
+            #     ev_type = row['type']
+            #     timestamp = row['timestamp']
+            #
+            #     graph['event_to_event'] = self.generate_adjacency_list_with_k(ev_by_ob, ev_idx)
+            #
+            # # Objects to Events
+            # for i, row in ob_df.iterrows():
+            #     ob_id = row['ocel_id']
+            #     ob_type = row['type']
+            #     ob_idx = row['index']
+            #
+            #     events = ev_by_ob[ob_id]
+            #     events = events['Events']
+            #     object = [ob_idx for a in range(len(events))]
+            #     edge_type = f"{ob_type}_to_event"
+            #
+            #     # If edge type doesn't exist then it's created
+            #     try:
+            #         len(graph[edge_type]) > 0
+            #     except KeyError:
+            #         graph[edge_type] = [[], []]
+            #
+            #     graph[edge_type][0].extend(object)
+            #     graph[edge_type][1].extend(events)
+            #
+            # # Object to object
+            # for relation in self.o2o_relations:
+            #     ob_source = relation[0]
+            #     ob_target = relation[1]
+            #
+            #     edge_name = f'{ob_source}_to_{ob_target}'
+            #     graph[edge_name] = [[],[]]
+            #
+            #     sources = ob_df[ob_df['type'] == ob_source]
+            #     targets = ob_df[ob_df['type'] == ob_target]
+            #
+            #     for i, row in sources.iterrows():
+            #         src_id = row['ocel_id']
+            #         src_index = row['index']
+            #         qry = f'''
+            #                 SELECT
+            #                     -- OO.OCEL_SOURCE_ID,
+            #                     OO.OCEL_TARGET_ID
+            #                     -- ,M.OCEL_TYPE_MAP
+            #                 FROM OBJECT_OBJECT OO
+            #                 JOIN OBJECT O ON OO.ocel_target_id = O.OCEL_ID
+            #                 JOIN OBJECT_MAP_TYPE M ON O.OCEL_TYPE = M.OCEL_TYPE
+            #                 WHERE
+            #                     ocel_source_id = '{src_id}' AND
+            #                     M.OCEL_TYPE_MAP = '{ob_target}'
+            #                '''
+            #         self.cursor.execute(qry)
+            #         trgt_ids = self.cursor.fetchall()
+            #
+            #         for trgt_id in trgt_ids:
+            #             trgt_id = trgt_id[0]
+            #             tg_info = targets[targets['ocel_id'] == trgt_id].values
+            #             if len(tg_info) > 0:
+            #                 tg_index = tg_info[0][0]
+            #                 graph[edge_name][0].append(src_index)
+            #                 graph[edge_name][1].append(tg_index)
 
-                graph[edge_type][0].extend(object)
-                graph[edge_type][1].extend(events)
-
-            # Object to object
-            for relation in self.o2o_relations:
-                ob_source = relation[0]
-                ob_target = relation[1]
-
-                edge_name = f'{ob_source}_to_{ob_target}'
-                graph[edge_name] = [[],[]]
-
-                sources = ob_df[ob_df['type'] == ob_source]
-                targets = ob_df[ob_df['type'] == ob_target]
-
-                for i, row in sources.iterrows():
-                    src_id = row['ocel_id']
-                    src_index = row['index']
-                    qry = f'''
-                            SELECT
-                                -- OO.OCEL_SOURCE_ID,
-                                OO.OCEL_TARGET_ID
-                                -- ,M.OCEL_TYPE_MAP
-                            FROM OBJECT_OBJECT OO
-                            JOIN OBJECT O ON OO.ocel_target_id = O.OCEL_ID
-                            JOIN OBJECT_MAP_TYPE M ON O.OCEL_TYPE = M.OCEL_TYPE
-                            WHERE
-                                ocel_source_id = '{src_id}' AND
-                                M.OCEL_TYPE_MAP = '{ob_target}'
-                           '''
-                    self.cursor.execute(qry)
-                    trgt_ids = self.cursor.fetchall()
-
-                    for trgt_id in trgt_ids:
-                        trgt_id = trgt_id[0]
-                        tg_info = targets[targets['ocel_id'] == trgt_id].values
-                        if len(tg_info) > 0:
-                            tg_index = tg_info[0][0]
-                            graph[edge_name][0].append(src_index)
-                            graph[edge_name][1].append(tg_index)
-
-            # Update the dictionary with the graph and its associated timestamps
-            graph_dict['graph'] = graph
-            graph_dict['timestamps'] = timestamps
-
-            all_graphs[vwpnt_object] = graph_dict
-        ev_log = pd.concat(log_frames)
-        ev_log.to_csv(self.ev_output, index=False)
-        return all_graphs
+            # # Update the dictionary with the graph and its associated timestamps
+            # graph_dict['graph'] = graph
+            # graph_dict['timestamps'] = timestamps
+            #
+            # all_graphs[vwpnt_object] = graph_dict
+            # print(all_graphs)
+        # ev_log = pd.concat(log_frames)
+        # ev_log.to_csv(self.ev_output, index=False)
+        # return all_graphs

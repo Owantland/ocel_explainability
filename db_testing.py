@@ -10,13 +10,14 @@ import hetero_generator as hg
 from collections import defaultdict
 
 # MAIN
-CANT = 200
+CANT = 20
 database = 'order_management'
 tbl = tg.generateTables(database, CANT)
-all_graphs = tbl.create_graph()
+# all_graphs = tbl.create_graph()
+tbl.create_graph()
 
-ttb = tb.TrainTestBuilder(database, CANT)
-train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps = ttb.timestamps_generator()
-
-hgg = hg.HeteroGraphsGenerator(database, CANT, all_graphs, train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps)
-hgg.generate_graphs()
+# ttb = tb.TrainTestBuilder(database, CANT)
+# train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps = ttb.timestamps_generator()
+#
+# hgg = hg.HeteroGraphsGenerator(database, CANT, all_graphs, train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps)
+# hgg.generate_graphs()
