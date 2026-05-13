@@ -15,8 +15,8 @@ database = 'order_management'
 tbl = tg.generateTables(database, CANT)
 all_graphs, all_timestamps, all_idx = tbl.create_graph()
 
-# timestamp = '2023-05-13 16:52:54'
-# print(all_graphs[(all_timestamps <= timestamp) & (all_idx == 95)])
+timestamp = '2023-05-13 16:52:54'
+print(all_graphs[(all_timestamps <= timestamp) & (all_idx == 95)])
 
 # We have the step by step for each graph, now we can work with the timestamps
 # ttb = tb.TrainTestBuilder(database, CANT)

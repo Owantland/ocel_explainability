@@ -561,8 +561,6 @@ class generateTables():
             # Add all nodes to the graph
             graph = {}
             past_events = []
-            graph_dict = {}
-            timestamps = []
 
             rltd_objects = nodes[vwpnt_object]['related_objects']
             ob_df = pd.DataFrame(rltd_objects, columns=['index', 'ocel_id', 'type'])
@@ -648,7 +646,6 @@ class generateTables():
                             try:
                                 attr = self.attributes[ob_type]
                                 attributes = self.get_attributes(ob_id, ob_type, attr)
-                                attributes.append(ob_id)
                                 attributes.append(ob_idx)
                                 tmp_graph[ob_type].append(attributes)
                             except KeyError:
@@ -683,10 +680,8 @@ class generateTables():
 
                 # Sort the objects according to their index
                 for ob_type in ob_types:
-                    print(f'Objects: {tmp_graph[ob_type]}')
-                    tmp_graph[ob_type] = sorted(tmp_graph[ob_type], key=lambda x: (x[1], x[0]))
+                    tmp_graph[ob_type] = sorted(tmp_graph[ob_type], key=lambda x: (x[-1], x[0]))
                     tmp_graph[ob_type] = [x[:-1] for x in tmp_graph[ob_type]]
-                    print(f'Sorted: {tmp_graph[ob_type]}')
 
                 # Add object to object edge
                 objects_in_event= ob_df.loc[ob_df['ocel_id'].isin(objects_in_event)]
