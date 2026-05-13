@@ -715,9 +715,14 @@ class generateTables():
                                     tmp_graph[edge_name][1].append(tg_index)
 
                 # Add the event as a step
-                print(all_graphs)
+                # print(all_graphs)
                 all_graphs.append(tmp_graph)
 
         ev_log = pd.concat(log_frames)
         ev_log.to_csv(self.ev_output, index=False)
+
+        # Convert the lists into Numpy Arrays to make it easier to filter them later
+        all_graphs = np.array(all_graphs)
+        all_timestamps = np.array(all_timestamps)
+        all_idx = np.array(all_idx)
         return all_graphs, all_timestamps, all_idx
