@@ -615,16 +615,20 @@ class generateTables():
                 # We've got the events step by step, now we add the objects related to each step
                 contained = False
                 tmp_graph = copy.deepcopy(graph)
+                ob_types = set()
                 for key in ev_by_ob.keys():
                     ob_id = key
                     evs_by_ob = ev_by_ob[ob_id]['Events']
                     ob_type = ev_by_ob[ob_id]['Type'][0]
+                    ob_idx = int(ob_df[ob_df['ocel_id'] == ob_id]['index'].values[0])
 
+                    tst = []
                     # Add the objects related to the event step
                     for event_by_object in evs_by_ob:
                         if event_by_object in past_events:
                             contained = True
                             objects_in_event.append(ob_id)
+                            ob_types.add(ob_type)
                             break
                         else:
                             contained = False
@@ -645,6 +649,7 @@ class generateTables():
                                 attr = self.attributes[ob_type]
                                 attributes = self.get_attributes(ob_id, ob_type, attr)
                                 attributes.append(ob_id)
+                                attributes.append(ob_idx)
                                 tmp_graph[ob_type].append(attributes)
                             except KeyError:
                                 try:
@@ -652,18 +657,18 @@ class generateTables():
                                     time_attr = attr[1]
                                     fixed_attrs = attr[0]
                                     attributes = self.get_time_attributes(ob_id, ob_type, fixed_attrs, time_attr, timestamp)
+                                    attributes.append(ob_idx)
                                     tmp_graph[ob_type].append(attributes)
                                 except KeyError:
                                     if ob_type in self.to_encode:
                                         ob_id = self.encodings[ob_type][ob_id]
-                                        tmp_graph[ob_type].extend([ob_id])
+                                        tmp_graph[ob_type].extend([ob_id, ob_idx])
                                     else:
-                                        tmp_graph[ob_type].append([ob_id])
+                                        tmp_graph[ob_type].append([ob_id, ob_idx])
 
                     # Add the object to event edges
                     ob_events = [ev for ev in evs_by_ob if ev in past_events]
                     if len(ob_events) > 0: # Only add edge if objects are present
-                        ob_idx = ob_df[ob_df['ocel_id'] == ob_id]['index'].values[0]
                         object = [int(ob_idx) for a in range(len(ob_events))]
                         edge_type = f"{ob_type}_to_event"
 
@@ -675,6 +680,13 @@ class generateTables():
 
                         tmp_graph[edge_type][0].extend(object)
                         tmp_graph[edge_type][1].extend(ob_events)
+
+                # Sort the objects according to their index
+                for ob_type in ob_types:
+                    print(f'Objects: {tmp_graph[ob_type]}')
+                    tmp_graph[ob_type] = sorted(tmp_graph[ob_type], key=lambda x: (x[1], x[0]))
+                    tmp_graph[ob_type] = [x[:-1] for x in tmp_graph[ob_type]]
+                    print(f'Sorted: {tmp_graph[ob_type]}')
 
                 # Add object to object edge
                 objects_in_event= ob_df.loc[ob_df['ocel_id'].isin(objects_in_event)]
@@ -715,9 +727,7 @@ class generateTables():
                                     tmp_graph[edge_name][1].append(tg_index)
 
                 # Add the event as a step
-                # print(all_graphs)
                 all_graphs.append(tmp_graph)
-
         ev_log = pd.concat(log_frames)
         ev_log.to_csv(self.ev_output, index=False)
 
