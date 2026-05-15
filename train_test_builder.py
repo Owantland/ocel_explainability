@@ -6,26 +6,37 @@ class TrainTestBuilder():
         self.database = database
         self.cant = CANT
         self.num_vp_obj = self.cant
-
         self.get_paths()
 
+        self.pd_active_orders = self.get_active_orders()
+
+        # Assigns train/test split values
+        self.index_train = round(0.6 * self.cant)
+        self.split_test_index = .9
+        self.step_size = round(200 * (self.cant / 2000)) #Step size is about 10% of the total data
+
+    def get_active_orders(self):
         # Finds the timeframe for each order and puts them in chronological order
+        # depending on when their last related event occurs
         active_orders = []
         for i in range(self.num_vp_obj):
-            temp = self.pd_df[self.pd_df['vwpnt_id'] == i + 1]
-            active_orders.append([i + 1, temp.iloc[0, 2], temp.iloc[-1, 2]])
+            vwpnt_id = i+1
+            temp = self.pd_df[self.pd_df['vwpnt_id'] == vwpnt_id]
+            start_time = temp.iloc[0,2]
 
-        self.pd_active_orders = pd.DataFrame(active_orders)
-        self.pd_active_orders.sort_values(by=2, inplace=True)
-        self.index_train = round(1220 * (self.cant / 2000))
-        self.split_test_index = .45
-        self.step_size = round(200 * (self.cant / 2000))
+            temp = temp[temp['type'] == self.end_event]
+            end_time = temp.iloc[-1, 2]
+            active_orders.append([vwpnt_id, start_time, end_time])
+        pd_active_orders = pd.DataFrame(active_orders)
+        pd_active_orders.sort_values(by=2, inplace=True)
+        return pd_active_orders
 
     def get_paths(self):
         with open('files/config.yml', 'r') as file:
             db_configs = yaml.safe_load(file)
 
         self.output_path = db_configs[self.database]['ev_output_path']
+        self.end_event = db_configs[self.database]['end_event']
         self.pd_df = pd.read_csv(self.output_path)
 
     def sample_equally(self, input_list, num_samples):
@@ -40,21 +51,32 @@ class TrainTestBuilder():
         return sampled_list
 
     def timestamps_generator(self):
-
+        # Finds the timestamp related to the chosen train/test split
         split_timestamp = self.pd_active_orders.iloc[self.index_train, 2]
 
+        # Finds the timestamp for the last finished event among the training data.
+        # Because the testing data will only include elements from processes that occur
+        # after the end of the last training data
         last_timestamp = max(self.pd_active_orders.iloc[:self.index_train, 2])
 
+        # Perform the train/test split on the data
+        # Train orders are those that occur our split value
         train_orders = self.pd_active_orders[self.pd_active_orders[2] <= split_timestamp][0]
+        # Test orders are those that begin after the end of the last event contained in the training data
         test_orders = self.pd_active_orders[self.pd_active_orders[1] > last_timestamp][0]
+
+        # Splits the test orders into test and validation groups given a chosen percentage
         index_test = self.index_train + int(len(test_orders) * self.split_test_index)
         split_timestamp_val = self.pd_active_orders.iloc[index_test, 2]
-
         last_timestamp_val = max(self.pd_active_orders.iloc[self.index_train: index_test, 2])
 
+        print(f'Has to begin after this: {last_timestamp}')
+        print(f'Orders that begin after: {self.pd_active_orders[(self.pd_active_orders[1] > last_timestamp)]}')
+        print(f'And finish before this: {split_timestamp_val}')
         val_orders = self.pd_active_orders[
             (self.pd_active_orders[1] > last_timestamp) & (self.pd_active_orders[2] <= split_timestamp_val)][0]
         test_orders = self.pd_active_orders[self.pd_active_orders[1] > last_timestamp_val][0]
+        print(f'val_orders: {val_orders}')
 
         train_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(train_orders.values)]['timestamp'].values
         val_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(val_orders.values)]['timestamp'].values
