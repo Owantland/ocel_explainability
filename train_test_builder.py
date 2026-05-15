@@ -12,8 +12,8 @@ class TrainTestBuilder():
 
         # Assigns train/test split values
         self.index_train = round(0.6 * self.cant)
-        self.split_test_index = .9
-        self.step_size = round(200 * (self.cant / 2000)) #Step size is about 10% of the total data
+        self.split_test_index = .5
+        self.step_size = round(0.1 * self.cant) #Step size is about 10% of the total data
 
     def get_active_orders(self):
         # Finds the timeframe for each order and puts them in chronological order
@@ -21,12 +21,20 @@ class TrainTestBuilder():
         active_orders = []
         for i in range(self.num_vp_obj):
             vwpnt_id = i+1
+            print(vwpnt_id)
             temp = self.pd_df[self.pd_df['vwpnt_id'] == vwpnt_id]
             start_time = temp.iloc[0,2]
 
+            # Select the final event of the chosen type for marking the end time of the process
             temp = temp[temp['type'] == self.end_event]
             end_time = temp.iloc[-1, 2]
             active_orders.append([vwpnt_id, start_time, end_time])
+
+            # Curtail the dataframe to avoid events that happen after our chosen end event
+            del_index = self.pd_df[(self.pd_df['vwpnt_id'] == vwpnt_id) & (self.pd_df['timestamp'] > end_time)].index
+            self.pd_df = self.pd_df.drop(del_index, inplace=False)
+            self.pd_df.to_csv('tst.csv', index=False)
+
         pd_active_orders = pd.DataFrame(active_orders)
         pd_active_orders.sort_values(by=2, inplace=True)
         return pd_active_orders
@@ -70,13 +78,9 @@ class TrainTestBuilder():
         split_timestamp_val = self.pd_active_orders.iloc[index_test, 2]
         last_timestamp_val = max(self.pd_active_orders.iloc[self.index_train: index_test, 2])
 
-        print(f'Has to begin after this: {last_timestamp}')
-        print(f'Orders that begin after: {self.pd_active_orders[(self.pd_active_orders[1] > last_timestamp)]}')
-        print(f'And finish before this: {split_timestamp_val}')
         val_orders = self.pd_active_orders[
             (self.pd_active_orders[1] > last_timestamp) & (self.pd_active_orders[2] <= split_timestamp_val)][0]
         test_orders = self.pd_active_orders[self.pd_active_orders[1] > last_timestamp_val][0]
-        print(f'val_orders: {val_orders}')
 
         train_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(train_orders.values)]['timestamp'].values
         val_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(val_orders.values)]['timestamp'].values

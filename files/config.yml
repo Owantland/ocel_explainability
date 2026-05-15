@@ -1,6 +1,7 @@
 order_management:
   viewpoint: "Orders"
-  end_event: 'PayOrder'
+#  end_event: 'PayOrder'
+  end_event: 'SendPackage'
   added_depth: False
   ocel_path: "files/databases/order_management.sqlite"
   ev_output_path: "files/output_tables/om_ev_table.csv"
