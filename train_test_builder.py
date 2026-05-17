@@ -21,7 +21,6 @@ class TrainTestBuilder():
         active_orders = []
         for i in range(self.num_vp_obj):
             vwpnt_id = i+1
-            print(vwpnt_id)
             temp = self.pd_df[self.pd_df['vwpnt_id'] == vwpnt_id]
             start_time = temp.iloc[0,2]
 
@@ -33,7 +32,6 @@ class TrainTestBuilder():
             # Curtail the dataframe to avoid events that happen after our chosen end event
             del_index = self.pd_df[(self.pd_df['vwpnt_id'] == vwpnt_id) & (self.pd_df['timestamp'] > end_time)].index
             self.pd_df = self.pd_df.drop(del_index, inplace=False)
-            self.pd_df.to_csv('tst.csv', index=False)
 
         pd_active_orders = pd.DataFrame(active_orders)
         pd_active_orders.sort_values(by=2, inplace=True)
@@ -55,23 +53,18 @@ class TrainTestBuilder():
             return input_list
         step = int((len(input_list) - 1) / (num_samples - 1))
         sampled_list = [input_list[i * step] for i in range(num_samples)]
-
         return sampled_list
 
     def timestamps_generator(self):
         # Finds the timestamp related to the chosen train/test split
         split_timestamp = self.pd_active_orders.iloc[self.index_train, 2]
-
-        # Finds the timestamp for the last finished event among the training data.
-        # Because the testing data will only include elements from processes that occur
-        # after the end of the last training data
-        last_timestamp = max(self.pd_active_orders.iloc[:self.index_train, 2])
+        print(split_timestamp)
 
         # Perform the train/test split on the data
-        # Train orders are those that occur our split value
+        # Train orders are those that occur before our split value
         train_orders = self.pd_active_orders[self.pd_active_orders[2] <= split_timestamp][0]
         # Test orders are those that begin after the end of the last event contained in the training data
-        test_orders = self.pd_active_orders[self.pd_active_orders[1] > last_timestamp][0]
+        test_orders = self.pd_active_orders[self.pd_active_orders[1] > split_timestamp][0]
 
         # Splits the test orders into test and validation groups given a chosen percentage
         index_test = self.index_train + int(len(test_orders) * self.split_test_index)
@@ -79,7 +72,7 @@ class TrainTestBuilder():
         last_timestamp_val = max(self.pd_active_orders.iloc[self.index_train: index_test, 2])
 
         val_orders = self.pd_active_orders[
-            (self.pd_active_orders[1] > last_timestamp) & (self.pd_active_orders[2] <= split_timestamp_val)][0]
+            (self.pd_active_orders[1] > split_timestamp) & (self.pd_active_orders[2] <= split_timestamp_val)][0]
         test_orders = self.pd_active_orders[self.pd_active_orders[1] > last_timestamp_val][0]
 
         train_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(train_orders.values)]['timestamp'].values
@@ -91,7 +84,4 @@ class TrainTestBuilder():
         train_sampled_timestamps = self.sample_equally(train_timestamps, int(len(train_timestamps) / self.step_size))
         val_sampled_timestamps = self.sample_equally(val_timestamps, int(len(val_timestamps) / self.step_size))
         test_sampled_timestamps = self.sample_equally(test_timestamps, int(len(test_timestamps) / self.step_size))
-
-        print("Generated timestamps!")
-
         return train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps
