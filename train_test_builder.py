@@ -32,6 +32,7 @@ class TrainTestBuilder():
             # Curtail the dataframe to avoid events that happen after our chosen end event
             del_index = self.pd_df[(self.pd_df['vwpnt_id'] == vwpnt_id) & (self.pd_df['timestamp'] > end_time)].index
             self.pd_df = self.pd_df.drop(del_index, inplace=False)
+            self.pd_df.to_csv(self.output_path, index=False)
 
         pd_active_orders = pd.DataFrame(active_orders)
         pd_active_orders.sort_values(by=2, inplace=True)
@@ -58,13 +59,11 @@ class TrainTestBuilder():
     def timestamps_generator(self):
         # Finds the timestamp related to the chosen train/test split
         split_timestamp = self.pd_active_orders.iloc[self.index_train, 2]
-        print(split_timestamp)
 
         # Finds the timestamp for the last finished event among the training data.
         # Because the testing data will only include elements from processes that occur
         # after the end of the last training data
         last_timestamp = max(self.pd_active_orders.iloc[:self.index_train, 2])
-        print(last_timestamp)
 
         # Perform the train/test split on the data
         # Train orders are those that occur our split value

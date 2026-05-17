@@ -14,8 +14,8 @@ import warnings
 warnings.filterwarnings("ignore")
 
 class HeteroGraphsGenerator():
-    def __init__(self, database, CANT, all_graphs, train_sampled_timestamps, val_sampled_timestamps,
-                 test_sampled_timestamps):
+    def __init__(self, database, CANT, all_graphs, all_timestamps, all_idx, train_sampled_timestamps,
+                 val_sampled_timestamps, test_sampled_timestamps):
         self.database = database
         self.cant = CANT
         self.num_vp_obj = self.cant
@@ -23,11 +23,14 @@ class HeteroGraphsGenerator():
         self.train_sampled_timestamps = train_sampled_timestamps
         self.val_sampled_timestamps = val_sampled_timestamps
         self.test_sampled_timestamps = test_sampled_timestamps
+
         self.get_paths()
         conn = sqlite3.connect(self.ocel_path)
         self.cursor = conn.cursor()
 
         self.all_graphs = all_graphs
+        self.all_timestamps = all_timestamps
+        self.all_idx = all_idx
 
         # Creates a variety of dictionaries of relationships between objects
         self.preprocessing_steps()
