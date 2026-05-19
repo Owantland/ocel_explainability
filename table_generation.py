@@ -38,6 +38,7 @@ class generateTables():
         self.attributes = db_configs[self.database]['attributes']
         self.time_attributes = db_configs[self.database]['time_attributes']
         self.to_encode = db_configs[self.database]['encoding']
+        self.kpis = db_configs[self.database]['kpis']
 
     def get_encodings(self):
         self.encodings = {}
@@ -556,6 +557,7 @@ class generateTables():
         vwpnt_cnt = 0
         log_frames = []
         all_graphs = []
+        kpi_dict = {}
 
         for vwpnt_object in nodes.keys():
             # Add all nodes to the graph
@@ -620,7 +622,6 @@ class generateTables():
                     ob_type = ev_by_ob[ob_id]['Type'][0]
                     ob_idx = int(ob_df[ob_df['ocel_id'] == ob_id]['index'].values[0])
 
-                    tst = []
                     # Add the objects related to the event step
                     for event_by_object in evs_by_ob:
                         if event_by_object in past_events:
@@ -720,9 +721,32 @@ class generateTables():
                                     tg_index = tg_info[0][0]
                                     tmp_graph[edge_name][0].append(src_index)
                                     tmp_graph[edge_name][1].append(tg_index)
-
                 # Add the event as a step
                 all_graphs.append(tmp_graph)
+
+            # Create the kpi dictionary by checking the objects to events dictionary
+            kpi_dict[vwpnt_cnt] = {}
+            for kpi_type in self.kpis.keys():
+                try:
+                    len(kpi_dict[vwpnt_cnt][kpi_type]) > 0
+                except KeyError:
+                    kpi_dict[vwpnt_cnt][kpi_type] = []
+                kpi_events = ev_df[ev_df['type'] == kpi_type]['index']
+                kpi_ob_types = self.kpis[kpi_type]
+
+                for key in ev_by_ob.keys():
+                    ob_id = key
+                    evs_by_ob = ev_by_ob[ob_id]['Events']
+                    ob_type = ev_by_ob[ob_id]['Type'][0]
+                    ob_idx = int(ob_df[ob_df['ocel_id'] == ob_id]['index'].values[0])
+
+                    for ev in evs_by_ob:
+                        if ev in kpi_events and ob_type in kpi_ob_types:
+                            ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
+                            kpi = {'Type': ob_type, 'Index': ob_idx, 'Timestamp': ts}
+                            kpi_dict[vwpnt_cnt][kpi_type].append(kpi)
+
+
         ev_log = pd.concat(log_frames)
         ev_log.to_csv(self.ev_output, index=False)
 
@@ -730,4 +754,4 @@ class generateTables():
         all_graphs = np.array(all_graphs)
         all_timestamps = np.array(all_timestamps)
         all_idx = np.array(all_idx)
-        return all_graphs, all_timestamps, all_idx
+        return all_graphs, all_timestamps, all_idx, kpi_dict
