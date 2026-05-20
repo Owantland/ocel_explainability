@@ -557,7 +557,7 @@ class generateTables():
         vwpnt_cnt = 0
         log_frames = []
         all_graphs = []
-        kpi_dict = {}
+        all_kpis = []
 
         for vwpnt_object in nodes.keys():
             # Add all nodes to the graph
@@ -724,13 +724,9 @@ class generateTables():
                 # Add the event as a step
                 all_graphs.append(tmp_graph)
 
-            # Create the kpi dictionary by checking the objects to events dictionary
-            kpi_dict[vwpnt_cnt] = {}
+            # Create the kpi dataframe by checking the objects to events dictionary
             for kpi_type in self.kpis.keys():
-                try:
-                    len(kpi_dict[vwpnt_cnt][kpi_type]) > 0
-                except KeyError:
-                    kpi_dict[vwpnt_cnt][kpi_type] = []
+                ob_cnt = {}
                 kpi_events = ev_df[ev_df['type'] == kpi_type]['index']
                 kpi_ob_types = self.kpis[kpi_type]
 
@@ -743,9 +739,22 @@ class generateTables():
                     for ev in evs_by_ob:
                         if ev in kpi_events and ob_type in kpi_ob_types:
                             ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
-                            kpi = {'Type': ob_type, 'Index': ob_idx, 'Timestamp': ts}
-                            kpi_dict[vwpnt_cnt][kpi_type].append(kpi)
+                            kpi = [vwpnt_cnt, kpi_type, ob_type, ob_idx, ts]
+                            all_kpis.append(kpi)
 
+                            try:
+                                pst_cnt = ob_cnt[ob_type]
+                                ob_cnt[ob_type] = pst_cnt + 1
+                            except KeyError:
+                                ob_cnt[ob_type] = 1
+
+                # If an object type has no direct relation to any particular event of the chosen type
+                # assign the latest possible timestamp for that event type.
+                for ob_type in kpi_ob_types:
+                    if ob_type not in ob_cnt.keys():
+                        ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
+                        kpi = [vwpnt_cnt, kpi_type, ob_type, 0, ts]
+                        all_kpis.append(kpi)
 
         ev_log = pd.concat(log_frames)
         ev_log.to_csv(self.ev_output, index=False)
@@ -754,4 +763,5 @@ class generateTables():
         all_graphs = np.array(all_graphs)
         all_timestamps = np.array(all_timestamps)
         all_idx = np.array(all_idx)
-        return all_graphs, all_timestamps, all_idx, kpi_dict
+        all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_type', 'index', 'timestamp'])
+        return all_graphs, all_timestamps, all_idx, all_kpis
