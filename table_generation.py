@@ -663,6 +663,14 @@ class generateTables():
                                         tmp_graph[ob_type].extend([ob_id, ob_idx])
                                     else:
                                         tmp_graph[ob_type].append([ob_id, ob_idx])
+                        # Sort the graph and create a new index based on the existing objects
+                        tmp_graph[ob_type] = sorted(tmp_graph[ob_type], key=lambda x: (x[-1], x[0]))
+                        ob_cnt = 0
+                        for ob in tmp_graph[ob_type]:
+                            ob[-1] = ob_cnt
+                            if ob[0] == ob_id:
+                                ob_idx = ob_cnt
+                            ob_cnt += 1
 
                     # Add the object to event edges
                     ob_events = [ev for ev in evs_by_ob if ev in past_events]
