@@ -72,6 +72,7 @@ class HeteroGraphsGenerator():
 
 
     def builder(self, timestamp):
+        num_order = 22
         # Get a list of processes that begin before the timestamp and finish after the timestamp
         active_orders = self.pd_active_orders[(self.pd_active_orders[1] <= timestamp) &
                                               (self.pd_active_orders[2] >= timestamp)][0]
@@ -81,10 +82,8 @@ class HeteroGraphsGenerator():
                          in active_orders]
         active_graphs = [copy.deepcopy(graph) for graph in active_graphs]
 
-        # Calculate Y values
+        # Obtain the Y values for each item in the KPI section
         current_time = pd.to_datetime(timestamp)
-
-        # Find a way to save the Y values for each type
         y_vals = {}
         for order in active_orders:
             kpi_df = self.all_kpis[(self.all_kpis['viewpoint_id'] == order)]
@@ -103,22 +102,26 @@ class HeteroGraphsGenerator():
 
                     kpi_ts = kpi_df[kpi_df['ob_type'] == ob_type]['timestamp'].values
                     kpi_ts = [pd.to_datetime(ts) - current_time for ts in kpi_ts]
-                    kpi_ts = [ts.total_seconds() for ts in kpi_ts]
+                    # kpi_ts = [ts.total_seconds() for ts in kpi_ts]
                     active_graph = self.all_graphs[(self.all_timestamps <= timestamp) & (self.all_idx == order)][-1]
                     try:
                         ob_cnt = len(active_graph[ob_type])
                         y = kpi_ts[:ob_cnt]
                         y_vals[kpi][ob_type].extend(y)
+
+                        if order == num_order:
+                            print(f'For {order} at timestamp {current_time} the kpi for {ob_type} time is {kpi_ts[:ob_cnt]}')
+                            # print(f'Active Graph: {self.all_graphs[(self.all_timestamps <= timestamp) & (self.all_idx == num_order)][-1]}')
                     except KeyError:
                         pass
-        y_masks = {}
-        for kpi in y_vals.keys():
-            y_masks[kpi] = {}
-            for ob_type in y_vals[kpi].keys():
-                y = y_vals[kpi][ob_type]
-                y_vals[kpi][ob_type] = np.array(y)
-                y_masks[kpi][ob_type] = np.array(y) > 0
-
+        # y_masks = {}
+        # for kpi in y_vals.keys():
+        #     y_masks[kpi] = {}
+        #     for ob_type in y_vals[kpi].keys():
+        #         y = y_vals[kpi][ob_type]
+        #         y_vals[kpi][ob_type] = np.array(y)
+        #         y_masks[kpi][ob_type] = np.array(y) > 0
+        # return y_vals, y_masks, active_graphs
 
     def generate_graphs(self):
         y_train = []
@@ -129,9 +132,9 @@ class HeteroGraphsGenerator():
         train_graphs_sg = []
         print('Train:')
         for idx, timestamp in enumerate(self.train_sampled_timestamps):
-            if idx % int(len(self.train_sampled_timestamps) / 5) == 0:
-                print(int(idx * 20 / int(len(self.train_sampled_timestamps) / 5)), '%')
-            print(f'IDX: {idx}/ Timestamp: {timestamp}')
+            # if idx % int(len(self.train_sampled_timestamps) / 5) == 0:
+            #     print(int(idx * 20 / int(len(self.train_sampled_timestamps) / 5)), '%')
+            # print(f'IDX: {idx}/ Timestamp: {timestamp}')
             self.builder(timestamp)
             # temp = self.builder(timestamp)
             # train_graphs.append(self.hetero_converter(temp[0], temp[1]))
