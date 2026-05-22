@@ -60,7 +60,7 @@ class generateTables():
             cols = self.col_names(table)
 
         qry = f'''
-                SELECT {attributes}
+                SELECT {cols[0]}, {attributes}
                 FROM {table}
                 WHERE {cols[0]} = '{node_id}'
                '''
@@ -99,6 +99,7 @@ class generateTables():
                     GROUP BY {cols[0]}
                 )
                 SELECT
+                    {cols[0]},
                     COALESCE(RankedData.{fixed_attr}, FixedWeights.{fixed_attr}) AS {fixed_attr},
                     RankedData.{cols[4]}
                 FROM RankedData
@@ -612,7 +613,7 @@ class generateTables():
                 # Add the event_to_event edges to the graph
                 graph['event_to_event'] = self.generate_adjacency_list_with_k(ev_by_ob, ev_idx)
 
-                # We've got the events step by step, now we add the objects related to each step
+                # Add the objects related to each step
                 contained = False
                 tmp_graph = copy.deepcopy(graph)
                 ob_types = set()
@@ -663,17 +664,24 @@ class generateTables():
                                         tmp_graph[ob_type].extend([ob_id, ob_idx])
                                     else:
                                         tmp_graph[ob_type].append([ob_id, ob_idx])
-                        # Sort the graph and create a new index based on the existing objects
-                        tmp_graph[ob_type] = sorted(tmp_graph[ob_type], key=lambda x: (x[-1], x[0]))
-                        ob_cnt = 0
-                        for ob in tmp_graph[ob_type]:
-                            ob[-1] = ob_cnt
-                            if ob[0] == ob_id:
-                                ob_idx = ob_cnt
-                            ob_cnt += 1
 
-                    # Add the object to event edges
+                # Order the added objects and assign a relative index
+                rel_indx = {}
+                for ob_type in ob_types:
+                    tmp_graph[ob_type] = sorted(tmp_graph[ob_type], key=lambda x: (x[-1], x[0]))
+                    ob_cnt = 0
+                    for x in tmp_graph[ob_type]:
+                        x[-1] = ob_cnt
+                        rel_indx[x[0]] = ob_cnt
+                        ob_cnt += 1
+
+                # Add the object to event edges
+                for ob_id in objects_in_event:
+                    evs_by_ob = ev_by_ob[ob_id]['Events']
                     ob_events = [ev for ev in evs_by_ob if ev in past_events]
+                    ob_idx = rel_indx[ob_id]
+                    ob_type = ev_by_ob[ob_id]['Type'][0]
+
                     if len(ob_events) > 0: # Only add edge if objects are present
                         object = [int(ob_idx) for a in range(len(ob_events))]
                         edge_type = f"{ob_type}_to_event"
@@ -687,10 +695,12 @@ class generateTables():
                         tmp_graph[edge_type][0].extend(object)
                         tmp_graph[edge_type][1].extend(ob_events)
 
-                # Sort the objects according to their index
+                # Clean up the unnecessary identifiers in each object
                 for ob_type in ob_types:
-                    tmp_graph[ob_type] = sorted(tmp_graph[ob_type], key=lambda x: (x[-1], x[0]))
                     tmp_graph[ob_type] = [x[:-1] for x in tmp_graph[ob_type]]
+                    for index, x in enumerate(tmp_graph[ob_type]):
+                        if len(x) > 1:
+                            tmp_graph[ob_type][index] = x[1:]
 
                 # Add object to object edge
                 objects_in_event= ob_df.loc[ob_df['ocel_id'].isin(objects_in_event)]
@@ -706,7 +716,7 @@ class generateTables():
 
                         for i, row in sources.iterrows():
                             src_id = row['ocel_id']
-                            src_index = row['index']
+                            src_index = rel_indx[src_id]
                             qry = f'''
                                     SELECT
                                         -- OO.OCEL_SOURCE_ID,
@@ -726,10 +736,10 @@ class generateTables():
                                 trgt_id = trgt_id[0]
                                 tg_info = targets[targets['ocel_id'] == trgt_id].values
                                 if len(tg_info) > 0:
-                                    tg_index = tg_info[0][0]
+                                    tg_index = rel_indx[trgt_id]
                                     tmp_graph[edge_name][0].append(src_index)
                                     tmp_graph[edge_name][1].append(tg_index)
-                # Add the event as a step
+
                 all_graphs.append(tmp_graph)
 
             # Create the kpi dataframe by checking the objects to events dictionary
