@@ -605,7 +605,7 @@ class generateTables():
                 # Perform One Hot Encoding on the event type and add it to the graph
                 # encode = self.get_ev_encoding(ev_type)
                 # encode.append(ev_id)
-                encode = [ev_type, timestamp]
+                encode = [ev_type]
                 graph['Events'].append(encode)
                 all_timestamps.append(timestamp)
                 all_idx.append(vwpnt_cnt)
