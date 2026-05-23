@@ -603,9 +603,9 @@ class generateTables():
                     graph['Events'] = []
 
                 # Perform One Hot Encoding on the event type and add it to the graph
-                # encode = self.get_ev_encoding(ev_type)
+                encode = self.get_ev_encoding(ev_type)
                 # encode.append(ev_id)
-                encode = [ev_type]
+                # encode = [ev_type]
                 graph['Events'].append(encode)
                 all_timestamps.append(timestamp)
                 all_idx.append(vwpnt_cnt)
@@ -661,8 +661,8 @@ class generateTables():
                                     tmp_graph[ob_type].append(attributes)
                                 except KeyError:
                                     if ob_type in self.to_encode:
-                                        ob_id = self.encodings[ob_type][ob_id]
-                                        tmp_graph[ob_type].extend([ob_id, ob_idx])
+                                        ob_id = [ob_id, self.encodings[ob_type][ob_id], ob_idx]
+                                        tmp_graph[ob_type].append(ob_id)
                                     else:
                                         tmp_graph[ob_type].append([ob_id, ob_idx])
 
