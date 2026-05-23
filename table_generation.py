@@ -584,6 +584,7 @@ class generateTables():
 
             # Always add the viewpoint object first
             attributes = self.get_attributes(vwpnt_object, self.viewpoint, self.attributes[self.viewpoint])
+            attributes.append(vwpnt_cnt)
             attributes.append(vwpnt_object)
             graph[self.viewpoint] = [attributes]
 
