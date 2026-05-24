@@ -48,7 +48,7 @@ class TrainTestBuilder():
 
     def sample_equally(self, input_list, num_samples):
         # Handle edge cases
-        if num_samples <= 0:
+        if num_samples - 1 <= 0:
             return []
         if num_samples >= len(input_list):
             return input_list
