@@ -105,22 +105,31 @@ class HeteroGraphsGenerator():
                 except IndexError:
                     pass
 
-            # Adds the remaining nodes
+            # Add the remaining nodes
+            edges = []
             for key in graph.keys():
                 if key != self.viewpoint:
-                    # Adds edges
-                    if "_to_" in key:
-                        split = key.split("_to_")
-                        data[split[0], 'to', split[1]].edge_index = torch.tensor(graph[key],
-                                                                                 dtype=torch.int64).reshape(2, -1)
-                    # Adds the object nodes
+                    # Edges are added after object nodes
+                    if "_to_" in key and key != 'event_to_event':
+                        edges.append(key)
                     else:
                         # Obtains the length of each node to ensure proper reshape
                         ob_len = self.tensor_dict[key]
                         data[key].x = torch.tensor(graph[key], dtype=torch.float32).reshape(-1, ob_len)
-
+            for edge in edges:
+                split = edge.split("_to_")
+                if split[1] != 'event':
+                    data[split[0], 'to', split[1]].edge_index = torch.tensor(graph[edge],
+                                                                             dtype=torch.int64).reshape(2, -1)
+                else:
+                    split[1] = 'Events'
+                    data[split[0], 'to', split[1]].edge_index = torch.tensor(graph[edge],
+                                                                             dtype=torch.int64).reshape(2, -1)
+            data['Events', 'to', 'Events'].edge_index = torch.tensor(graph['event_to_event'], dtype=torch.int64).reshape(
+                2, -1)
             data = T.ToUndirected()(data)
             all_graphs.append(data)
+
         return all_graphs
 
     def builder(self, timestamp):
@@ -218,7 +227,7 @@ class HeteroGraphsGenerator():
             mean = np.mean(y_train[mask_y])
             std = np.std(y_train[mask_y])
 
-            for graphs in [train_graphs_sg, val_graphs_sg, test_graphs_sg]:
+            for graphs in [train_graphs_sg]: #, val_graphs_sg, test_graphs_sg]:
                 for graph in graphs:
                     try:
                         graph[kpi_ob]['y'] = (graph[kpi_ob]['y'] - mean) / std
@@ -226,17 +235,23 @@ class HeteroGraphsGenerator():
                         pass
 
         # Loading
-        train_loader_sg = DataLoader(train_graphs_sg, batch_size=int(len(train_graphs_sg)), shuffle=True)
+        train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
         val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
         test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
 
         print("Saving heterographs...")
+        for data in train_loader_sg:
+            print(data)
         graphs = [data for data in train_loader_sg.dataset]
         torch.save(graphs, f'files/hetero_structures/train_graphs_sg.pt')
 
+        for data in val_loader_sg:
+            print(data)
         graphs = [data for data in val_loader_sg.dataset]
         torch.save(graphs, f'files/hetero_structures/val_graphs_sg.pt')
 
+        for data in test_loader_sg:
+            print(data)
         graphs = [data for data in test_loader_sg.dataset]
         torch.save(graphs, f'files/hetero_structures/test_graphs_sg.pt')
         print("Done!")
