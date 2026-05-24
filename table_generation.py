@@ -627,6 +627,7 @@ class generateTables():
                     evs_by_ob = ev_by_ob[ob_id]['Events']
                     ob_type = ev_by_ob[ob_id]['Type'][0]
                     ob_idx = int(ob_df[ob_df['ocel_id'] == ob_id]['index'].values[0])
+                    edge_type = f"{ob_type}_to_event"
 
                     # Add the objects related to the event step
                     for event_by_object in evs_by_ob:
@@ -638,16 +639,22 @@ class generateTables():
                         else:
                             contained = False
 
+                    # Check if the graph already has a list for the object type and, if not, create an empty list
+                    try:
+                        len(tmp_graph[ob_type]) > 0
+                    except KeyError:
+                        tmp_graph[ob_type] = []
+
+                    # Create the object to event edge type
+                    try:
+                        len(tmp_graph[edge_type]) > 0
+                    except KeyError:
+                        tmp_graph[edge_type] = [[], []]
+
                     if contained:
                         if ob_type == self.viewpoint:
                             pass
                         else:
-                            # Check if the graph already has a list for the object type and, if not, create an empty list
-                            try:
-                                len(tmp_graph[ob_type]) > 0
-                            except KeyError:
-                                tmp_graph[ob_type] = []
-
                             # Add the desired attributes for each object type
                             # Need to add time sensitive attributes like the one for product
                             try:
@@ -686,17 +693,10 @@ class generateTables():
                     ob_events = [ev for ev in evs_by_ob if ev in past_events]
                     ob_idx = rel_indx[ob_id]
                     ob_type = ev_by_ob[ob_id]['Type'][0]
+                    edge_type = f"{ob_type}_to_event"
 
                     if len(ob_events) > 0: # Only add edge if objects are present
                         object = [int(ob_idx) for a in range(len(ob_events))]
-                        edge_type = f"{ob_type}_to_event"
-
-                        # If edge type doesn't exist then it's created
-                        try:
-                            len(tmp_graph[edge_type]) > 0
-                        except KeyError:
-                            tmp_graph[edge_type] = [[], []]
-
                         tmp_graph[edge_type][0].extend(object)
                         tmp_graph[edge_type][1].extend(ob_events)
 
