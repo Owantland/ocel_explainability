@@ -113,9 +113,10 @@ class HeteroGraphsGenerator():
                     if "_to_" in key and key != 'event_to_event':
                         edges.append(key)
                     else:
-                        # Obtains the length of each node to ensure proper reshape
-                        ob_len = self.tensor_dict[key]
-                        data[key].x = torch.tensor(graph[key], dtype=torch.float32).reshape(-1, ob_len)
+                        if key != 'event_to_event':
+                            # Obtains the length of each node to ensure proper reshape
+                            ob_len = self.tensor_dict[key]
+                            data[key].x = torch.tensor(graph[key], dtype=torch.float32).reshape(-1, ob_len)
             for edge in edges:
                 split = edge.split("_to_")
                 if split[1] != 'event':
