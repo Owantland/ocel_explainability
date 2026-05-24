@@ -14,7 +14,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 class HeteroGraphsGenerator():
-    def __init__(self, database, cant, all_graphs, all_timestamps, all_idx, all_kpis,
+    def __init__(self, database, cant, all_graphs, all_timestamps, all_idx, all_kpis, tensor_dict,
                  train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps):
         self.database = database
         self.cant = cant
@@ -32,6 +32,7 @@ class HeteroGraphsGenerator():
         self.all_timestamps = all_timestamps
         self.all_idx = all_idx
         self.all_kpis = all_kpis
+        self.tensor_dict = tensor_dict
 
         # Creates a variety of dictionaries of relationships between objects
         self.pd_active_orders, self.active_orders_dict = self.preprocessing_steps()
@@ -79,7 +80,7 @@ class HeteroGraphsGenerator():
 
         for idx, graph in enumerate(single_graphs):
             vwpnt_id = graph[self.viewpoint][0][-1]
-            vwpnt_val = graph[self.viewpoint][0][:-2]
+            vwpnt_val = graph[self.viewpoint][0][0]
             vwpnt_ys = y_vals[y_vals['vwpnt_id'] == vwpnt_id]
 
             # Initiate the tensor with the viewpoint object
@@ -88,12 +89,6 @@ class HeteroGraphsGenerator():
 
             # Adds the kpi values for the kpi objects
             for kpi_ob in kpi_obs:
-                # Obtain the object from the graph, if it exists
-                try:
-                    ob_graph = graph[kpi_ob]
-                except KeyError:
-                    pass
-
                 # Assign the y and mask values related to the selected viewpoint and object type
                 try:
                     vwpnt_y = vwpnt_ys[y_vals['ob_type'] == kpi_ob]['y_val'].to_numpy()
@@ -110,12 +105,9 @@ class HeteroGraphsGenerator():
                 except IndexError:
                     pass
 
-                if kpi_ob != self.viewpoint:
-                    data[kpi_ob].x = torch.tensor(ob_graph, dtype=torch.float32).reshape(-1, 1)
-
             # Adds the remaining nodes
             for key in graph.keys():
-                if key not in kpi_obs:
+                if key != self.viewpoint:
                     # Adds edges
                     if "_to_" in key:
                         split = key.split("_to_")
@@ -124,10 +116,7 @@ class HeteroGraphsGenerator():
                     # Adds the object nodes
                     else:
                         # Obtains the length of each node to ensure proper reshape
-                        if key in self.to_encode:
-                            ob_len = len(graph[key][0][0])
-                        else:
-                            ob_len = len(graph[key][0])
+                        ob_len = self.tensor_dict[key]
                         data[key].x = torch.tensor(graph[key], dtype=torch.float32).reshape(-1, ob_len)
 
             data = T.ToUndirected()(data)
@@ -166,7 +155,7 @@ class HeteroGraphsGenerator():
                         # if order == num_order:
                         #     print(f'For {order} at {current_time} the kpi for {ob_type} is: {[kpi, order, ob_type, y]}')
                         #     print(f'For {order} at timestamp {current_time} the kpi for {ob_type} time is {kpi_ts[:ob_cnt]}')
-                            # print(f'Active Graph: {self.all_graphs[(self.all_timestamps <= timestamp) & (self.all_idx == num_order)][-1]}')
+                        #     print(f'Active Graph: {self.all_graphs[(self.all_timestamps <= timestamp) & (self.all_idx == num_order)][-1]}')
                     except KeyError:
                         pass
 
@@ -190,7 +179,6 @@ class HeteroGraphsGenerator():
                 print(int(idx * 20 / int(len(self.train_sampled_timestamps) / 5)), '%')
             print(f'IDX: {idx}/ Timestamp: {timestamp}')
             y_vals, graphs = self.builder(timestamp)
-            # self.tensor_maker(graphs, y_vals, timestamp)
             train_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
 
         val_graphs_sg = []

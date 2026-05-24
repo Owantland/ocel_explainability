@@ -24,6 +24,9 @@ class generateTables():
         self.o2o_relations = self.get_o2o_relations()
         self.get_encodings()
 
+        # Dictionary of object sizes for future tensor creation
+        self.tensor_dict = {}
+
     def get_paths(self):
         with open('files/config.yml', 'r') as file:
             db_configs = yaml.safe_load(file)
@@ -588,6 +591,7 @@ class generateTables():
 
             # Always add the viewpoint object first
             attributes = self.get_attributes(vwpnt_object, self.viewpoint, self.attributes[self.viewpoint])
+            self.tensor_dict[self.viewpoint] = len(self.attributes[self.viewpoint])
             attributes.append(vwpnt_cnt)
             attributes.append(vwpnt_object)
             graph[self.viewpoint] = [attributes]
@@ -611,12 +615,14 @@ class generateTables():
                 # encode.append(ev_id)
                 # encode = [ev_type]
                 graph['Events'].append(encode)
+                self.tensor_dict['Events'] = len(encode)
                 all_timestamps.append(timestamp)
                 all_idx.append(vwpnt_cnt)
                 past_events.append(ev_idx)
 
                 # Add the event_to_event edges to the graph
                 graph['event_to_event'] = self.generate_adjacency_list_with_k(ev_by_ob, ev_idx)
+                self.tensor_dict['event_to_event'] = 1
 
                 # Add the objects related to each step
                 contained = False
@@ -660,11 +666,13 @@ class generateTables():
                             try:
                                 attr = self.attributes[ob_type]
                                 attributes = self.get_attributes(ob_id, ob_type, attr)
+                                self.tensor_dict[ob_type] = len(attr)
                                 attributes.append(ob_idx)
                                 tmp_graph[ob_type].append(attributes)
                             except KeyError:
                                 try:
                                     attr = self.time_attributes[ob_type]
+                                    self.tensor_dict[ob_type] = len(attr)
                                     time_attr = attr[1]
                                     fixed_attrs = attr[0]
                                     attributes = self.get_time_attributes(ob_id, ob_type, fixed_attrs, time_attr, timestamp)
@@ -673,6 +681,7 @@ class generateTables():
                                 except KeyError:
                                     if ob_type in self.to_encode:
                                         ob_id = [ob_id, self.encodings[ob_type][ob_id], ob_idx]
+                                        self.tensor_dict[ob_type] = len(ob_id[1])
                                         tmp_graph[ob_type].append(ob_id)
                                     else:
                                         tmp_graph[ob_type].append([ob_id, ob_idx])
@@ -694,6 +703,7 @@ class generateTables():
                     ob_idx = rel_indx[ob_id]
                     ob_type = ev_by_ob[ob_id]['Type'][0]
                     edge_type = f"{ob_type}_to_event"
+                    self.tensor_dict[edge_type] = 1
 
                     if len(ob_events) > 0: # Only add edge if objects are present
                         object = [int(ob_idx) for a in range(len(ob_events))]
@@ -714,11 +724,10 @@ class generateTables():
                     ob_target = relation[1]
                     sources = objects_in_event[objects_in_event['type'] == ob_source]
                     targets = objects_in_event[objects_in_event['type'] == ob_target]
-
+                    edge_name = f'{ob_source}_to_{ob_target}'
+                    tmp_graph[edge_name] = [[], []]
+                    self.tensor_dict[edge_name] = 1
                     if len(sources) > 0 and len(targets) > 0:
-                        edge_name = f'{ob_source}_to_{ob_target}'
-                        tmp_graph[edge_name] = [[],[]]
-
                         for i, row in sources.iterrows():
                             src_id = row['ocel_id']
                             src_index = rel_indx[src_id]
@@ -788,4 +797,4 @@ class generateTables():
         all_idx = np.array(all_idx)
         all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_type', 'index', 'timestamp'])
         print('Graphs created.')
-        return all_graphs, all_timestamps, all_idx, all_kpis
+        return all_graphs, all_timestamps, all_idx, all_kpis, self.tensor_dict
