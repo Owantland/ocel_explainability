@@ -2,7 +2,7 @@
 # The goal is to obtain three main databases: all_objects, all_events, all_object_events
 
 import sqlite3
-
+import json
 import numpy as np
 import yaml
 import pandas as pd
@@ -796,5 +796,9 @@ class generateTables():
         all_timestamps = np.array(all_timestamps)
         all_idx = np.array(all_idx)
         all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_type', 'index', 'timestamp'])
-        print('Graphs created.')
+
+        # Export the dictionary for use in training
+        with open('files/tensor_dict.json', "w") as f:
+            json.dump(self.tensor_dict, f)
+
         return all_graphs, all_timestamps, all_idx, all_kpis, self.tensor_dict
