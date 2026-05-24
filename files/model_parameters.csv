@@ -1,0 +1,4 @@
+﻿kpi_ob,num_layers,width_layers,heads,batch_size,epochs_sg
+ORDER,5,8,3,4,10
+ITEM,3,8,3,4,20
+PACKAGE,3,8,3,4,10
