@@ -129,7 +129,6 @@ class HeteroGraphsGenerator():
                 2, -1)
             data = T.ToUndirected()(data)
             all_graphs.append(data)
-
         return all_graphs
 
     def builder(self, timestamp):
@@ -160,11 +159,6 @@ class HeteroGraphsGenerator():
                         ob_cnt = len(active_graph[ob_type])
                         y = kpi_ts[:ob_cnt]
                         y_vals.append([kpi, order, ob_type, y])
-
-                        # if order == num_order:
-                        #     print(f'For {order} at {current_time} the kpi for {ob_type} is: {[kpi, order, ob_type, y]}')
-                        #     print(f'For {order} at timestamp {current_time} the kpi for {ob_type} time is {kpi_ts[:ob_cnt]}')
-                        #     print(f'Active Graph: {self.all_graphs[(self.all_timestamps <= timestamp) & (self.all_idx == num_order)][-1]}')
                     except KeyError:
                         pass
 
@@ -240,18 +234,12 @@ class HeteroGraphsGenerator():
         test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
 
         print("Saving heterographs...")
-        for data in train_loader_sg:
-            print(data)
         graphs = [data for data in train_loader_sg.dataset]
         torch.save(graphs, f'files/hetero_structures/train_graphs_sg.pt')
 
-        for data in val_loader_sg:
-            print(data)
         graphs = [data for data in val_loader_sg.dataset]
         torch.save(graphs, f'files/hetero_structures/val_graphs_sg.pt')
 
-        for data in test_loader_sg:
-            print(data)
         graphs = [data for data in test_loader_sg.dataset]
         torch.save(graphs, f'files/hetero_structures/test_graphs_sg.pt')
         print("Done!")
