@@ -408,6 +408,7 @@ class generateTables():
         ob_df.to_csv(self.ob_output, sep=',', index=False)
 
     def related_nodes(self):
+        print("Obtaining all related nodes")
         # Generate a list of all objects of the chosen viewpoint
         qry = f'''
                     SELECT *
@@ -560,7 +561,10 @@ class generateTables():
         all_graphs = []
         all_kpis = []
 
+        print('Creating graphs...')
         for vwpnt_object in nodes.keys():
+            if vwpnt_cnt % int(len(nodes.keys()) / 5) == 0:
+                print(int(vwpnt_cnt * 20 / int(len(nodes.keys()) / 5)), '%')
             # Add all nodes to the graph
             graph = {}
             past_events = []
@@ -783,4 +787,5 @@ class generateTables():
         all_timestamps = np.array(all_timestamps)
         all_idx = np.array(all_idx)
         all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_type', 'index', 'timestamp'])
+        print('Graphs created.')
         return all_graphs, all_timestamps, all_idx, all_kpis
