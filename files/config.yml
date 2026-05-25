@@ -1,8 +1,8 @@
 order_management:
   viewpoint: "Orders"
-#  end_event: 'PayOrder'
-  end_event: 'PackageDelivered'
-  kpis: ['PackageDelivered']
+  end_event: 'PackageDelivered' #'PayOrder'
+  kpis:
+    PackageDelivered: ['Orders', 'Items', 'Packages'] #End event for the KPI and associated objects
 #  kpis: ['PayOrder', 'SendPackage']
   added_depth: False
   ocel_path: "files/databases/order_management.sqlite"
@@ -11,13 +11,12 @@ order_management:
   ocel_output_path: "files/output_tables/om_ocel.csv"
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:
-    Orders: ['price', 'ocel_time']
+    Orders: ['price']
     Items: ['weight', 'price']
     Packages: ['weight']
   time_attributes:
     Products: ['weight', 'price'] # First value is the set attribute and the second one is the time sensitive one
-#  encoding: ['Customers', 'Employees']
-  encoding: []
+  encoding: ['Customers', 'Employees']
 
 logistics:
   viewpoint: "CustomerOrder"

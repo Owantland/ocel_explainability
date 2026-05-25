@@ -7,15 +7,17 @@ import training as t
 CANT = 800
 database = 'order_management'
 
-tbl = tg.generateTables(database, CANT)
-all_graphs, all_timestamps, all_idx, all_kpis, tensor_dict = tbl.create_graph()
+# tbl = tg.generateTables(database, CANT)
+# all_graphs, all_timestamps, all_idx, all_kpis, tensor_dict = tbl.create_graph()
+#
+# ttb = tb.TrainTestBuilder(database, CANT)
+# train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps = ttb.timestamps_generator()
+#
+# hgg = hg.HeteroGraphsGenerator(database, CANT, all_graphs, all_timestamps, all_idx, all_kpis, tensor_dict,
+#                                train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps)
+# hgg.generate_graphs()
 
-ttb = tb.TrainTestBuilder(database, CANT)
-train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps = ttb.timestamps_generator()
+trainer = t.Trainer()
 
-hgg = hg.HeteroGraphsGenerator(database, CANT, all_graphs, all_timestamps, all_idx, all_kpis, tensor_dict,
-                               train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps)
-hgg.generate_graphs()
-
-# trainer = t.Trainer()
-# trainer.trainer('Order')
+for viewpoint in ['Orders', 'Items', 'Packages']:
+    trainer.trainer(viewpoint)
