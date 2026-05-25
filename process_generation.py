@@ -23,6 +23,7 @@ class generateTables():
         self.tabl_nms = self.table_names()
         self.o2o_relations = self.get_o2o_relations()
         self.get_encodings()
+        self.viewpoint_cnt = 0
 
         # Dictionary of object sizes for future tensor creation
         self.tensor_dict = {}
@@ -169,6 +170,28 @@ class generateTables():
         self.cursor.execute(qry)
         o2o_relations = self.cursor.fetchall()
         return o2o_relations
+
+    def get_ev_log(self, nodes):
+        log_id = 0
+        log_frames = []
+        for vwpnt_object in nodes.keys():
+            log_id += 1
+
+            # Each related element is saved as a dictionary with the viewpoint object as key
+            rltd_events = nodes[vwpnt_object]['related_events']
+            ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
+
+            # Add the current viewpoint's elements to the event log
+            id_col = [log_id for _ in range(len(ev_df.index))]
+            ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
+            ev_log = ev_df[['ocel_id', 'type', 'timestamp']]
+            ev_log['vwpnt_id'] = id_col
+            ev_log['ob_id'] = ob_id
+            log_frames.append(ev_log)
+
+        # Save the event log
+        ev_log = pd.concat(log_frames)
+        ev_log.to_csv(self.ev_output, index=False)
 
     def col_names(self, table_name):
         self.cursor.execute(f"PRAGMA table_info({table_name});")
@@ -382,18 +405,19 @@ class generateTables():
     def get_process(self):
         all_timestamps = []
         all_idx = []
-        vwpnt_cnt = 0
-        log_frames = []
         all_graphs = []
         all_kpis = []
 
         print('Creating graphs...')
         # For our chosen viewpoint we obtain all related objects and relations
         nodes = self.related_nodes()
+        self.get_ev_log(nodes) # Create the event log
+
         for vwpnt_object in nodes.keys():
             # Show progress
-            if vwpnt_cnt % int(len(nodes.keys()) / 5) == 0:
-                print(int(vwpnt_cnt * 20 / int(len(nodes.keys()) / 5)), '%')
+            if self.viewpoint_cnt % int(len(nodes.keys()) / 5) == 0:
+                print(int(self.viewpoint_cnt * 20 / int(len(nodes.keys()) / 5)), '%')
+            self.viewpoint_cnt += 1
 
             # Add all nodes to the graph
             graph = {}
@@ -408,20 +432,11 @@ class generateTables():
 
             ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
 
-            # Create the event log file
-            vwpnt_cnt += 1
-            id_col = [vwpnt_cnt for _ in range(len(ev_df.index))]
-            ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
-            ev_log = ev_df[['ocel_id', 'type', 'timestamp']]
-            ev_log['vwpnt_id'] = id_col
-            ev_log['ob_id'] = ob_id
-            log_frames.append(ev_log)
-
 
             # Always add the viewpoint object first
             attributes = self.get_attributes(vwpnt_object, self.viewpoint, self.attributes[self.viewpoint])
             self.tensor_dict[self.viewpoint] = len(self.attributes[self.viewpoint])
-            attributes.append(vwpnt_cnt)
+            attributes.append(self.viewpoint_cnt)
             attributes.append(vwpnt_object)
             graph[self.viewpoint] = [attributes]
 
@@ -446,7 +461,7 @@ class generateTables():
                 graph['Events'].append(encode)
                 self.tensor_dict['Events'] = len(encode)
                 all_timestamps.append(timestamp)
-                all_idx.append(vwpnt_cnt)
+                all_idx.append(self.viewpoint_cnt)
                 past_events.append(ev_idx)
 
                 # Add the event_to_event edges to the graph
@@ -600,7 +615,7 @@ class generateTables():
                     for ev in evs_by_ob:
                         if ev in kpi_events and ob_type in kpi_ob_types:
                             ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
-                            kpi = [vwpnt_cnt, kpi_type, ob_type, ob_idx, ts]
+                            kpi = [self.viewpoint_cnt, kpi_type, ob_type, ob_idx, ts]
                             all_kpis.append(kpi)
 
                             try:
@@ -614,11 +629,8 @@ class generateTables():
                 for ob_type in kpi_ob_types:
                     if ob_type not in ob_cnt.keys():
                         ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
-                        kpi = [vwpnt_cnt, kpi_type, ob_type, 0, ts]
+                        kpi = [self.viewpoint_cnt, kpi_type, ob_type, 0, ts]
                         all_kpis.append(kpi)
-
-        ev_log = pd.concat(log_frames)
-        ev_log.to_csv(self.ev_output, index=False)
 
         # Convert the lists into Numpy Arrays to make it easier to filter them later
         all_graphs = np.array(all_graphs)
