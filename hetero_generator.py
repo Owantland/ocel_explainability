@@ -222,7 +222,7 @@ class HeteroGraphsGenerator():
             mean = np.mean(y_train[mask_y])
             std = np.std(y_train[mask_y])
 
-            for graphs in [train_graphs_sg]: #, val_graphs_sg, test_graphs_sg]:
+            for graphs in [train_graphs_sg, val_graphs_sg, test_graphs_sg]:
                 for graph in graphs:
                     try:
                         graph[kpi_ob]['y'] = (graph[kpi_ob]['y'] - mean) / std
