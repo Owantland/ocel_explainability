@@ -416,7 +416,7 @@ class generateTables():
         qry = f'''
                     SELECT *
                     FROM OBJECT_{self.viewpoint}
-                    ORDER BY 1
+                    ORDER BY 2
                     LIMIT {self.cant};
                '''
         self.cursor.execute(qry)
@@ -424,11 +424,16 @@ class generateTables():
 
         rltd_nodes = {}
         event_log = []
+
         # For each viewpoint object obtain a list of related objects
         for vwpnt_object in vwpnt_objects:
             rltd_objects = set()
+
+            # Add the viewpoint object to the list and initiate the relevant dictionaries
             rltd_objects.add(vwpnt_object[0])
             rltd_nodes[vwpnt_object[0]] = {'related_objects':[], 'related_events':[], 'events_by_objects':[]}
+
+            # Query related objects
             cols = self.col_names('object_object')
             qry = f'''
                         SELECT *
@@ -442,118 +447,126 @@ class generateTables():
                 rltd_objects.add(rltd_object[1])
                 rltd_objects.add(rltd_object[0])
 
-                if self.depth:
-                    qry = f'''
-                                SELECT *
-                                FROM OBJECT_OBJECT
-                                WHERE {cols[0]} = '{rltd_object[1]}'
-                                      OR {cols[1]} = '{rltd_object[1]}'
-                                ORDER BY 1;
-                           '''
-                    self.cursor.execute(qry)
-                    objects = self.cursor.fetchall()
-                    for rltd_object in objects:
-                        rltd_objects.add(rltd_object[1])
-                        rltd_objects.add(rltd_object[0])
-
-            # Generate a list of related events to the viewpoint object
-            rltd_events = set()
-            for rltd_object in rltd_objects:
-                cols = self.col_names('event_object')
-                ev_cols = self.col_names('event')
-                mp_cols = self.col_names('event_map_type')
-                # Obtain the event_id and its type as well as it's index in the timeline
+            for i in range(self.depth):
+                qry_obs = [f"'{rltd_object}'" for rltd_object in rltd_objects]
+                qry_obs = ','.join(qry_obs)
                 qry = f'''
-                            SELECT EO.{cols[0]}, M.{mp_cols[1]} 
-                            FROM EVENT_OBJECT EO
-                            JOIN EVENT E ON EO.{cols[0]} = E.{ev_cols[0]}
-                            JOIN EVENT_MAP_TYPE M ON E.{ev_cols[1]} = M.{mp_cols[0]}
-                            WHERE EO.{cols[1]} = '{rltd_object}'
-                            ORDER BY 1;
-                       '''
-                self.cursor.execute(qry)
-                events = self.cursor.fetchall()
-
-                # Add a timestamp to each event
-                for event in events:
-                    ev_id = event[0]
-                    ev_type = event[1]
-                    ev_table = f'event_{ev_type}'
-                    cols = self.col_names(ev_table)
-
-                    qry = f'''
-                                SELECT {cols[-1]}
-                                FROM {ev_table} E
-                                WHERE E.{cols[0]} = '{ev_id}'
-                           '''
-                    self.cursor.execute(qry)
-                    timestamp = self.cursor.fetchall()
-                    timestamp = timestamp[0][0]
-                    event = (ev_id, ev_type, timestamp)
-                    rltd_events.add(event)
-
-            # Sort the events chronologically and add an index
-            rltd_events = sorted(rltd_events, key=lambda x: x[2])
-            for idx, event in enumerate(rltd_events):
-                ev_id = event[0]
-                ev_type = event[1]
-                ev_timestamp = event[2]
-                rltd_events[idx] = (idx, ev_id, ev_type, ev_timestamp)
-
-            # Obtain a list of all objects related to the events
-            rltd_objects = set()
-            events_by_objects = {}
-            for event in rltd_events:
-                ev_idx = event[0]
-                ev_id = event[1]
-                cols = self.col_names('event_object')
-                ob_cols = self.col_names('object')
-                mp_cols = self.col_names('object_map_type')
-
-                qry = f'''
-                            SELECT DISTINCT EO.{cols[1]}, M.{mp_cols[1]}
-                            FROM EVENT_OBJECT EO
-                            JOIN OBJECT O ON EO.{cols[1]} = O.{ob_cols[0]}
-                            JOIN OBJECT_MAP_TYPE M ON O.{ob_cols[1]} = M.{mp_cols[0]}
-                            WHERE {cols[0]} = '{ev_id}'
+                            SELECT *
+                            FROM OBJECT_OBJECT
+                            WHERE {cols[0]} IN ({qry_obs})
+                                  OR {cols[1]} IN ({qry_obs})
                             ORDER BY 1;
                        '''
                 self.cursor.execute(qry)
                 objects = self.cursor.fetchall()
-                for object in objects:
-                    rltd_objects.add(object)
 
-                    # # Get a list of related events to each object
-                    obj = object[0]
-                    obj_type = object[1]
-                    if obj not in events_by_objects:
-                        events_by_objects[obj] = {}
-                        events_by_objects[obj]['Events'] = [ev_idx]
-                        events_by_objects[obj]['Type'] = [obj_type]
+                for rltd_object in objects:
+                    if rltd_object[0] == 'tr1':
+                        pass
                     else:
-                        events_by_objects[obj]['Events'].append(ev_idx)
+                        rltd_objects.add(rltd_object[0])
+                    rltd_objects.add(rltd_object[1])
 
-            # Order the object list and add an index
-            sorted_objects = sorted(rltd_objects, key=lambda x: (x[1], x[0]))
-            pst_type = ''
-            ob_index = 0
-            rltd_objects = set()
-            for rltd_object in sorted_objects:
-                ob_type = rltd_object[1]
-                if ob_type != pst_type:
-                    ob_index = 0
-                    pst_type = ob_type
-                else:
-                    ob_index += 1
-                object = (ob_index, rltd_object[0], rltd_object[1])
-                rltd_objects.add(object)
-            rltd_objects = sorted(rltd_objects, key=lambda x: (x[2], x[1]))
+            # # Generate a list of related events to the viewpoint object
+            # rltd_events = set()
+            # for rltd_object in rltd_objects:
+            #     print(rltd_object)
+            #     cols = self.col_names('event_object')
+            #     ev_cols = self.col_names('event')
+            #     mp_cols = self.col_names('event_map_type')
+            #     # Obtain the event_id and its type as well as it's index in the timeline
+            #     qry = f'''
+            #                 SELECT EO.{cols[0]}, M.{mp_cols[1]}
+            #                 FROM EVENT_OBJECT EO
+            #                 JOIN EVENT E ON EO.{cols[0]} = E.{ev_cols[0]}
+            #                 JOIN EVENT_MAP_TYPE M ON E.{ev_cols[1]} = M.{mp_cols[0]}
+            #                 WHERE EO.{cols[1]} = '{rltd_object}'
+            #                 ORDER BY 1;
+            #            '''
+            #     self.cursor.execute(qry)
+            #     events = self.cursor.fetchall()
+            #
+            #     # Add a timestamp to each event
+            #     for event in events:
+            #         ev_id = event[0]
+            #         ev_type = event[1]
+            #         ev_table = f'event_{ev_type}'
+            #         cols = self.col_names(ev_table)
+            #
+            #         qry = f'''
+            #                     SELECT {cols[-1]}
+            #                     FROM {ev_table} E
+            #                     WHERE E.{cols[0]} = '{ev_id}'
+            #                '''
+            #         self.cursor.execute(qry)
+            #         timestamp = self.cursor.fetchall()
+            #         timestamp = timestamp[0][0]
+            #         event = (ev_id, ev_type, timestamp)
+            #         rltd_events.add(event)
+            # print(f'For {vwpnt_object} \nobjects: {rltd_objects} \nevents: {rltd_events}')
+            # # Sort the events chronologically and add an index
+            # rltd_events = sorted(rltd_events, key=lambda x: x[2])
+            # for idx, event in enumerate(rltd_events):
+            #     ev_id = event[0]
+            #     ev_type = event[1]
+            #     ev_timestamp = event[2]
+            #     rltd_events[idx] = (idx, ev_id, ev_type, ev_timestamp)
+            #
+            # # Obtain a list of all objects related to the events
+            # rltd_objects = set()
+            # events_by_objects = {}
+            # for event in rltd_events:
+            #     ev_idx = event[0]
+            #     ev_id = event[1]
+            #     cols = self.col_names('event_object')
+            #     ob_cols = self.col_names('object')
+            #     mp_cols = self.col_names('object_map_type')
+            #
+            #     qry = f'''
+            #                 SELECT DISTINCT EO.{cols[1]}, M.{mp_cols[1]}
+            #                 FROM EVENT_OBJECT EO
+            #                 JOIN OBJECT O ON EO.{cols[1]} = O.{ob_cols[0]}
+            #                 JOIN OBJECT_MAP_TYPE M ON O.{ob_cols[1]} = M.{mp_cols[0]}
+            #                 WHERE {cols[0]} = '{ev_id}'
+            #                 ORDER BY 1;
+            #            '''
+            #     self.cursor.execute(qry)
+            #     objects = self.cursor.fetchall()
+            #     for object in objects:
+            #         rltd_objects.add(object)
+            #
+            #         # # Get a list of related events to each object
+            #         obj = object[0]
+            #         obj_type = object[1]
+            #         if obj not in events_by_objects:
+            #             events_by_objects[obj] = {}
+            #             events_by_objects[obj]['Events'] = [ev_idx]
+            #             events_by_objects[obj]['Type'] = [obj_type]
+            #         else:
+            #             events_by_objects[obj]['Events'].append(ev_idx)
+            # print(f'For {vwpnt_object} \nobjects: {rltd_objects} \nevents: {rltd_events}')
 
-            # Update the dictionary
-            rltd_nodes[vwpnt_object[0]]['related_events'].extend(rltd_events)
-            rltd_nodes[vwpnt_object[0]]['related_objects'].extend(rltd_objects)
-            rltd_nodes[vwpnt_object[0]]['events_by_objects'].append(events_by_objects)
-        return rltd_nodes
+            # # Order the object list and add an index
+            # sorted_objects = sorted(rltd_objects, key=lambda x: (x[1], x[0]))
+            # pst_type = ''
+            # ob_index = 0
+            # rltd_objects = set()
+            # for rltd_object in sorted_objects:
+            #     ob_type = rltd_object[1]
+            #     if ob_type != pst_type:
+            #         ob_index = 0
+            #         pst_type = ob_type
+            #     else:
+            #         ob_index += 1
+            #     object = (ob_index, rltd_object[0], rltd_object[1])
+            #     rltd_objects.add(object)
+            # rltd_objects = sorted(rltd_objects, key=lambda x: (x[2], x[1]))
+
+        #     # Update the dictionary
+        #     rltd_nodes[vwpnt_object[0]]['related_events'].extend(rltd_events)
+        #     rltd_nodes[vwpnt_object[0]]['related_objects'].extend(rltd_objects)
+        #     rltd_nodes[vwpnt_object[0]]['events_by_objects'].append(events_by_objects)
+        # return rltd_nodes
 
     def create_graph(self):
         nodes = self.related_nodes()
@@ -579,6 +592,9 @@ class generateTables():
             ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
 
             ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
+
+            if vwpnt_cnt == 5:
+                print(f'For {vwpnt_object} its related objects: {ob_df.head()}\nits related events: {ev_df.head()}')
 
             # Create the event log file
             vwpnt_cnt += 1
@@ -756,49 +772,49 @@ class generateTables():
 
                 all_graphs.append(tmp_graph)
 
-            # Create the kpi dataframe by checking the objects to events dictionary
-            for kpi_type in self.kpis.keys():
-                ob_cnt = {}
-                kpi_events = ev_df[ev_df['type'] == kpi_type]['index']
-                kpi_ob_types = self.kpis[kpi_type]
-
-                for key in ev_by_ob.keys():
-                    ob_id = key
-                    evs_by_ob = ev_by_ob[ob_id]['Events']
-                    ob_type = ev_by_ob[ob_id]['Type'][0]
-                    ob_idx = int(ob_df[ob_df['ocel_id'] == ob_id]['index'].values[0])
-
-                    for ev in evs_by_ob:
-                        if ev in kpi_events and ob_type in kpi_ob_types:
-                            ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
-                            kpi = [vwpnt_cnt, kpi_type, ob_type, ob_idx, ts]
-                            all_kpis.append(kpi)
-
-                            try:
-                                pst_cnt = ob_cnt[ob_type]
-                                ob_cnt[ob_type] = pst_cnt + 1
-                            except KeyError:
-                                ob_cnt[ob_type] = 1
-
-                # If an object type has no direct relation to any particular event of the chosen type
-                # assign the latest possible timestamp for that event type.
-                for ob_type in kpi_ob_types:
-                    if ob_type not in ob_cnt.keys():
-                        ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
-                        kpi = [vwpnt_cnt, kpi_type, ob_type, 0, ts]
-                        all_kpis.append(kpi)
+            # # Create the kpi dataframe by checking the objects to events dictionary
+            # for kpi_type in self.kpis.keys():
+            #     ob_cnt = {}
+            #     kpi_events = ev_df[ev_df['type'] == kpi_type]['index']
+            #     kpi_ob_types = self.kpis[kpi_type]
+            #
+            #     for key in ev_by_ob.keys():
+            #         ob_id = key
+            #         evs_by_ob = ev_by_ob[ob_id]['Events']
+            #         ob_type = ev_by_ob[ob_id]['Type'][0]
+            #         ob_idx = int(ob_df[ob_df['ocel_id'] == ob_id]['index'].values[0])
+            #
+            #         for ev in evs_by_ob:
+            #             if ev in kpi_events and ob_type in kpi_ob_types:
+            #                 ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
+            #                 kpi = [vwpnt_cnt, kpi_type, ob_type, ob_idx, ts]
+            #                 all_kpis.append(kpi)
+            #
+            #                 try:
+            #                     pst_cnt = ob_cnt[ob_type]
+            #                     ob_cnt[ob_type] = pst_cnt + 1
+            #                 except KeyError:
+            #                     ob_cnt[ob_type] = 1
+            #
+            #     # If an object type has no direct relation to any particular event of the chosen type
+            #     # assign the latest possible timestamp for that event type.
+            #     for ob_type in kpi_ob_types:
+            #         if ob_type not in ob_cnt.keys():
+            #             ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
+            #             kpi = [vwpnt_cnt, kpi_type, ob_type, 0, ts]
+            #             all_kpis.append(kpi)
 
         ev_log = pd.concat(log_frames)
         ev_log.to_csv(self.ev_output, index=False)
 
-        # Convert the lists into Numpy Arrays to make it easier to filter them later
-        all_graphs = np.array(all_graphs)
-        all_timestamps = np.array(all_timestamps)
-        all_idx = np.array(all_idx)
-        all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_type', 'index', 'timestamp'])
-
-        # Export the dictionary for use in training
-        with open('files/tensor_dict.json', "w") as f:
-            json.dump(self.tensor_dict, f)
-
-        return all_graphs, all_timestamps, all_idx, all_kpis, self.tensor_dict
+        # # Convert the lists into Numpy Arrays to make it easier to filter them later
+        # all_graphs = np.array(all_graphs)
+        # all_timestamps = np.array(all_timestamps)
+        # all_idx = np.array(all_idx)
+        # all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_type', 'index', 'timestamp'])
+        #
+        # # Export the dictionary for use in training
+        # with open('files/tensor_dict.json', "w") as f:
+        #     json.dump(self.tensor_dict, f)
+        #
+        # return all_graphs, all_timestamps, all_idx, all_kpis, self.tensor_dict
