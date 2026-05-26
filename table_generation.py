@@ -427,49 +427,62 @@ class generateTables():
 
         # For each viewpoint object obtain a list of related objects
         for vwpnt_object in vwpnt_objects:
-            rltd_objects = set()
+            ob_list = set()
 
             # Add the viewpoint object to the list and initiate the relevant dictionaries
-            rltd_objects.add(vwpnt_object[0])
+            ob_list.add(vwpnt_object[0])
             rltd_nodes[vwpnt_object[0]] = {'related_objects':[], 'related_events':[], 'events_by_objects':[]}
 
             # Query related objects
             cols = self.col_names('object_object')
             qry = f'''
-                        SELECT *
-                        FROM OBJECT_OBJECT
+                        SELECT O_O.{cols[0]}, O_O.{cols[1]}, OM.OCEL_TYPE_MAP, TM.OCEL_TYPE_MAP
+                        FROM OBJECT_OBJECT O_O
+                        JOIN OBJECT O ON O.OCEL_ID = O_O.ocel_source_id
+                        JOIN OBJECT T ON T.OCEL_ID = O_O.ocel_target_id
+                        JOIN OBJECT_MAP_TYPE OM ON O.OCEL_TYPE = OM.OCEL_TYPE
+                        JOIN OBJECT_MAP_TYPE TM ON T.OCEL_TYPE = TM.OCEL_TYPE
                         WHERE {cols[0]} = '{vwpnt_object[0]}' 
                         ORDER BY 1;
                    '''
             self.cursor.execute(qry)
             objects = self.cursor.fetchall()
+            private_types = set()
             for rltd_object in objects:
-                rltd_objects.add(rltd_object[1])
-                rltd_objects.add(rltd_object[0])
+                ob_list.add(rltd_object[1])
+                ob_list.add(rltd_object[0])
+                private_types.add(rltd_object[2])
+                private_types.add(rltd_object[3])
 
             for i in range(self.depth):
-                qry_obs = [f"'{rltd_object}'" for rltd_object in rltd_objects]
+                qry_obs = [f"'{rltd_object}'" for rltd_object in ob_list]
                 qry_obs = ','.join(qry_obs)
                 qry = f'''
-                            SELECT *
-                            FROM OBJECT_OBJECT
+                            SELECT O_O.{cols[0]}, O_O.{cols[1]}, OM.OCEL_TYPE_MAP, TM.OCEL_TYPE_MAP
+                            FROM OBJECT_OBJECT O_O
+                            JOIN OBJECT O ON O.OCEL_ID = O_O.ocel_source_id
+                            JOIN OBJECT T ON T.OCEL_ID = O_O.ocel_target_id
+                            JOIN OBJECT_MAP_TYPE OM ON O.OCEL_TYPE = OM.OCEL_TYPE
+                            JOIN OBJECT_MAP_TYPE TM ON T.OCEL_TYPE = TM.OCEL_TYPE
                             WHERE {cols[0]} IN ({qry_obs})
                                   OR {cols[1]} IN ({qry_obs})
                             ORDER BY 1;
                        '''
                 self.cursor.execute(qry)
                 objects = self.cursor.fetchall()
-
                 for rltd_object in objects:
-                    if rltd_object[0] == 'tr1':
+                    if rltd_object[2] in private_types or rltd_object[0] == 'tr1':
                         pass
                     else:
-                        rltd_objects.add(rltd_object[0])
-                    rltd_objects.add(rltd_object[1])
+                        ob_list.add(rltd_object[0])
+                    if rltd_object[3] in private_types:
+                        pass
+                    else:
+                        ob_list.add(rltd_object[1])
 
             # Generate a list of related events to the viewpoint object
             rltd_events = set()
-            qry_obs = [f"'{ob}'" for ob in rltd_objects]
+            qry_obs = [f"'{ob}'" for ob in ob_list]
             qry_obs = ','.join(qry_obs)
             cols = self.col_names('event_object')
             ev_cols = self.col_names('event')
@@ -545,11 +558,14 @@ class generateTables():
                 self.cursor.execute(qry)
                 objects = self.cursor.fetchall()
                 for object in objects:
-                    ev_idx = [x[0] for x in ev_dict[ev_type] if x[1] == object[2]]
-                    ev_idx = int(ev_idx[0])
-                    rltd_objects.add(object[:-1])
+                    if object[0] in ob_list:
+                        rltd_objects.add(object[:-1])
+                    elif object[0] not in ob_list and object[1] not in private_types:
+                        rltd_objects.add(object[:-1])
 
                     # Get a list of related events to each object
+                    ev_idx = [x[0] for x in ev_dict[ev_type] if x[1] == object[2]]
+                    ev_idx = int(ev_idx[0])
                     obj = object[0]
                     obj_type = object[1]
                     if obj not in events_by_objects:
@@ -579,7 +595,7 @@ class generateTables():
             rltd_nodes[vwpnt_object[0]]['related_events'].extend(rltd_events)
             rltd_nodes[vwpnt_object[0]]['related_objects'].extend(rltd_objects)
             rltd_nodes[vwpnt_object[0]]['events_by_objects'].append(events_by_objects)
-        return rltd_nodes
+        # return rltd_nodes
 
     def create_graph(self):
         nodes = self.related_nodes()
