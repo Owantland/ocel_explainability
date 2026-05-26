@@ -560,20 +560,25 @@ class generateTables():
                 for object in objects:
                     if object[0] in ob_list:
                         rltd_objects.add(object[:-1])
+                        cont = True
                     elif object[0] not in ob_list and object[1] not in private_types:
                         rltd_objects.add(object[:-1])
+                        cont = True
+                    else:
+                        cont = False
 
                     # Get a list of related events to each object
-                    ev_idx = [x[0] for x in ev_dict[ev_type] if x[1] == object[2]]
-                    ev_idx = int(ev_idx[0])
-                    obj = object[0]
-                    obj_type = object[1]
-                    if obj not in events_by_objects:
-                        events_by_objects[obj] = {}
-                        events_by_objects[obj]['Events'] = [ev_idx]
-                        events_by_objects[obj]['Type'] = [obj_type]
-                    else:
-                        events_by_objects[obj]['Events'].append(ev_idx)
+                    if cont:
+                        ev_idx = [x[0] for x in ev_dict[ev_type] if x[1] == object[2]]
+                        ev_idx = int(ev_idx[0])
+                        obj = object[0]
+                        obj_type = object[1]
+                        if obj not in events_by_objects:
+                            events_by_objects[obj] = {}
+                            events_by_objects[obj]['Events'] = [ev_idx]
+                            events_by_objects[obj]['Type'] = [obj_type]
+                        else:
+                            events_by_objects[obj]['Events'].append(ev_idx)
 
             # Order the object list and add an index
             sorted_objects = sorted(rltd_objects, key=lambda x: (x[1], x[0]))
@@ -595,7 +600,7 @@ class generateTables():
             rltd_nodes[vwpnt_object[0]]['related_events'].extend(rltd_events)
             rltd_nodes[vwpnt_object[0]]['related_objects'].extend(rltd_objects)
             rltd_nodes[vwpnt_object[0]]['events_by_objects'].append(events_by_objects)
-        # return rltd_nodes
+        return rltd_nodes
 
     def create_graph(self):
         nodes = self.related_nodes()
