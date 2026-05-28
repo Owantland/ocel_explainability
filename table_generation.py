@@ -32,9 +32,7 @@ class generateTables():
             db_configs = yaml.safe_load(file)
 
         self.ocel_path = db_configs[self.database]['ocel_path']
-        self.ob_output = db_configs[self.database]['ob_output_path']
         self.ev_output = db_configs[self.database]['ev_output_path']
-        self.ocel_output = db_configs[self.database]['ocel_output_path']
         self.filtered_tbls = db_configs[self.database]['filtered_tables']
         self.viewpoint = db_configs[self.database]['viewpoint']
         self.depth = db_configs[self.database]['added_depth']
@@ -51,6 +49,7 @@ class generateTables():
             self.encodings[encoding] = encod_dict
 
     def get_attributes(self, node_id, type, attributes):
+        attributes = [f'MAX({a})' for a in attributes]
         if len(attributes) > 1:
             attributes = ','.join(attributes)
         else:
@@ -276,43 +275,6 @@ class generateTables():
         ev_df.to_csv(self.ev_output, sep=',', index=False)
         return ev_df
 
-    def generate_join_tables(self):
-        # List the tables for relations
-        tables = ['object_object', 'event_object']
-        cols = set()
-
-        # Get the set of columns that the big table needs to have
-        for table in tables:
-            columns = self.col_names(table)
-            for column in columns:
-                cols.add(column)
-
-        # Check each table for which columns they have
-        col_names = list(cols)
-        col_names.append('type')
-        ob_df = pd.DataFrame(columns=col_names)
-        for table in tables:
-            qry_cols = ""
-            columns = self.col_names(table)
-            for column in cols:
-                if column in columns:
-                    qry_cols += f"{table}.'{column}',\n"
-                else:
-                    qry_cols += f"NULL as '{column}',\n"
-
-            query = f'''
-                                SELECT
-                                    {qry_cols}
-                                    object.ocel_type
-                                FROM {table}
-                                JOIN OBJECT ON {table}.ocel_id = OBJECT.ocel_id
-                                ORDER BY 1;
-                            '''
-            self.cursor.execute(query)
-            columns_info = self.cursor.fetchall()
-            for column in columns_info:
-                ob_df.loc[len(ob_df.index)] = column
-        ob_df.to_csv(self.ob_output, sep=',', index=False)
 
     def create_graph(self, nodes):
         all_timestamps = []
