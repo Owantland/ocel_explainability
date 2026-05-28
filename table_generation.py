@@ -42,6 +42,7 @@ class generateTables():
         self.time_attributes = db_configs[self.database]['time_attributes']
         self.to_encode = db_configs[self.database]['encoding']
         self.kpis = db_configs[self.database]['kpis']
+        self.kpi_event = db_configs[self.database]['kpi_event']
 
     def get_encodings(self):
         self.encodings = {}
@@ -151,6 +152,34 @@ class generateTables():
             oh_dict[types[idx]] = a
 
         return oh_dict
+
+    def get_ev_log(self, nodes):
+        log_id = 0
+        log_frames = []
+        for vwpnt_object in nodes.keys():
+            log_id += 1
+
+            # Each related element is saved as a dictionary with the viewpoint object as key
+            rltd_events = nodes[vwpnt_object]['related_events']
+            ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
+
+            kpi_event_time = ev_df[ev_df['type'] == self.kpi_event]['timestamp'].values[-1]
+            kpi_event_time = pd.to_datetime(kpi_event_time)
+            ev_df['kpi_val'] = kpi_event_time - pd.to_datetime(ev_df['timestamp'])
+            ev_df['kpi_val'] = ev_df['kpi_val'].apply(lambda x: x.total_seconds())
+            ev_df = ev_df[ev_df['kpi_val'] >= 0]
+
+            # Add the current viewpoint's elements to the event log
+            id_col = [log_id for _ in range(len(ev_df.index))]
+            ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
+            ev_log = ev_df[['ocel_id', 'type', 'timestamp', 'kpi_val']]
+            ev_log['vwpnt_id'] = id_col
+            ev_log['ob_id'] = ob_id
+            log_frames.append(ev_log)
+
+        # Save the event log
+        ev_log = pd.concat(log_frames)
+        ev_log.to_csv(self.ev_output, index=False)
 
     def col_names(self, table_name):
         self.cursor.execute(f"PRAGMA table_info({table_name});")
@@ -602,8 +631,7 @@ class generateTables():
             rltd_nodes[vwpnt_object[0]]['events_by_objects'].append(events_by_objects)
         return rltd_nodes
 
-    def create_graph(self):
-        nodes = self.related_nodes()
+    def create_graph(self, nodes):
         all_timestamps = []
         all_idx = []
         vwpnt_cnt = 0
@@ -613,6 +641,7 @@ class generateTables():
 
         print('Creating graphs...')
         for vwpnt_object in nodes.keys():
+            vwpnt_cnt += 1
             if vwpnt_cnt % int(len(nodes.keys()) / 5) == 0:
                 print(int(vwpnt_cnt * 20 / int(len(nodes.keys()) / 5)), '%')
             # Add all nodes to the graph
@@ -626,18 +655,6 @@ class generateTables():
             ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
 
             ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
-
-            if vwpnt_cnt == 5:
-                print(f'For {vwpnt_object} its related objects: {ob_df.head()}\nits related events: {ev_df.head()}')
-
-            # Create the event log file
-            vwpnt_cnt += 1
-            id_col = [vwpnt_cnt for _ in range(len(ev_df.index))]
-            ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
-            ev_log = ev_df[['ocel_id', 'type', 'timestamp']]
-            ev_log['vwpnt_id'] = id_col
-            ev_log['ob_id'] = ob_id
-            log_frames.append(ev_log)
 
             # Always add the viewpoint object first
             attributes = self.get_attributes(vwpnt_object, self.viewpoint, self.attributes[self.viewpoint])
@@ -806,49 +823,46 @@ class generateTables():
 
                 all_graphs.append(tmp_graph)
 
-            # # Create the kpi dataframe by checking the objects to events dictionary
-            # for kpi_type in self.kpis.keys():
-            #     ob_cnt = {}
-            #     kpi_events = ev_df[ev_df['type'] == kpi_type]['index']
-            #     kpi_ob_types = self.kpis[kpi_type]
-            #
-            #     for key in ev_by_ob.keys():
-            #         ob_id = key
-            #         evs_by_ob = ev_by_ob[ob_id]['Events']
-            #         ob_type = ev_by_ob[ob_id]['Type'][0]
-            #         ob_idx = int(ob_df[ob_df['ocel_id'] == ob_id]['index'].values[0])
-            #
-            #         for ev in evs_by_ob:
-            #             if ev in kpi_events and ob_type in kpi_ob_types:
-            #                 ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
-            #                 kpi = [vwpnt_cnt, kpi_type, ob_type, ob_idx, ts]
-            #                 all_kpis.append(kpi)
-            #
-            #                 try:
-            #                     pst_cnt = ob_cnt[ob_type]
-            #                     ob_cnt[ob_type] = pst_cnt + 1
-            #                 except KeyError:
-            #                     ob_cnt[ob_type] = 1
-            #
-            #     # If an object type has no direct relation to any particular event of the chosen type
-            #     # assign the latest possible timestamp for that event type.
-            #     for ob_type in kpi_ob_types:
-            #         if ob_type not in ob_cnt.keys():
-            #             ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
-            #             kpi = [vwpnt_cnt, kpi_type, ob_type, 0, ts]
-            #             all_kpis.append(kpi)
+            # Create the kpi dataframe by checking the objects to events dictionary
+            for kpi_type in self.kpis.keys():
+                ob_cnt = {}
+                kpi_events = ev_df[ev_df['type'] == kpi_type]['index']
+                kpi_ob_types = self.kpis[kpi_type]
 
-        ev_log = pd.concat(log_frames)
-        ev_log.to_csv(self.ev_output, index=False)
+                for key in ev_by_ob.keys():
+                    ob_id = key
+                    evs_by_ob = ev_by_ob[ob_id]['Events']
+                    ob_type = ev_by_ob[ob_id]['Type'][0]
+                    ob_idx = int(ob_df[ob_df['ocel_id'] == ob_id]['index'].values[0])
 
-        # # Convert the lists into Numpy Arrays to make it easier to filter them later
-        # all_graphs = np.array(all_graphs)
-        # all_timestamps = np.array(all_timestamps)
-        # all_idx = np.array(all_idx)
-        # all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_type', 'index', 'timestamp'])
-        #
-        # # Export the dictionary for use in training
-        # with open('files/tensor_dict.json', "w") as f:
-        #     json.dump(self.tensor_dict, f)
-        #
-        # return all_graphs, all_timestamps, all_idx, all_kpis, self.tensor_dict
+                    for ev in evs_by_ob:
+                        if ev in kpi_events and ob_type in kpi_ob_types:
+                            ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
+                            kpi = [vwpnt_cnt, kpi_type, ob_type, ob_idx, ts]
+                            all_kpis.append(kpi)
+
+                            try:
+                                pst_cnt = ob_cnt[ob_type]
+                                ob_cnt[ob_type] = pst_cnt + 1
+                            except KeyError:
+                                ob_cnt[ob_type] = 1
+
+                # If an object type has no direct relation to any particular event of the chosen type
+                # assign the latest possible timestamp for that event type.
+                for ob_type in kpi_ob_types:
+                    if ob_type not in ob_cnt.keys():
+                        ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
+                        kpi = [vwpnt_cnt, kpi_type, ob_type, 0, ts]
+                        all_kpis.append(kpi)
+
+        # Convert the lists into Numpy Arrays to make it easier to filter them later
+        all_graphs = np.array(all_graphs)
+        all_timestamps = np.array(all_timestamps)
+        all_idx = np.array(all_idx)
+        all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_type', 'index', 'timestamp'])
+
+        # Export the dictionary for use in training
+        with open('files/tensor_dict.json', "w") as f:
+            json.dump(self.tensor_dict, f)
+
+        return all_graphs, all_timestamps, all_idx, all_kpis, self.tensor_dict
