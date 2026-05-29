@@ -37,8 +37,6 @@ class HeteroGraphsGenerator():
         # Creates a variety of dictionaries of relationships between objects
         self.pd_active_orders, self.active_orders_dict = self.preprocessing_steps()
 
-        # # Creates lists of items, packages and orders and their delivery times
-        # self.response_generation()
 
     def get_paths(self):
         with open('files/config.yml', 'r') as file:
@@ -59,9 +57,8 @@ class HeteroGraphsGenerator():
             temp = self.pd_df[self.pd_df['vwpnt_id'] == i + 1]
             strt_time = temp.iloc[0, 2]
             end_time = temp.iloc[-1, 2]
-            ob_id = temp.iloc[0, 3]
+            ob_id = temp.iloc[0, 4]
             active_orders.append([ob_id, strt_time, end_time])
-
         pd_active_orders = pd.DataFrame(active_orders)
         pd_active_orders.sort_values(by=2, inplace=True)
 
@@ -133,7 +130,7 @@ class HeteroGraphsGenerator():
         return all_graphs
 
     def builder(self, timestamp):
-        num_order = 67
+        num_order = 5
         # Get a list of processes that begin before the timestamp and finish after the timestamp
         active_orders = self.pd_active_orders[(self.pd_active_orders[1] <= timestamp) &
                                               (self.pd_active_orders[2] >= timestamp)][0]
@@ -143,25 +140,51 @@ class HeteroGraphsGenerator():
                          in active_orders]
         active_graphs = [copy.deepcopy(graph) for graph in active_graphs]
 
+        # Clean up the unnecessary identifiers in each object
+        for graph in active_graphs:
+            for key in graph.keys():
+                if "_to_" not in key:
+                    graph[key] = [x[:-1] for x in graph[key]]
+                    for index, x in enumerate(graph[key]):
+                        if len(x) > 1:
+                            graph[key][index] = x[1:]
+
         # Obtain the Y values for each item in the KPI section
         current_time = pd.to_datetime(timestamp)
         y_vals = []
+        # For each order obtain the active graph and the KPI values
         for order in active_orders:
             kpi_df = self.all_kpis[(self.all_kpis['viewpoint_id'] == order)]
+            active_graph = self.all_graphs[(self.all_timestamps <= timestamp) & (self.all_idx == order)][-1]
             for kpi in self.kpis.keys():
                 kpi_df = kpi_df[kpi_df['kpi_type'] == kpi]
                 kpi_ob_types = self.kpis[kpi]
                 for ob_type in kpi_ob_types:
-                    kpi_ts = kpi_df[kpi_df['ob_type'] == ob_type]['timestamp'].values
-                    kpi_ts = [pd.to_datetime(ts) - current_time for ts in kpi_ts]
-                    kpi_ts = [ts.total_seconds() for ts in kpi_ts]
-                    active_graph = self.all_graphs[(self.all_timestamps <= timestamp) & (self.all_idx == order)][-1]
-                    try:
-                        ob_cnt = len(active_graph[ob_type])
-                        y = kpi_ts[:ob_cnt]
-                        y_vals.append([kpi, order, ob_type, y])
-                    except KeyError:
-                        pass
+                    # For each object type obtains the object IDs present at the time
+                    ob_ids = [x[0] for x in active_graph[ob_type]]
+                    if len(ob_ids) > 0:
+                        ys = []
+                        for ob_id in ob_ids:
+                            kpi_ts = kpi_df[kpi_df['ob_id'] == ob_id]['timestamp'].values
+                            # If the IDs appear in the dictionary it calculates the Y value
+                            if len(kpi_ts) > 0:
+                                kpi_ts = [pd.to_datetime(ts) - current_time for ts in kpi_ts]
+                                kpi_ts = [ts.total_seconds() for ts in kpi_ts][-1]
+                                ys.append(kpi_ts)
+                            # If not it uses the object index to obtain the Y value
+                            else:
+                                kpi_ts = kpi_df[kpi_df['ob_type'] == ob_type]['timestamp'].values
+                                kpi_ts = [pd.to_datetime(ts) - current_time for ts in kpi_ts]
+                                kpi_ts = [ts.total_seconds() for ts in kpi_ts]
+                                try:
+                                    ob_cnt = len(active_graph[ob_type])
+                                    y = kpi_ts[:ob_cnt]
+                                    ys.extend(y)
+                                except KeyError:
+                                    pass
+                        y_vals.append([kpi, order, ob_type, ys])
+                    else:
+                        y_vals.append([kpi, order, ob_type, []])
 
         for idx, y_val in enumerate(y_vals):
             kpi_id = y_val[0]
@@ -185,62 +208,62 @@ class HeteroGraphsGenerator():
             y_vals, graphs = self.builder(timestamp)
             train_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
 
-        val_graphs_sg = []
-        print('Validation:')
-        for idx, timestamp in enumerate(self.val_sampled_timestamps):
-            if idx % int(len(self.val_sampled_timestamps) / 5) == 0:
-                print(int(idx * 20 / int(len(self.val_sampled_timestamps) / 5)), '%')
-            print(f'IDX: {idx}/ Timestamp: {timestamp}')
-            y_vals, graphs = self.builder(timestamp)
-            val_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
-
-        test_graphs_sg = []
-        print('Testing:')
-        for idx, timestamp in enumerate(self.test_sampled_timestamps):
-            if idx % int(len(self.test_sampled_timestamps) / 5) == 0:
-                print(int(idx * 20 / int(len(self.test_sampled_timestamps) / 5)), '%')
-            print(f'IDX: {idx}/ Timestamp: {timestamp}')
-            y_vals, graphs = self.builder(timestamp)
-            test_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
-
-        # KPI Standardization process
-        kpi_obs = self.kpis['PackageDelivered']
-        for kpi_ob in kpi_obs:
-            y_train = []
-            mask_y = []
-            for graph in train_graphs_sg:
-                try:
-                    y_train.extend(graph[kpi_ob]['y'])
-                    mask_y.extend(graph[kpi_ob]['mask'].reshape(-1))
-                except KeyError:
-                    pass
-
-            y_train = [a.item() for a in y_train]
-            mask_y = [a.item() for a in mask_y]
-            y_train = np.array(y_train)
-            mask_y = np.array(mask_y)
-            mean = np.mean(y_train[mask_y])
-            std = np.std(y_train[mask_y])
-
-            for graphs in [train_graphs_sg, val_graphs_sg, test_graphs_sg]:
-                for graph in graphs:
-                    try:
-                        graph[kpi_ob]['y'] = (graph[kpi_ob]['y'] - mean) / std
-                    except KeyError:
-                        pass
-
-        # Loading
-        train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
-        val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
-        test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
-
-        print("Saving heterographs...")
-        graphs = [data for data in train_loader_sg.dataset]
-        torch.save(graphs, f'files/hetero_structures/train_graphs_sg.pt')
-
-        graphs = [data for data in val_loader_sg.dataset]
-        torch.save(graphs, f'files/hetero_structures/val_graphs_sg.pt')
-
-        graphs = [data for data in test_loader_sg.dataset]
-        torch.save(graphs, f'files/hetero_structures/test_graphs_sg.pt')
-        print("Done!")
+        # val_graphs_sg = []
+        # print('Validation:')
+        # for idx, timestamp in enumerate(self.val_sampled_timestamps):
+        #     if idx % int(len(self.val_sampled_timestamps) / 5) == 0:
+        #         print(int(idx * 20 / int(len(self.val_sampled_timestamps) / 5)), '%')
+        #     print(f'IDX: {idx}/ Timestamp: {timestamp}')
+        #     y_vals, graphs = self.builder(timestamp)
+        #     val_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
+        #
+        # test_graphs_sg = []
+        # print('Testing:')
+        # for idx, timestamp in enumerate(self.test_sampled_timestamps):
+        #     if idx % int(len(self.test_sampled_timestamps) / 5) == 0:
+        #         print(int(idx * 20 / int(len(self.test_sampled_timestamps) / 5)), '%')
+        #     print(f'IDX: {idx}/ Timestamp: {timestamp}')
+        #     y_vals, graphs = self.builder(timestamp)
+        #     test_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
+        #
+        # # KPI Standardization process
+        # kpi_obs = self.kpis['PackageDelivered']
+        # for kpi_ob in kpi_obs:
+        #     y_train = []
+        #     mask_y = []
+        #     for graph in train_graphs_sg:
+        #         try:
+        #             y_train.extend(graph[kpi_ob]['y'])
+        #             mask_y.extend(graph[kpi_ob]['mask'].reshape(-1))
+        #         except KeyError:
+        #             pass
+        #
+        #     y_train = [a.item() for a in y_train]
+        #     mask_y = [a.item() for a in mask_y]
+        #     y_train = np.array(y_train)
+        #     mask_y = np.array(mask_y)
+        #     mean = np.mean(y_train[mask_y])
+        #     std = np.std(y_train[mask_y])
+        #
+        #     for graphs in [train_graphs_sg, val_graphs_sg, test_graphs_sg]:
+        #         for graph in graphs:
+        #             try:
+        #                 graph[kpi_ob]['y'] = (graph[kpi_ob]['y'] - mean) / std
+        #             except KeyError:
+        #                 pass
+        #
+        # # Loading
+        # train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
+        # val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
+        # test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
+        #
+        # print("Saving heterographs...")
+        # graphs = [data for data in train_loader_sg.dataset]
+        # torch.save(graphs, f'files/hetero_structures/train_graphs_sg.pt')
+        #
+        # graphs = [data for data in val_loader_sg.dataset]
+        # torch.save(graphs, f'files/hetero_structures/val_graphs_sg.pt')
+        #
+        # graphs = [data for data in test_loader_sg.dataset]
+        # torch.save(graphs, f'files/hetero_structures/test_graphs_sg.pt')
+        # print("Done!")

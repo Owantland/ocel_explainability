@@ -327,8 +327,7 @@ class generateTables():
 
                 # Perform One Hot Encoding on the event type and add it to the graph
                 encode = self.get_ev_encoding(ev_type)
-                # encode.append(ev_id)
-                # encode = [ev_type]
+                encode.append(ev_id)
                 graph['Events'].append(encode)
                 self.tensor_dict['Events'] = len(encode)
                 all_timestamps.append(timestamp)
@@ -425,13 +424,6 @@ class generateTables():
                         tmp_graph[edge_type][0].extend(object)
                         tmp_graph[edge_type][1].extend(ob_events)
 
-                # Clean up the unnecessary identifiers in each object
-                for ob_type in ob_types:
-                    tmp_graph[ob_type] = [x[:-1] for x in tmp_graph[ob_type]]
-                    for index, x in enumerate(tmp_graph[ob_type]):
-                        if len(x) > 1:
-                            tmp_graph[ob_type][index] = x[1:]
-
                 # Add object to object edge
                 objects_in_event= ob_df.loc[ob_df['ocel_id'].isin(objects_in_event)]
                 for relation in self.o2o_relations:
@@ -485,7 +477,7 @@ class generateTables():
                     for ev in evs_by_ob:
                         if ev in kpi_events and ob_type in kpi_ob_types:
                             ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
-                            kpi = [vwpnt_cnt, kpi_type, ob_type, ob_idx, ts]
+                            kpi = [vwpnt_cnt, kpi_type, ob_id, ob_type, ob_idx, ts]
                             all_kpis.append(kpi)
 
                             try:
@@ -499,14 +491,14 @@ class generateTables():
                 for ob_type in kpi_ob_types:
                     if ob_type not in ob_cnt.keys():
                         ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
-                        kpi = [vwpnt_cnt, kpi_type, ob_type, 0, ts]
+                        kpi = [vwpnt_cnt, kpi_type, '', ob_type, 0, ts]
                         all_kpis.append(kpi)
 
         # Convert the lists into Numpy Arrays to make it easier to filter them later
         all_graphs = np.array(all_graphs)
         all_timestamps = np.array(all_timestamps)
         all_idx = np.array(all_idx)
-        all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_type', 'index', 'timestamp'])
+        all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_id', 'ob_type', 'index', 'timestamp'])
 
         # Export the dictionary for use in training
         with open('files/tensor_dict.json', "w") as f:
