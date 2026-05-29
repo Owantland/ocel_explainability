@@ -24,17 +24,14 @@ class process_generation():
             db_configs = yaml.safe_load(file)
 
         self.ocel_path = db_configs[self.database]['ocel_path']
-        self.ob_output = db_configs[self.database]['ob_output_path']
         self.ev_output = db_configs[self.database]['ev_output_path']
-        self.ocel_output = db_configs[self.database]['ocel_output_path']
         self.filtered_tbls = db_configs[self.database]['filtered_tables']
         self.viewpoint = db_configs[self.database]['viewpoint']
         self.depth = db_configs[self.database]['added_depth']
         self.attributes = db_configs[self.database]['attributes']
         self.time_attributes = db_configs[self.database]['time_attributes']
         self.kpi_event = db_configs[self.database]['kpi_event']
-
-
+        self.unique_ids = db_configs[self.database]['unique_ids']
 
     def related_nodes(self):
         print("Obtaining all related nodes and arcs")
@@ -97,13 +94,9 @@ class process_generation():
                 self.cursor.execute(qry)
                 objects = self.cursor.fetchall()
                 for rltd_object in objects:
-                    if rltd_object[2] in private_types or rltd_object[0] == 'tr1':
-                        pass
-                    else:
+                    if rltd_object[2] in self.unique_ids:
                         ob_list.add(rltd_object[0])
-                    if rltd_object[3] in private_types:
-                        pass
-                    else:
+                    if rltd_object[3] in self.unique_ids:
                         ob_list.add(rltd_object[1])
 
             # Generate a list of related events to the viewpoint object
