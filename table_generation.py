@@ -145,11 +145,16 @@ class generateTables():
         self.cursor.execute(qry)
         types = self.cursor.fetchall()
         types = [type[0] for type in types]
-        binary = [[0] * len(types) for _ in range(len(types))]
-        for idx, a in enumerate(binary):
-            a[idx] = 1
-            oh_dict[types[idx]] = a
 
+        # If the selected object type has too many values to properly encode just assign a 1
+        if len(types) > 50:
+            for idx, a in enumerate(types):
+                oh_dict[types[idx]] = [1]
+        else:
+            binary = [[0] * len(types) for _ in range(len(types))]
+            for idx, a in enumerate(binary):
+                a[idx] = 1
+                oh_dict[types[idx]] = a
         return oh_dict
 
     def col_names(self, table_name):
@@ -275,12 +280,10 @@ class generateTables():
         ev_df.to_csv(self.ev_output, sep=',', index=False)
         return ev_df
 
-
     def create_graph(self, nodes):
         all_timestamps = []
         all_idx = []
         vwpnt_cnt = 0
-        log_frames = []
         all_graphs = []
         all_kpis = []
 
@@ -465,7 +468,6 @@ class generateTables():
                                     tg_index = rel_indx[trgt_id]
                                     tmp_graph[edge_name][0].append(src_index)
                                     tmp_graph[edge_name][1].append(tg_index)
-
                 all_graphs.append(tmp_graph)
 
             # Create the kpi dataframe by checking the objects to events dictionary
