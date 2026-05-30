@@ -5,6 +5,7 @@ import sqlite3
 import yaml
 import pandas as pd
 import sup_funcs as sup
+import tqdm
 
 '''
     Creating a unified Event table
@@ -231,16 +232,18 @@ class process_generation():
             rltd_events = nodes[vwpnt_object]['related_events']
             ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
 
+            # Obtain the trace KPI
             kpi_event_time = ev_df[ev_df['type'] == self.kpi_event]['timestamp'].values[-1]
             kpi_event_time = pd.to_datetime(kpi_event_time)
             ev_df['kpi_val'] = kpi_event_time - pd.to_datetime(ev_df['timestamp'])
-            ev_df['kpi_val'] = ev_df['kpi_val'].apply(lambda x: x.total_seconds())
-            ev_df = ev_df[ev_df['kpi_val'] >= 0]
+            trace_kpi = ev_df['kpi_val'][0]
 
             # Add the current viewpoint's elements to the event log
             id_col = [log_id for _ in range(len(ev_df.index))]
             ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
-            ev_log = ev_df[['ocel_id', 'type', 'timestamp', 'kpi_val']]
+            trace_kpi = [trace_kpi for _ in range(len(ev_df.index))]
+            ev_log = ev_df[['ocel_id', 'type', 'timestamp']]
+            ev_log['kpi_val'] = trace_kpi
             ev_log['vwpnt_id'] = id_col
             ev_log['ob_id'] = ob_id
             log_frames.append(ev_log)
