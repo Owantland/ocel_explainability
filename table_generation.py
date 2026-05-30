@@ -327,9 +327,8 @@ class generateTables():
 
                 # Perform One Hot Encoding on the event type and add it to the graph
                 encode = self.get_ev_encoding(ev_type)
-                encode.append(ev_id)
-                graph['Events'].append(encode)
                 self.tensor_dict['Events'] = len(encode)
+                graph['Events'].append(encode)
                 all_timestamps.append(timestamp)
                 all_idx.append(vwpnt_cnt)
                 past_events.append(ev_idx)
@@ -494,14 +493,24 @@ class generateTables():
                         kpi = [vwpnt_cnt, kpi_type, '', ob_type, 0, ts]
                         all_kpis.append(kpi)
 
+        # Export the generated files for future use
+        with open('files/tensor_dict.json', "w") as f:
+            json.dump(self.tensor_dict, f)
+
+        with open('files/graph_structures/all_graphs.json', "w") as f:
+            json.dump(all_graphs, f)
+
+        with open('files/graph_structures/all_timestamps.json', "w") as f:
+            json.dump(all_timestamps, f)
+
+        with open('files/graph_structures/all_idx.json', "w") as f:
+            json.dump(all_idx, f)
+
         # Convert the lists into Numpy Arrays to make it easier to filter them later
         all_graphs = np.array(all_graphs)
         all_timestamps = np.array(all_timestamps)
         all_idx = np.array(all_idx)
         all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_id', 'ob_type', 'index', 'timestamp'])
-
-        # Export the dictionary for use in training
-        with open('files/tensor_dict.json', "w") as f:
-            json.dump(self.tensor_dict, f)
+        all_kpis.to_csv('files/graph_structures/all_kpis.csv', index=False)
 
         return all_graphs, all_timestamps, all_idx, all_kpis, self.tensor_dict

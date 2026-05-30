@@ -1,6 +1,7 @@
 order_management:
   ocel_path: "files/databases/order_management.sqlite"
   ev_output_path: "files/output_tables/om_ev_table.csv"
+  pytorch_path: 'files/hetero_structures/order_management/'
   viewpoint: "Orders"
   added_depth: 0
   unique_ids: ['Orders', 'Items', 'Packages']
@@ -20,6 +21,7 @@ order_management:
 logistics:
   ocel_path: "files/databases/logistics.sqlite"
   ev_output_path: "files/output_tables/log_ev_table.csv"
+  pytorch_path: 'files/hetero_structures/logistics/'
   viewpoint: "CustomerOrder"
   added_depth: 2
   unique_ids: ['CustomerOrder', 'TransportDocument', 'Container', 'HandlingUnit']
