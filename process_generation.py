@@ -203,11 +203,24 @@ class process_generation():
                 object = (ob_index, rltd_object[0], rltd_object[1])
                 rltd_objects.add(object)
             rltd_objects = sorted(rltd_objects, key=lambda x: (x[2], x[1]))
+            rltd_objects = pd.DataFrame(rltd_objects, columns=['index', 'ocel_id', 'type'])
+
+            # Convert the event_by_object dictionary into a dataframe for ease of use
+            evs_by_obs = []
+            for key in events_by_objects.keys():
+                ob_id = key
+                events = events_by_objects[key]['Events']
+                events = sorted(events)
+                ob_type = events_by_objects[key]['Type'][0]
+                ob_idx = rltd_objects.loc[rltd_objects['ocel_id'] == ob_id, ['index']].values[0]
+                ev_ob = (ob_id, events, ob_type, int(ob_idx[0]))
+                evs_by_obs.append(ev_ob)
+            evs_by_obs = pd.DataFrame(evs_by_obs, columns=['ob_id', 'events', 'ob_type', 'index'])
 
             # Update the dictionary
             rltd_nodes[vwpnt_object[0]]['related_events'].extend(rltd_events)
-            rltd_nodes[vwpnt_object[0]]['related_objects'].extend(rltd_objects)
-            rltd_nodes[vwpnt_object[0]]['events_by_objects'].append(events_by_objects)
+            rltd_nodes[vwpnt_object[0]]['related_objects'].append(rltd_objects)
+            rltd_nodes[vwpnt_object[0]]['events_by_objects'].append(evs_by_obs)
         return rltd_nodes
 
     def get_ev_log(self, nodes):
