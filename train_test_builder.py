@@ -74,8 +74,11 @@ class TrainTestBuilder():
         # Splits the test orders into test and validation groups given a chosen percentage
         index_test = self.index_train + int(len(test_orders) * self.split_test_index)
         split_timestamp_val = self.pd_active_orders.iloc[index_test, 2]
-        last_timestamp_val = max(self.pd_active_orders.iloc[self.index_train: index_test, 2])
 
+        try:
+            last_timestamp_val = max(self.pd_active_orders.iloc[self.index_train: index_test, 2])
+        except ValueError:
+            last_timestamp_val = split_timestamp_val
         val_orders = self.pd_active_orders[
             (self.pd_active_orders[1] > last_timestamp) & (self.pd_active_orders[2] <= split_timestamp_val)][0]
         test_orders = self.pd_active_orders[self.pd_active_orders[1] > last_timestamp_val][0]
