@@ -32,9 +32,7 @@ class process_generation():
         self.kpi_event = db_configs[self.database]['kpi_event']
         self.unique_ids = db_configs[self.database]['unique_ids']
 
-    def related_nodes(self):
-        print("Obtaining all related nodes and arcs")
-
+    def get_data_dictionaries(self):
         # Generate a list of object to object relationships
         cols = self.funcs.col_names('object_object')
         qry = f'''
@@ -89,6 +87,10 @@ class process_generation():
                 timestamp = [(t[0], ev_type, t[-1]) for t in timestamp]
                 timestamp = pd.DataFrame(timestamp, columns=['ev_id', 'ev_type', 'timestamp'])
                 ev_tables[ev_type] = timestamp
+        return o2o_table, e20_table, ev_tables
+
+    def related_nodes(self):
+        print("Obtaining all related nodes and arcs")
 
         # Generate a list of all objects of the chosen viewpoint
         qry = f'''
@@ -99,11 +101,10 @@ class process_generation():
                '''
         self.cursor.execute(qry)
         vwpnt_objects = self.cursor.fetchall()
-
-        rltd_nodes = {}
-        event_log = []
+        o2o_table, e20_table, ev_tables = self.get_data_dictionaries()
 
         # For each viewpoint object obtain a list of related objects
+        rltd_nodes = {}
         vwpnt_cnt = 0
         for vwpnt_object in vwpnt_objects:
             vwpnt_cnt += 1
