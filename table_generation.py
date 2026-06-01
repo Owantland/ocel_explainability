@@ -333,74 +333,68 @@ class generateTables():
                 past_events.append(ev_idx)
 
                 # Add the event_to_event edges to the graph
-                graph['event_to_event'] = self.generate_adjacency_list_with_k(ev_by_ob, ev_idx)
-                self.tensor_dict['event_to_event'] = 1
+                graph['Events_to_Events'] = self.generate_adjacency_list_with_k(ev_by_ob, ev_idx)
+                self.tensor_dict['Events_to_Events'] = 1
+
+                # Add the objects related to each step
+                contained = False
+                tmp_graph = copy.deepcopy(graph)
+                ob_types = set()
+
+                for i, row in ev_by_ob.iterrows():
+                    ob_id = row['ob_id']
+                    evs_by_ob = row['events']
+                    ob_type = row['ob_type']
+                    ob_idx = row['index']
+                    edge_type = f"{ob_type}_to_Events"
+
+                    # Identify if the object needs to be added to the graph
+                    for event_by_object in evs_by_ob:
+                        if event_by_object in past_events:
+                            contained = True
+                            objects_in_event.append(ob_id)
+                            ob_types.add(ob_type)
+                            break
+                        else:
+                            contained = False
+
+                    # Check if the graph already has a list for the object type and, if not, create an empty list
+                    if ob_type not in tmp_graph.keys():
+                        tmp_graph[ob_type] = []
+
+                    # Create the object to event edge type
+                    if edge_type not in tmp_graph.keys():
+                        tmp_graph[edge_type] = [[], []]
+
+                    # If the object needs to be added to the graph it selects how to add it
+                    if contained:
+                        # If the object is of the viewpoint type it is skipped
+                        if ob_type != self.viewpoint:
+                            # The attributes are added to the graph depending on their type.
+                            if ob_type in self.attributes.keys():
+                                attr = self.attributes[ob_type]
+                                attributes = self.get_attributes(ob_id, ob_type, attr)
+                                self.tensor_dict[ob_type] = len(attr)
+                                attributes.append(ob_idx)
+                                tmp_graph[ob_type].append(attributes)
+                            elif ob_type in self.time_attributes.keys():
+                                attr = self.time_attributes[ob_type]
+                                self.tensor_dict[ob_type] = len(attr)
+                                time_attr = attr[1]
+                                fixed_attrs = attr[0]
+                                attributes = self.get_time_attributes(ob_id, ob_type, fixed_attrs, time_attr, timestamp)
+                                attributes.append(ob_idx)
+                                tmp_graph[ob_type].append(attributes)
+                            else:
+                                if ob_type in self.to_encode:
+                                    ob_id = [ob_id, self.encodings[ob_type][ob_id], ob_idx]
+                                    self.tensor_dict[ob_type] = len(ob_id[1])
+                                    tmp_graph[ob_type].append(ob_id)
+                                else:
+                                    tmp_graph[ob_type].append([ob_id, ob_idx])
                 if vwpnt_cnt == 95:
-                     print(graph['event_to_event'])
+                    print(tmp_graph)
 
-            #     # Add the objects related to each step
-            #     contained = False
-            #     tmp_graph = copy.deepcopy(graph)
-            #     ob_types = set()
-
-            #     for key in ev_by_ob.keys():
-            #         ob_id = key
-            #         evs_by_ob = ev_by_ob[ob_id]['Events']
-            #         ob_type = ev_by_ob[ob_id]['Type'][0]
-            #         ob_idx = int(ob_df[ob_df['ocel_id'] == ob_id]['index'].values[0])
-                    # edge_type = f"{ob_type}_to_event"
-
-        #             # Add the objects related to the event step
-        #             for event_by_object in evs_by_ob:
-        #                 if event_by_object in past_events:
-        #                     contained = True
-        #                     objects_in_event.append(ob_id)
-        #                     ob_types.add(ob_type)
-        #                     break
-        #                 else:
-        #                     contained = False
-        #
-        #             # Check if the graph already has a list for the object type and, if not, create an empty list
-        #             try:
-        #                 len(tmp_graph[ob_type]) > 0
-        #             except KeyError:
-        #                 tmp_graph[ob_type] = []
-        #
-        #             # Create the object to event edge type
-        #             try:
-        #                 len(tmp_graph[edge_type]) > 0
-        #             except KeyError:
-        #                 tmp_graph[edge_type] = [[], []]
-        #
-        #             if contained:
-        #                 if ob_type == self.viewpoint:
-        #                     pass
-        #                 else:
-        #                     # Add the desired attributes for each object type
-        #                     # Need to add time sensitive attributes like the one for product
-        #                     try:
-        #                         attr = self.attributes[ob_type]
-        #                         attributes = self.get_attributes(ob_id, ob_type, attr)
-        #                         self.tensor_dict[ob_type] = len(attr)
-        #                         attributes.append(ob_idx)
-        #                         tmp_graph[ob_type].append(attributes)
-        #                     except KeyError:
-        #                         try:
-        #                             attr = self.time_attributes[ob_type]
-        #                             self.tensor_dict[ob_type] = len(attr)
-        #                             time_attr = attr[1]
-        #                             fixed_attrs = attr[0]
-        #                             attributes = self.get_time_attributes(ob_id, ob_type, fixed_attrs, time_attr, timestamp)
-        #                             attributes.append(ob_idx)
-        #                             tmp_graph[ob_type].append(attributes)
-        #                         except KeyError:
-        #                             if ob_type in self.to_encode:
-        #                                 ob_id = [ob_id, self.encodings[ob_type][ob_id], ob_idx]
-        #                                 self.tensor_dict[ob_type] = len(ob_id[1])
-        #                                 tmp_graph[ob_type].append(ob_id)
-        #                             else:
-        #                                 tmp_graph[ob_type].append([ob_id, ob_idx])
-        #
         #         # Order the added objects and assign a relative index
         #         rel_indx = {}
         #         for ob_type in ob_types:
