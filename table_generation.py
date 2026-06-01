@@ -522,5 +522,3 @@ class generateTables():
         all_idx = np.array(all_idx)
         all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_id', 'ob_type', 'index', 'timestamp'])
         all_kpis.to_csv(f'{self.graph_output_path}all_kpis.csv', index=False)
-
-        return all_graphs, all_timestamps, all_idx, all_kpis, self.tensor_dict
