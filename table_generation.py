@@ -24,6 +24,9 @@ class generateTables():
         self.o2o_relations = self.get_o2o_relations()
         self.get_encodings()
 
+        # Creates dictionary of selected attributes for chosen object types
+        self.ob_attributes = self.get_attributes()
+
         # Dictionary of object sizes for future tensor creation
         self.tensor_dict = {}
 
@@ -49,30 +52,38 @@ class generateTables():
             encod_dict = self.get_1h_encoding(encoding)
             self.encodings[encoding] = encod_dict
 
-    def get_attributes(self, node_id, type, attributes):
-        attributes = [f'MAX({a})' for a in attributes]
-        if len(attributes) > 1:
-            attributes = ','.join(attributes)
-        else:
-            attributes = attributes[0]
+    # Generate a local dictionary of the desired attributes for the chosen object types
+    def get_attributes(self):
+        ob_attributes = {}
+        for type in self.attributes.keys():
+            print(type)
+            attributes = self.attributes[type]
+            attributes = [f'MAX({a})' for a in attributes]
+            if len(attributes) > 1:
+                attributes = ','.join(attributes)
+            else:
+                attributes = attributes[0]
 
-        table = f'object_{type}'
-        cols = self.col_names(table)
-
-        if len(cols) == 0:
-            table = f'event_{type}'
+            table = f'object_{type}'
             cols = self.col_names(table)
 
-        qry = f'''
-                SELECT {cols[0]}, {attributes}
-                FROM {table}
-                WHERE {cols[0]} = '{node_id}'
-               '''
+            if len(cols) == 0:
+                table = f'event_{type}'
+                cols = self.col_names(table)
 
-        self.cursor.execute(qry)
-        attrs = self.cursor.fetchall()
-        attrs = [attr for attr in attrs[0]]
-        return attrs
+            qry = f'''
+                    SELECT {cols[0]}, {attributes}
+                    FROM {table}
+                    GROUP BY {cols[0]}
+                   '''
+
+            self.cursor.execute(qry)
+            attrs = self.cursor.fetchall()
+            cols = ['ob_id']
+            cols.extend(self.attributes[type])
+            attrs = pd.DataFrame(attrs, columns=cols)
+            ob_attributes[type] = attrs
+            return ob_attributes
 
     def get_time_attributes(self, node_id, type, fixed_attr, time_attr, timestamp):
         table = f'object_{type}'
