@@ -56,7 +56,6 @@ class generateTables():
     def get_attributes(self):
         ob_attributes = {}
         for type in self.attributes.keys():
-            print(type)
             attributes = self.attributes[type]
             attributes = [f'MAX({a})' for a in attributes]
             if len(attributes) > 1:
@@ -83,7 +82,7 @@ class generateTables():
             cols.extend(self.attributes[type])
             attrs = pd.DataFrame(attrs, columns=cols)
             ob_attributes[type] = attrs
-            return ob_attributes
+        return ob_attributes
 
     def get_time_attributes(self, node_id, type, fixed_attr, time_attr, timestamp):
         table = f'object_{type}'
@@ -315,8 +314,10 @@ class generateTables():
             ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
 
             # Always add the viewpoint object first
-            attributes = self.get_attributes(vwpnt_object, self.viewpoint, self.attributes[self.viewpoint])
-            self.tensor_dict[self.viewpoint] = len(self.attributes[self.viewpoint])
+            attr_cols = self.attributes[self.viewpoint]
+            attr_df = self.ob_attributes[self.viewpoint]
+            attributes = list(attr_df[attr_df['ob_id'] == vwpnt_object].values[0])
+            self.tensor_dict[self.viewpoint] = len(attr_cols)
             attributes.append(vwpnt_cnt)
             attributes.append(vwpnt_object)
             graph[self.viewpoint] = [attributes]
@@ -383,9 +384,9 @@ class generateTables():
                         if ob_type != self.viewpoint:
                             # The attributes are added to the graph depending on their type.
                             if ob_type in self.attributes.keys():
-                                attr = self.attributes[ob_type]
-                                attributes = self.get_attributes(ob_id, ob_type, attr)
-                                self.tensor_dict[ob_type] = len(attr)
+                                attr_df = self.ob_attributes[ob_type]
+                                attributes = list(attr_df[attr_df['ob_id'] == ob_id].values[0])
+                                self.tensor_dict[ob_type] = len(attributes)
                                 attributes.append(ob_idx)
                                 tmp_graph[ob_type].append(attributes)
                             elif ob_type in self.time_attributes.keys():
