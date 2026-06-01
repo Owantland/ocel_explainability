@@ -403,7 +403,7 @@ class generateTables():
                             if ob_type in self.attributes.keys():
                                 attr_df = self.ob_attributes[ob_type]
                                 attributes = list(attr_df[attr_df['ob_id'] == ob_id].values[0])
-                                self.tensor_dict[ob_type] = len(attributes)
+                                self.tensor_dict[ob_type] = len(attributes) - 1
                                 attributes.append(ob_idx)
                                 tmp_graph[ob_type].append(attributes)
                             elif ob_type in self.time_attributes.keys():

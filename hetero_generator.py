@@ -86,8 +86,9 @@ class HeteroGraphsGenerator():
 
     def tensor_maker(self, single_graphs, y_vals, timestamp):
         all_graphs = []
-        kpi_obs = self.kpis['PackageDelivered']
-        y_vals = y_vals[y_vals['kpi_id'] == 'PackageDelivered']
+        kpi_ev = [x for x in self.kpis.keys()]
+        kpi_obs = self.kpis[kpi_ev[0]]
+        y_vals = y_vals[y_vals['kpi_id'] == kpi_ev[0]]
 
         for idx, graph in enumerate(single_graphs):
             vwpnt_id = graph[self.viewpoint][0][-1]
@@ -112,7 +113,6 @@ class HeteroGraphsGenerator():
                     data[kpi_ob].y = torch.tensor(vwpnt_y, dtype=torch.float32).reshape(-1, 1)
                     data[kpi_ob].mask = torch.tensor(vwpnt_mask, dtype=torch.bool).reshape(-1, 1)
 
-                    # print(f'For viewpoint {vwpnt_id} at {timestamp} the y values for {kpi_ob} with graph {ob_graph} are \n{vwpnt_y} and {vwpnt_mask}')
                 except IndexError:
                     pass
 
@@ -121,24 +121,16 @@ class HeteroGraphsGenerator():
             for key in graph.keys():
                 if key != self.viewpoint:
                     # Edges are added after object nodes
-                    if "_to_" in key and key != 'event_to_event':
+                    if "_to_" in key and key:
                         edges.append(key)
                     else:
-                        if key != 'event_to_event':
-                            # Obtains the length of each node to ensure proper reshape
-                            ob_len = self.tensor_dict[key]
-                            data[key].x = torch.tensor(graph[key], dtype=torch.float32).reshape(-1, ob_len)
+                        # Obtains the length of each node to ensure proper reshape
+                        ob_len = self.tensor_dict[key]
+                        data[key].x = torch.tensor(graph[key], dtype=torch.float32).reshape(-1, ob_len)
             for edge in edges:
                 split = edge.split("_to_")
-                if split[1] != 'event':
-                    data[split[0], 'to', split[1]].edge_index = torch.tensor(graph[edge],
-                                                                             dtype=torch.int64).reshape(2, -1)
-                else:
-                    split[1] = 'Events'
-                    data[split[0], 'to', split[1]].edge_index = torch.tensor(graph[edge],
-                                                                             dtype=torch.int64).reshape(2, -1)
-            data['Events', 'to', 'Events'].edge_index = torch.tensor(graph['event_to_event'], dtype=torch.int64).reshape(
-                2, -1)
+                data[split[0], 'to', split[1]].edge_index = torch.tensor(graph[edge],
+                                                                         dtype=torch.int64).reshape(2, -1)
             data = T.ToUndirected()(data)
             all_graphs.append(data)
         return all_graphs
@@ -221,65 +213,63 @@ class HeteroGraphsGenerator():
             print(f'IDX: {idx}/ Timestamp: {timestamp}')
             y_vals, graphs = self.builder(timestamp)
             train_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
-        #
-        # val_graphs_sg = []
-        # print('Validation:')
-        # for idx, timestamp in enumerate(self.val_sampled_timestamps):
-        #     if idx % int(len(self.val_sampled_timestamps) / 5) == 0:
-        #         print(int(idx * 20 / int(len(self.val_sampled_timestamps) / 5)), '%')
-        #     print(f'IDX: {idx}/ Timestamp: {timestamp}')
-        #     y_vals, graphs = self.builder(timestamp)
-        #     val_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
-        #
-        # test_graphs_sg = []
-        # print('Testing:')
-        # for idx, timestamp in enumerate(self.test_sampled_timestamps):
-        #     if idx % int(len(self.test_sampled_timestamps) / 5) == 0:
-        #         print(int(idx * 20 / int(len(self.test_sampled_timestamps) / 5)), '%')
-        #     print(f'IDX: {idx}/ Timestamp: {timestamp}')
-        #     y_vals, graphs = self.builder(timestamp)
-        #     test_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
-        #
-        # # KPI Standardization process
-        # kpi_obs = self.kpis['PackageDelivered']
-        # for kpi_ob in kpi_obs:
-        #     y_train = []
-        #     mask_y = []
-        #     for graph in train_graphs_sg:
-        #         try:
-        #             y_train.extend(graph[kpi_ob]['y'])
-        #             mask_y.extend(graph[kpi_ob]['mask'].reshape(-1))
-        #         except KeyError:
-        #             pass
-        #
-        #     y_train = [a.item() for a in y_train]
-        #     mask_y = [a.item() for a in mask_y]
-        #     y_train = np.array(y_train)
-        #     mask_y = np.array(mask_y)
-        #     mean = np.mean(y_train[mask_y])
-        #     std = np.std(y_train[mask_y])
-        #
-        #     for graphs in [train_graphs_sg, val_graphs_sg, test_graphs_sg]:
-        #         for graph in graphs:
-        #             try:
-        #                 graph[kpi_ob]['y'] = (graph[kpi_ob]['y'] - mean) / std
-        #             except KeyError:
-        #                 pass
-        #
-        # # Loading
-        # train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
-        # val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
-        # test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
-        #
-        # print("Saving heterographs...")
-        # for data in train_loader_sg:
-        #     print(data)
-        # graphs = [data for data in train_loader_sg.dataset]
-        # torch.save(graphs, f'{self.pytorch_path}train_graphs_sg.pt')
-        #
-        # graphs = [data for data in val_loader_sg.dataset]
-        # torch.save(graphs, f'{self.pytorch_path}val_graphs_sg.pt')
-        #
-        # graphs = [data for data in test_loader_sg.dataset]
-        # torch.save(graphs, f'{self.pytorch_path}test_graphs_sg.pt')
-        # print("Done!")
+
+        val_graphs_sg = []
+        print('Validation:')
+        for idx, timestamp in enumerate(self.val_sampled_timestamps):
+            if idx % int(len(self.val_sampled_timestamps) / 5) == 0:
+                print(int(idx * 20 / int(len(self.val_sampled_timestamps) / 5)), '%')
+            print(f'IDX: {idx}/ Timestamp: {timestamp}')
+            y_vals, graphs = self.builder(timestamp)
+            val_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
+
+        test_graphs_sg = []
+        print('Testing:')
+        for idx, timestamp in enumerate(self.test_sampled_timestamps):
+            if idx % int(len(self.test_sampled_timestamps) / 5) == 0:
+                print(int(idx * 20 / int(len(self.test_sampled_timestamps) / 5)), '%')
+            print(f'IDX: {idx}/ Timestamp: {timestamp}')
+            y_vals, graphs = self.builder(timestamp)
+            test_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
+
+        # KPI Standardization process
+        kpi_obs = self.kpis['PackageDelivered']
+        for kpi_ob in kpi_obs:
+            y_train = []
+            mask_y = []
+            for graph in train_graphs_sg:
+                try:
+                    y_train.extend(graph[kpi_ob]['y'])
+                    mask_y.extend(graph[kpi_ob]['mask'].reshape(-1))
+                except KeyError:
+                    pass
+
+            y_train = [a.item() for a in y_train]
+            mask_y = [a.item() for a in mask_y]
+            y_train = np.array(y_train)
+            mask_y = np.array(mask_y)
+            mean = np.mean(y_train[mask_y])
+            std = np.std(y_train[mask_y])
+
+            for graphs in [train_graphs_sg, val_graphs_sg, test_graphs_sg]:
+                for graph in graphs:
+                    try:
+                        graph[kpi_ob]['y'] = (graph[kpi_ob]['y'] - mean) / std
+                    except KeyError:
+                        pass
+
+        # Loading
+        train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
+        val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
+        test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
+
+        print("Saving heterographs...")
+        graphs = [data for data in train_loader_sg.dataset]
+        torch.save(graphs, f'{self.pytorch_path}train_graphs_sg.pt')
+
+        graphs = [data for data in val_loader_sg.dataset]
+        torch.save(graphs, f'{self.pytorch_path}val_graphs_sg.pt')
+
+        graphs = [data for data in test_loader_sg.dataset]
+        torch.save(graphs, f'{self.pytorch_path}test_graphs_sg.pt')
+        print("Done!")
