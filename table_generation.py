@@ -27,6 +27,9 @@ class generateTables():
         # Creates dictionary of selected attributes for chosen object types
         self.ob_attributes = self.get_attributes()
 
+        # Creates the object to object dataframe
+        self.o2o_df =  self.get_o2o_df()
+
         # Dictionary of object sizes for future tensor creation
         self.tensor_dict = {}
 
@@ -241,7 +244,7 @@ class generateTables():
                     JOIN OBJECT O ON O.OCEL_ID = OO.ocel_source_id
                     JOIN OBJECT O3 ON O3.OCEL_ID = OO.OCEL_TARGET_ID
                 )
-                SELECT M.OCEL_TYPE_MAP AS SOURCE, M2.OCEL_TYPE_MAP AS TARGET
+                SELECT M.OCEL_TYPE_MAP AS SOURCE_TYPE, M2.OCEL_TYPE_MAP AS TARGET_TYPE
                 FROM OB2OB O
                 JOIN OBJECT_MAP_TYPE M ON O.SOURCE = M.OCEL_TYPE
                 JOIN OBJECT_MAP_TYPE M2 ON O.TARGET = M2.OCEL_TYPE;
@@ -249,6 +252,20 @@ class generateTables():
         self.cursor.execute(qry)
         o2o_relations = self.cursor.fetchall()
         return o2o_relations
+
+    def get_o2o_df(self):
+        qry = f'''
+                        SELECT  OO.OCEL_SOURCE_ID
+                                ,OO.OCEL_TARGET_ID
+                                ,M.OCEL_TYPE_MAP AS TARGET_TYPE
+                        FROM OBJECT_OBJECT OO
+                        JOIN OBJECT O ON OO.ocel_target_id = O.OCEL_ID
+                        JOIN OBJECT_MAP_TYPE M ON O.OCEL_TYPE = M.OCEL_TYPE
+                       '''
+        self.cursor.execute(qry)
+        o2o_df = self.cursor.fetchall()
+        o2o_df = pd.DataFrame(o2o_df, columns=['src_id', 'trgt_id', 'trgt_type'])
+        return o2o_df
 
     # Obtain the timestamped series of events present in the event data set
     def event_log(self):
@@ -307,11 +324,11 @@ class generateTables():
             # Add all nodes to the graph
             graph = {}
             past_events = []
+            ob_df = nodes[vwpnt_object]['related_objects'][0]
+            ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
 
-            ob_df = nodes[vwpnt_object]['related_objects']
             rltd_events = nodes[vwpnt_object]['related_events']
             ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
-            ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
 
             # Always add the viewpoint object first
             attr_cols = self.attributes[self.viewpoint]
@@ -404,121 +421,106 @@ class generateTables():
                                     tmp_graph[ob_type].append(ob_id)
                                 else:
                                     tmp_graph[ob_type].append([ob_id, ob_idx])
-                if vwpnt_cnt == 95:
-                    print(tmp_graph)
 
-        #         # Order the added objects and assign a relative index
-        #         rel_indx = {}
-        #         for ob_type in ob_types:
-        #             tmp_graph[ob_type] = sorted(tmp_graph[ob_type], key=lambda x: (x[-1], x[0]))
-        #             ob_cnt = 0
-        #             for x in tmp_graph[ob_type]:
-        #                 x[-1] = ob_cnt
-        #                 rel_indx[x[0]] = ob_cnt
-        #                 ob_cnt += 1
-        #
-        #         # Add the object to event edges
-        #         for ob_id in objects_in_event:
-        #             evs_by_ob = ev_by_ob[ob_id]['Events']
-        #             ob_events = [ev for ev in evs_by_ob if ev in past_events]
-        #             ob_idx = rel_indx[ob_id]
-        #             ob_type = ev_by_ob[ob_id]['Type'][0]
-        #             edge_type = f"{ob_type}_to_event"
-        #             self.tensor_dict[edge_type] = 1
-        #
-        #             if len(ob_events) > 0: # Only add edge if objects are present
-        #                 object = [int(ob_idx) for a in range(len(ob_events))]
-        #                 tmp_graph[edge_type][0].extend(object)
-        #                 tmp_graph[edge_type][1].extend(ob_events)
-        #
-        #         # Add object to object edge
-        #         objects_in_event= ob_df.loc[ob_df['ocel_id'].isin(objects_in_event)]
-        #         for relation in self.o2o_relations:
-        #             ob_source = relation[0]
-        #             ob_target = relation[1]
-        #             sources = objects_in_event[objects_in_event['type'] == ob_source]
-        #             targets = objects_in_event[objects_in_event['type'] == ob_target]
-        #             edge_name = f'{ob_source}_to_{ob_target}'
-        #             tmp_graph[edge_name] = [[], []]
-        #             self.tensor_dict[edge_name] = 1
-        #             if len(sources) > 0 and len(targets) > 0:
-        #                 for i, row in sources.iterrows():
-        #                     src_id = row['ocel_id']
-        #                     src_index = rel_indx[src_id]
-        #                     qry = f'''
-        #                             SELECT
-        #                                 -- OO.OCEL_SOURCE_ID,
-        #                                 OO.OCEL_TARGET_ID
-        #                                 -- ,M.OCEL_TYPE_MAP
-        #                             FROM OBJECT_OBJECT OO
-        #                             JOIN OBJECT O ON OO.ocel_target_id = O.OCEL_ID
-        #                             JOIN OBJECT_MAP_TYPE M ON O.OCEL_TYPE = M.OCEL_TYPE
-        #                             WHERE
-        #                                 ocel_source_id = '{src_id}' AND
-        #                                 M.OCEL_TYPE_MAP = '{ob_target}'
-        #                            '''
-        #                     self.cursor.execute(qry)
-        #                     trgt_ids = self.cursor.fetchall()
-        #
-        #                     for trgt_id in trgt_ids:
-        #                         trgt_id = trgt_id[0]
-        #                         tg_info = targets[targets['ocel_id'] == trgt_id].values
-        #                         if len(tg_info) > 0:
-        #                             tg_index = rel_indx[trgt_id]
-        #                             tmp_graph[edge_name][0].append(src_index)
-        #                             tmp_graph[edge_name][1].append(tg_index)
-        #         all_graphs.append(tmp_graph)
-        #
-        #     # Create the kpi dataframe by checking the objects to events dictionary
-        #     for kpi_type in self.kpis.keys():
-        #         ob_cnt = {}
-        #         kpi_events = ev_df[ev_df['type'] == kpi_type]['index']
-        #         kpi_ob_types = self.kpis[kpi_type]
-        #
-        #         for key in ev_by_ob.keys():
-        #             ob_id = key
-        #             evs_by_ob = ev_by_ob[ob_id]['Events']
-        #             ob_type = ev_by_ob[ob_id]['Type'][0]
-        #             ob_idx = int(ob_df[ob_df['ocel_id'] == ob_id]['index'].values[0])
-        #
-        #             for ev in evs_by_ob:
-        #                 if ev in kpi_events and ob_type in kpi_ob_types:
-        #                     ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
-        #                     kpi = [vwpnt_cnt, kpi_type, ob_id, ob_type, ob_idx, ts]
-        #                     all_kpis.append(kpi)
-        #
-        #                     try:
-        #                         pst_cnt = ob_cnt[ob_type]
-        #                         ob_cnt[ob_type] = pst_cnt + 1
-        #                     except KeyError:
-        #                         ob_cnt[ob_type] = 1
-        #
-        #         # If an object type has no direct relation to any particular event of the chosen type
-        #         # assign the latest possible timestamp for that event type.
-        #         for ob_type in kpi_ob_types:
-        #             if ob_type not in ob_cnt.keys():
-        #                 ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
-        #                 kpi = [vwpnt_cnt, kpi_type, '', ob_type, 0, ts]
-        #                 all_kpis.append(kpi)
-        #
-        # # Export the generated files for future use
-        # with open(f'{self.graph_output_path}tensor_dict.json', "w") as f:
-        #     json.dump(self.tensor_dict, f)
-        #
-        # with open(f'{self.graph_output_path}all_graphs.json', "w") as f:
-        #     json.dump(all_graphs, f)
-        #
-        # with open(f'{self.graph_output_path}all_timestamps.json', "w") as f:
-        #     json.dump(all_timestamps, f)
-        #
-        # with open(f'{self.graph_output_path}all_idx.json', "w") as f:
-        #     json.dump(all_idx, f)
-        #
-        # # Convert the lists into Numpy Arrays to make it easier to filter them later
-        # all_graphs = np.array(all_graphs)
-        # all_timestamps = np.array(all_timestamps)
-        # all_idx = np.array(all_idx)
-        # all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_id', 'ob_type', 'index', 'timestamp'])
-        # all_kpis.to_csv(f'{self.graph_output_path}all_kpis.csv', index=False)
-        #
-        # return all_graphs, all_timestamps, all_idx, all_kpis, self.tensor_dict
+                # Order the added objects and assign a relative index
+                rel_indx = {}
+                for ob_type in ob_types:
+                    tmp_graph[ob_type] = sorted(tmp_graph[ob_type], key=lambda x: (x[-1], x[0]))
+                    ob_cnt = 0
+                    for x in tmp_graph[ob_type]:
+                        x[-1] = ob_cnt
+                        rel_indx[x[0]] = ob_cnt
+                        ob_cnt += 1
+
+                # Add the object to event edges
+                for ob_id in objects_in_event:
+                    evs_by_ob = list(ev_by_ob[ev_by_ob['ob_id'] == ob_id]['events'].values[0])
+                    ob_events = [ev for ev in evs_by_ob if ev in past_events]
+                    ob_idx = rel_indx[ob_id]
+                    ob_type = ev_by_ob[ev_by_ob['ob_id'] == ob_id]['ob_type'].values[0]
+                    edge_type = f"{ob_type}_to_Events"
+                    self.tensor_dict[edge_type] = 1
+
+                    if len(ob_events) > 0: # Only add edge if objects are present
+                        object = [int(ob_idx) for a in range(len(ob_events))]
+                        tmp_graph[edge_type][0].extend(object)
+                        tmp_graph[edge_type][1].extend(ob_events)
+
+                # Add object to object edge
+                objects_in_event= ob_df.loc[ob_df['ocel_id'].isin(objects_in_event)]
+                for relation in self.o2o_relations:
+                    ob_source = relation[0]
+                    ob_target = relation[1]
+                    sources = objects_in_event[objects_in_event['type'] == ob_source]
+                    targets = objects_in_event[objects_in_event['type'] == ob_target]
+                    edge_name = f'{ob_source}_to_{ob_target}'
+                    tmp_graph[edge_name] = [[], []]
+                    self.tensor_dict[edge_name] = 1
+                    if len(sources) > 0 and len(targets) > 0:
+                        for i, row in sources.iterrows():
+                            src_id = row['ocel_id']
+                            src_index = rel_indx[src_id]
+                            trgt_ids = self.o2o_df[self.o2o_df['src_id'] == src_id]
+                            trgt_ids = trgt_ids[trgt_ids['trgt_type'] == ob_target]['trgt_id'].tolist()
+
+                            for trgt_id in trgt_ids:
+                                tg_info = targets[targets['ocel_id'] == trgt_id].values
+                                if len(tg_info) > 0:
+                                    tg_index = rel_indx[trgt_id]
+                                    tmp_graph[edge_name][0].append(src_index)
+                                    tmp_graph[edge_name][1].append(tg_index)
+                all_graphs.append(tmp_graph)
+
+            # Create the kpi dataframe by checking the objects to events dictionary
+            for kpi_type in self.kpis.keys():
+                ob_cnt = {}
+                kpi_events = ev_df[ev_df['type'] == kpi_type]['index']
+                kpi_ob_types = self.kpis[kpi_type]
+
+                for i, row in ev_by_ob.iterrows():
+                    ob_id = row['ob_id']
+                    evs_by_ob = row['events']
+                    ob_type = row['ob_type']
+                    ob_idx = row['index']
+
+                    for ev in evs_by_ob:
+                        if ev in kpi_events and ob_type in kpi_ob_types:
+                            ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
+                            kpi = [vwpnt_cnt, kpi_type, ob_id, ob_type, ob_idx, ts]
+                            all_kpis.append(kpi)
+
+                            try:
+                                pst_cnt = ob_cnt[ob_type]
+                                ob_cnt[ob_type] = pst_cnt + 1
+                            except KeyError:
+                                ob_cnt[ob_type] = 1
+
+                # If an object type has no direct relation to any particular event of the chosen type
+                # assign the latest possible timestamp for that event type.
+                for ob_type in kpi_ob_types:
+                    if ob_type not in ob_cnt.keys():
+                        ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
+                        kpi = [vwpnt_cnt, kpi_type, '', ob_type, 0, ts]
+                        all_kpis.append(kpi)
+
+        # Export the generated files for future use
+        with open(f'{self.graph_output_path}tensor_dict.json', "w") as f:
+            json.dump(self.tensor_dict, f)
+
+        with open(f'{self.graph_output_path}all_graphs.json', "w") as f:
+            json.dump(all_graphs, f)
+
+        with open(f'{self.graph_output_path}all_timestamps.json', "w") as f:
+            json.dump(all_timestamps, f)
+
+        with open(f'{self.graph_output_path}all_idx.json', "w") as f:
+            json.dump(all_idx, f)
+
+        # Convert the lists into Numpy Arrays to make it easier to filter them later
+        all_graphs = np.array(all_graphs)
+        all_timestamps = np.array(all_timestamps)
+        all_idx = np.array(all_idx)
+        all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_id', 'ob_type', 'index', 'timestamp'])
+        all_kpis.to_csv(f'{self.graph_output_path}all_kpis.csv', index=False)
+
+        return all_graphs, all_timestamps, all_idx, all_kpis, self.tensor_dict
