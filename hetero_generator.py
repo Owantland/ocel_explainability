@@ -10,12 +10,12 @@ from torch_geometric.data import HeteroData
 import torch
 from torch_geometric.loader import DataLoader
 import torch_geometric.transforms as T
+import json
 import warnings
 warnings.filterwarnings("ignore")
 
 class HeteroGraphsGenerator():
-    def __init__(self, database, cant, all_graphs, all_timestamps, all_idx, all_kpis, tensor_dict,
-                 train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps):
+    def __init__(self, database, cant, train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps):
         self.database = database
         self.cant = cant
         self.num_vp_obj = self.cant
@@ -28,15 +28,27 @@ class HeteroGraphsGenerator():
         conn = sqlite3.connect(self.ocel_path)
         self.cursor = conn.cursor()
 
-        self.all_graphs = all_graphs
-        self.all_timestamps = all_timestamps
-        self.all_idx = all_idx
-        self.all_kpis = all_kpis
-        self.tensor_dict = tensor_dict
+        # Open relevant files
+        with open(f'{self.graph_output_path}tensor_dict.json') as json_file:
+            self.tensor_dict = json.load(json_file)
+
+        with open(f'{self.graph_output_path}all_graphs.json') as json_file:
+            all_graphs = json.load(json_file)
+            self.all_graphs = np.array(all_graphs)
+
+        with open(f'{self.graph_output_path}all_timestamps.json') as json_file:
+            all_timestamps = json.load(json_file)
+            self.all_timestamps = np.array(all_timestamps)
+
+        with open(f'{self.graph_output_path}all_idx.json') as json_file:
+            all_idx = json.load(json_file)
+            self.all_idx = np.array(all_idx)
+
+        with open(f'{self.graph_output_path}all_kpis.csv') as csv_file:
+            self.all_kpis = pd.read_csv(csv_file)
 
         # Creates a variety of dictionaries of relationships between objects
         self.pd_active_orders, self.active_orders_dict = self.preprocessing_steps()
-
 
     def get_paths(self):
         with open('files/config.yml', 'r') as file:
@@ -48,6 +60,8 @@ class HeteroGraphsGenerator():
         self.pd_df = pd.read_csv(self.output_path)
         self.viewpoint = db_configs[self.database]['viewpoint']
         self.to_encode = db_configs[self.database]['encoding']
+        self.pytorch_path = db_configs[self.database]['pytorch_path']
+        self.graph_output_path = db_configs[self.database]['graph_output_path']
 
     def preprocessing_steps(self):
         # For each order finds its start time and end time and orders them in relation to which process
@@ -130,7 +144,7 @@ class HeteroGraphsGenerator():
         return all_graphs
 
     def builder(self, timestamp):
-        num_order = 5
+        num_order = 95
         # Get a list of processes that begin before the timestamp and finish after the timestamp
         active_orders = self.pd_active_orders[(self.pd_active_orders[1] <= timestamp) &
                                               (self.pd_active_orders[2] >= timestamp)][0]
@@ -143,7 +157,7 @@ class HeteroGraphsGenerator():
         # Clean up the unnecessary identifiers in each object
         for graph in active_graphs:
             for key in graph.keys():
-                if "_to_" not in key:
+                if "_to_" not in key and key != 'Events':
                     graph[key] = [x[:-1] for x in graph[key]]
                     for index, x in enumerate(graph[key]):
                         if len(x) > 1:
@@ -207,7 +221,7 @@ class HeteroGraphsGenerator():
             print(f'IDX: {idx}/ Timestamp: {timestamp}')
             y_vals, graphs = self.builder(timestamp)
             train_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
-
+        #
         # val_graphs_sg = []
         # print('Validation:')
         # for idx, timestamp in enumerate(self.val_sampled_timestamps):
@@ -258,12 +272,14 @@ class HeteroGraphsGenerator():
         # test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
         #
         # print("Saving heterographs...")
+        # for data in train_loader_sg:
+        #     print(data)
         # graphs = [data for data in train_loader_sg.dataset]
-        # torch.save(graphs, f'files/hetero_structures/train_graphs_sg.pt')
+        # torch.save(graphs, f'{self.pytorch_path}train_graphs_sg.pt')
         #
         # graphs = [data for data in val_loader_sg.dataset]
-        # torch.save(graphs, f'files/hetero_structures/val_graphs_sg.pt')
+        # torch.save(graphs, f'{self.pytorch_path}val_graphs_sg.pt')
         #
         # graphs = [data for data in test_loader_sg.dataset]
-        # torch.save(graphs, f'files/hetero_structures/test_graphs_sg.pt')
+        # torch.save(graphs, f'{self.pytorch_path}test_graphs_sg.pt')
         # print("Done!")

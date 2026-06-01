@@ -517,8 +517,5 @@ class generateTables():
             json.dump(all_idx, f)
 
         # Convert the lists into Numpy Arrays to make it easier to filter them later
-        all_graphs = np.array(all_graphs)
-        all_timestamps = np.array(all_timestamps)
-        all_idx = np.array(all_idx)
         all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_id', 'ob_type', 'index', 'timestamp'])
         all_kpis.to_csv(f'{self.graph_output_path}all_kpis.csv', index=False)
