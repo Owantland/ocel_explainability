@@ -12,6 +12,7 @@ from torch_geometric.loader import DataLoader
 import torch_geometric.transforms as T
 import json
 import warnings
+import os
 warnings.filterwarnings("ignore")
 
 class HeteroGraphsGenerator():
@@ -27,6 +28,8 @@ class HeteroGraphsGenerator():
         self.get_paths()
         conn = sqlite3.connect(self.ocel_path)
         self.cursor = conn.cursor()
+        kpi_event = [x for x in self.kpis.keys()]
+        self.kpi_event = kpi_event[0]
 
         # Open relevant files
         with open(f'{self.graph_output_path}tensor_dict.json') as json_file:
@@ -264,12 +267,17 @@ class HeteroGraphsGenerator():
         test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
 
         print("Saving heterographs...")
+        # Check file paths exist
+        path = f'{self.pytorch_path}{self.kpi_event}'
+        if not os.path.exists(path):
+            os.makedirs(path)
+
         graphs = [data for data in train_loader_sg.dataset]
-        torch.save(graphs, f'{self.pytorch_path}train_graphs_sg.pt')
+        torch.save(graphs, f'{path}/train_graphs_sg.pt')
 
         graphs = [data for data in val_loader_sg.dataset]
-        torch.save(graphs, f'{self.pytorch_path}val_graphs_sg.pt')
+        torch.save(graphs, f'{path}/val_graphs_sg.pt')
 
         graphs = [data for data in test_loader_sg.dataset]
-        torch.save(graphs, f'{self.pytorch_path}test_graphs_sg.pt')
+        torch.save(graphs, f'{path}/test_graphs_sg.pt')
         print("Done!")
