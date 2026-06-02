@@ -77,19 +77,19 @@ class Evaluation:
         return loss.item()
 
     def evalutaion(self):
-        # obs = self.path_dict['kpis'][self.path_dict['kpi_event']]
-        obs = ['Orders']
+        obs = self.path_dict['kpis'][self.path_dict['kpi_event']]
         print("Loading models and data...")
-        all_results = {}
         all_results = {v: [[], []] for v in obs}
 
         test_graphs_sg = torch.load(f"{self.path_dict['hetero_path']}/test_graphs_sg.pt", weights_only=False)
         test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
 
-        for index, kpi_ob in enumerate(obs):
-            num_layers = self.model_params.iloc[index, 1]
-            width_layers = self.model_params.iloc[index, 2]
-            heads = self.model_params.iloc[index, 3]
+        for kpi_ob in obs:
+            parameters = self.model_params[self.model_params['kpi_ob'] == kpi_ob]
+            num_layers = int(parameters['num_layers'].values[0])
+            width_layers = int(parameters['width_layers'].values[0])
+            heads = int(parameters['heads'].values[0])
+
             model_path = f"{self.path_dict['model_output_path']}/{kpi_ob}"
 
             for i in range(1, 6):

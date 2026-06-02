@@ -4,7 +4,6 @@ from model_class import OrderPredictionHeteroGNN_2
 import pandas as pd
 from torch_geometric.loader import DataLoader
 import sup_funcs as sf
-import yaml
 import os
 
 class Trainer:
