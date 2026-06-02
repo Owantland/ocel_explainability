@@ -60,11 +60,13 @@ class HeteroGraphsGenerator():
         self.output_path = db_configs[self.database]['ev_output_path']
         self.ocel_path = db_configs[self.database]['ocel_path']
         self.kpis = db_configs[self.database]['kpis']
-        self.pd_df = pd.read_csv(self.output_path)
         self.viewpoint = db_configs[self.database]['viewpoint']
         self.to_encode = db_configs[self.database]['encoding']
         self.pytorch_path = db_configs[self.database]['pytorch_path']
         self.graph_output_path = db_configs[self.database]['graph_output_path']
+        self.kpi_event = db_configs[self.database]['kpi_event']
+        path = f'{self.graph_output_path}{self.kpi_event}/ev_table.csv'
+        self.pd_df = pd.read_csv(path)
 
     def preprocessing_steps(self):
         # For each order finds its start time and end time and orders them in relation to which process
@@ -236,7 +238,8 @@ class HeteroGraphsGenerator():
             test_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
 
         # KPI Standardization process
-        kpi_obs = self.kpis['PackageDelivered']
+        kpis = [x for x in self.kpis.keys()]
+        kpi_obs = self.kpis[kpis[0]]
         for kpi_ob in kpi_obs:
             y_train = []
             mask_y = []

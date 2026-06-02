@@ -267,47 +267,6 @@ class generateTables():
         o2o_df = pd.DataFrame(o2o_df, columns=['src_id', 'trgt_id', 'trgt_type'])
         return o2o_df
 
-    # Obtain the timestamped series of events present in the event data set
-    def event_log(self):
-        tables = self.filter_tables('event')
-        cols = set()
-
-        # Create a list of all columns for the union table
-        for table in tables:
-            columns = self.col_names(table)
-            for column in columns:
-                cols.add(column)
-
-        # Check each table for which columns they have
-        col_names = list(cols)
-        col_names.append('type')
-        ev_df = pd.DataFrame(columns=col_names)
-
-        for table in tables:
-            qry_cols = ""
-            columns = self.col_names(table)
-            for column in cols:
-                if column in columns:
-                    qry_cols += f"{table}.'{column}',\n"
-                else:
-                    qry_cols += f"NULL as '{column}',\n"
-
-            query = f'''
-                        SELECT DISTINCT
-                            {qry_cols}
-                            event.ocel_type
-                        FROM {table}
-                        JOIN event ON {table}.ocel_id = event.ocel_id
-                        ORDER BY 1;
-                    '''
-            self.cursor.execute(query)
-            columns_info = self.cursor.fetchall()
-            for column in columns_info:
-                ev_df.loc[len(ev_df.index)] = column
-
-        ev_df.to_csv(self.ev_output, sep=',', index=False)
-        return ev_df
-
     def create_graph(self, nodes):
         all_timestamps = []
         all_idx = []

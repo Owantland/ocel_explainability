@@ -42,9 +42,12 @@ class TrainTestBuilder():
         with open('files/config.yml', 'r') as file:
             db_configs = yaml.safe_load(file)
 
+        self.graph_output_path = db_configs[self.database]['graph_output_path']
+        self.kpi_event = db_configs[self.database]['kpi_event']
         self.output_path = db_configs[self.database]['ev_output_path']
         self.end_event = db_configs[self.database]['end_event']
-        self.pd_df = pd.read_csv(self.output_path)
+        path = f'{self.graph_output_path}{self.kpi_event}/ev_table.csv'
+        self.pd_df = pd.read_csv(path)
 
     def sample_equally(self, input_list, num_samples):
         # Handle edge cases

@@ -5,6 +5,7 @@ import sqlite3
 import yaml
 import pandas as pd
 import sup_funcs as sup
+import os
 
 '''
     Creating a unified Event table
@@ -23,7 +24,6 @@ class process_generation():
             db_configs = yaml.safe_load(file)
 
         self.ocel_path = db_configs[self.database]['ocel_path']
-        self.ev_output = db_configs[self.database]['ev_output_path']
         self.filtered_tbls = db_configs[self.database]['filtered_tables']
         self.viewpoint = db_configs[self.database]['viewpoint']
         self.depth = db_configs[self.database]['added_depth']
@@ -31,6 +31,7 @@ class process_generation():
         self.time_attributes = db_configs[self.database]['time_attributes']
         self.kpi_event = db_configs[self.database]['kpi_event']
         self.unique_ids = db_configs[self.database]['unique_ids']
+        self.graph_output_path = db_configs[self.database]['graph_output_path']
 
     def get_data_dictionaries(self):
         # Generate a list of object to object relationships
@@ -252,4 +253,7 @@ class process_generation():
 
         # Save the event log
         ev_log = pd.concat(log_frames)
-        ev_log.to_csv(self.ev_output, index=False)
+        path = f'{self.graph_output_path}{self.kpi_event}'
+        if not os.path.exists(path):
+            os.makedirs(path)
+        ev_log.to_csv(f'{path}/ev_table.csv', index=False)
