@@ -3,26 +3,27 @@
 
 import sqlite3
 import json
-import numpy as np
-import yaml
 import pandas as pd
 import copy
+import sup_funcs as sf
 
 from collections import defaultdict
 
 '''
     Creating a unified Event table
 '''
-class generateTables():
+class GenerateTables:
     def __init__(self, database, cant):
         self.database = database
         self.cant = cant
-        self.get_paths()
-        conn = sqlite3.connect(self.ocel_path)
+        self.funcs = sf.SupportFunctions(database)
+        self.path_dict = self.funcs.get_paths()
+
+        conn = sqlite3.connect(self.path_dict['ocel_path'])
         self.cursor = conn.cursor()
         self.tabl_nms = self.table_names()
         self.o2o_relations = self.get_o2o_relations()
-        self.get_encodings()
+        self.encodings = self.get_encodings()
 
         # Creates dictionary of selected attributes for chosen object types
         self.ob_attributes = self.get_attributes()
@@ -33,44 +34,29 @@ class generateTables():
         # Dictionary of object sizes for future tensor creation
         self.tensor_dict = {}
 
-    def get_paths(self):
-        with open('files/config.yml', 'r') as file:
-            db_configs = yaml.safe_load(file)
-
-        self.ocel_path = db_configs[self.database]['ocel_path']
-        self.ev_output = db_configs[self.database]['ev_output_path']
-        self.filtered_tbls = db_configs[self.database]['filtered_tables']
-        self.viewpoint = db_configs[self.database]['viewpoint']
-        self.depth = db_configs[self.database]['added_depth']
-        self.attributes = db_configs[self.database]['attributes']
-        self.time_attributes = db_configs[self.database]['time_attributes']
-        self.to_encode = db_configs[self.database]['encoding']
-        self.kpis = db_configs[self.database]['kpis']
-        self.kpi_event = db_configs[self.database]['kpi_event']
-        self.graph_output_path = db_configs[self.database]['graph_output_path']
-
     def get_encodings(self):
-        self.encodings = {}
-        for encoding in self.to_encode:
+        encodings = {}
+        for encoding in self.path_dict['encoding']:
             encod_dict = self.get_1h_encoding(encoding)
-            self.encodings[encoding] = encod_dict
+            encodings[encoding] = encod_dict
+        return encodings
 
     # Generate a local dictionary of the desired attributes for the chosen object types
     def get_attributes(self):
         ob_attributes = {}
-        for type in self.attributes.keys():
-            attributes = self.attributes[type]
+        for att_type in self.path_dict['attributes'].keys():
+            attributes = self.path_dict['attributes'][att_type]
             attributes = [f'MAX({a})' for a in attributes]
             if len(attributes) > 1:
                 attributes = ','.join(attributes)
             else:
                 attributes = attributes[0]
 
-            table = f'object_{type}'
+            table = f'object_{att_type}'
             cols = self.col_names(table)
 
             if len(cols) == 0:
-                table = f'event_{type}'
+                table = f'event_{att_type}'
                 cols = self.col_names(table)
 
             qry = f'''
@@ -82,17 +68,17 @@ class generateTables():
             self.cursor.execute(qry)
             attrs = self.cursor.fetchall()
             cols = ['ob_id']
-            cols.extend(self.attributes[type])
+            cols.extend(self.path_dict['attributes'][att_type])
             attrs = pd.DataFrame(attrs, columns=cols)
-            ob_attributes[type] = attrs
+            ob_attributes[att_type] = attrs
         return ob_attributes
 
-    def get_time_attributes(self, node_id, type, fixed_attr, time_attr, timestamp):
-        table = f'object_{type}'
+    def get_time_attributes(self, node_id, att_type, fixed_attr, time_attr, timestamp):
+        table = f'object_{att_type}'
         cols = self.col_names(table)
 
         if len(cols) == 0:
-            table = f'event_{type}'
+            table = f'event_{att_type}'
             cols = self.col_names(table)
 
         qry = f"""
@@ -129,7 +115,7 @@ class generateTables():
         attrs = [attr for attr in attrs[0]]
         return attrs
 
-    def get_ev_encoding(self, type):
+    def get_ev_encoding(self, ev_type):
         qry = f'''
                SELECT DISTINCT OCEL_TYPE_MAP
                FROM EVENT_MAP_TYPE
@@ -137,19 +123,18 @@ class generateTables():
                '''
         self.cursor.execute(qry)
         types = self.cursor.fetchall()
-        types = [type[0] for type in types]
+        types = [ev_type[0] for ev_type in types]
         events = [[0] * len(types)]
-        events[0][types.index(type)] = 1
+        events[0][types.index(ev_type)] = 1
         return events[0]
 
-    def get_1h_encoding(self, type):
+    def get_1h_encoding(self, ob_type):
         oh_dict = {}
-        table = f'object_{type}'
+        table = f'object_{ob_type}'
         cols = self.col_names(table)
 
         if len(cols) == 0:
-            table = f'event_{type}'
-            cols = self.col_names(table)
+            table = f'event_{ob_type}'
 
         qry = f'''
                 SELECT DISTINCT OCEL_ID
@@ -158,7 +143,7 @@ class generateTables():
                '''
         self.cursor.execute(qry)
         types = self.cursor.fetchall()
-        types = [type[0] for type in types]
+        types = [ob_type[0] for ob_type in types]
 
         # If the selected object type has too many values to properly encode just assign a 1
         if len(types) > 50:
@@ -182,13 +167,6 @@ class generateTables():
         table_names = self.cursor.fetchall()
         table_names = [column[0] for column in table_names]
         return table_names
-
-    def filter_tables(self, type):
-        fltr = type + "_"
-        tbl_nms = list(filter(lambda nm: nm.startswith(fltr), self.tabl_nms))
-        for table in self.filtered_tbls:
-            tbl_nms = list(filter(lambda nm: nm != table, tbl_nms))
-        return tbl_nms
 
     def generate_adjacency_list_with_k(self, ev_ob_df, par):
         """
@@ -290,13 +268,13 @@ class generateTables():
             ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
 
             # Always add the viewpoint object first
-            attr_cols = self.attributes[self.viewpoint]
-            attr_df = self.ob_attributes[self.viewpoint]
+            attr_cols = self.path_dict['attributes'][self.path_dict['viewpoint']]
+            attr_df = self.ob_attributes[self.path_dict['viewpoint']]
             attributes = list(attr_df[attr_df['ob_id'] == vwpnt_object].values[0])
-            self.tensor_dict[self.viewpoint] = len(attr_cols)
+            self.tensor_dict[self.path_dict['viewpoint']] = len(attr_cols)
             attributes.append(vwpnt_cnt)
             attributes.append(vwpnt_object)
-            graph[self.viewpoint] = [attributes]
+            graph[self.path_dict['viewpoint']] = [attributes]
 
             # Create a new graph for every event in the process
             for i, row in ev_df.iterrows():
@@ -357,16 +335,16 @@ class generateTables():
                     # If the object needs to be added to the graph it selects how to add it
                     if contained:
                         # If the object is of the viewpoint type it is skipped
-                        if ob_type != self.viewpoint:
+                        if ob_type != self.path_dict['viewpoint']:
                             # The attributes are added to the graph depending on their type.
-                            if ob_type in self.attributes.keys():
+                            if ob_type in self.path_dict['attributes'].keys():
                                 attr_df = self.ob_attributes[ob_type]
                                 attributes = list(attr_df[attr_df['ob_id'] == ob_id].values[0])
                                 self.tensor_dict[ob_type] = len(attributes) - 1
                                 attributes.append(ob_idx)
                                 tmp_graph[ob_type].append(attributes)
-                            elif ob_type in self.time_attributes.keys():
-                                attr = self.time_attributes[ob_type]
+                            elif ob_type in self.path_dict['time_attributes'].keys():
+                                attr = self.path_dict['time_attributes'][ob_type]
                                 self.tensor_dict[ob_type] = len(attr)
                                 time_attr = attr[1]
                                 fixed_attrs = attr[0]
@@ -374,7 +352,7 @@ class generateTables():
                                 attributes.append(ob_idx)
                                 tmp_graph[ob_type].append(attributes)
                             else:
-                                if ob_type in self.to_encode:
+                                if ob_type in self.path_dict['encoding']:
                                     ob_id = [ob_id, self.encodings[ob_type][ob_id], ob_idx]
                                     self.tensor_dict[ob_type] = len(ob_id[1])
                                     tmp_graph[ob_type].append(ob_id)
@@ -431,10 +409,10 @@ class generateTables():
                 all_graphs.append(tmp_graph)
 
             # Create the kpi dataframe by checking the objects to events dictionary
-            for kpi_type in self.kpis.keys():
+            for kpi_type in self.path_dict['kpis'].keys():
                 ob_cnt = {}
                 kpi_events = ev_df[ev_df['type'] == kpi_type]['index']
-                kpi_ob_types = self.kpis[kpi_type]
+                kpi_ob_types = self.path_dict['kpis'][kpi_type]
 
                 for i, row in ev_by_ob.iterrows():
                     ob_id = row['ob_id']
@@ -463,18 +441,18 @@ class generateTables():
                         all_kpis.append(kpi)
 
         # Export the generated files for future use
-        with open(f'{self.graph_output_path}tensor_dict.json', "w") as f:
+        with open(f"{self.path_dict['graph_output_path']}tensor_dict.json", "w") as f:
             json.dump(self.tensor_dict, f)
 
-        with open(f'{self.graph_output_path}all_graphs.json', "w") as f:
+        with open(f"{self.path_dict['graph_output_path']}all_graphs.json", "w") as f:
             json.dump(all_graphs, f)
 
-        with open(f'{self.graph_output_path}all_timestamps.json', "w") as f:
+        with open(f"{self.path_dict['graph_output_path']}all_timestamps.json", "w") as f:
             json.dump(all_timestamps, f)
 
-        with open(f'{self.graph_output_path}all_idx.json', "w") as f:
+        with open(f"{self.path_dict['graph_output_path']}all_idx.json", "w") as f:
             json.dump(all_idx, f)
 
         # Convert the lists into Numpy Arrays to make it easier to filter them later
         all_kpis = pd.DataFrame(all_kpis, columns=['viewpoint_id', 'kpi_type', 'ob_id', 'ob_type', 'index', 'timestamp'])
-        all_kpis.to_csv(f'{self.graph_output_path}all_kpis.csv', index=False)
+        all_kpis.to_csv(f"{self.path_dict['graph_output_path']}all_kpis.csv", index=False)
