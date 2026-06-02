@@ -1,13 +1,16 @@
 import pandas as pd
 import yaml
+import sup_funcs as sf
 
 class TrainTestBuilder():
     def __init__(self, database, CANT):
         self.database = database
         self.cant = CANT
         self.num_vp_obj = self.cant
-        self.get_paths()
+        self.funcs = sf.SupportFunctions(database)
+        self.path_dict = self.funcs.get_paths()
 
+        self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
         self.pd_active_orders = self.get_active_orders()
 
         # Assigns train/test split values
@@ -25,29 +28,18 @@ class TrainTestBuilder():
             start_time = temp.iloc[0,2]
 
             # Select the final event of the chosen type for marking the end time of the process
-            temp = temp[temp['type'] == self.end_event]
+            temp = temp[temp['type'] == self.path_dict['kpi_event']]
             end_time = temp.iloc[-1, 2]
             active_orders.append([vwpnt_id, start_time, end_time])
 
             # Curtail the dataframe to avoid events that happen after our chosen end event
             del_index = self.pd_df[(self.pd_df['vwpnt_id'] == vwpnt_id) & (self.pd_df['timestamp'] > end_time)].index
             self.pd_df = self.pd_df.drop(del_index, inplace=False)
-            self.pd_df.to_csv(self.output_path, index=False)
+            self.pd_df.to_csv(self.path_dict['ev_log_path'], index=False)
 
         pd_active_orders = pd.DataFrame(active_orders)
         pd_active_orders.sort_values(by=2, inplace=True)
         return pd_active_orders
-
-    def get_paths(self):
-        with open('files/config.yml', 'r') as file:
-            db_configs = yaml.safe_load(file)
-
-        self.graph_output_path = db_configs[self.database]['graph_output_path']
-        self.kpi_event = db_configs[self.database]['kpi_event']
-        self.output_path = db_configs[self.database]['ev_output_path']
-        self.end_event = db_configs[self.database]['end_event']
-        path = f'{self.graph_output_path}{self.kpi_event}/ev_table.csv'
-        self.pd_df = pd.read_csv(path)
 
     def sample_equally(self, input_list, num_samples):
         # Handle edge cases
