@@ -8,7 +8,8 @@ order_management:
   unique_ids: ['Orders', 'Items', 'Packages']
   kpi_type: 0
   kpis:
-    PackageDelivered: ['Orders', 'Items', 'Packages'] #End event for the KPI and associated objects
+#    PackageDelivered: ['Orders'] #Time until order is delivered
+    PayOrder: ['Orders'] #Time until order is payd
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:
     Orders: ['price']
@@ -20,7 +21,6 @@ order_management:
 
 logistics:
   ocel_path: "files/databases/logistics.sqlite"
-  ev_output_path: "files/output_tables/log_ev_table.csv"
   graph_output_path: "files/graph_structures/logistics/"
   pytorch_path: 'files/hetero_structures/logistics/'
   model_output_path: 'files/models/logistics/'
@@ -29,7 +29,7 @@ logistics:
   unique_ids: ['CustomerOrder', 'TransportDocument', 'Container', 'HandlingUnit']
   kpi_type: 0
   kpis:
-    Depart: [ 'TransportDocument'] #End event for the KPI and associated objects
+    Depart: ['TransportDocument'] # Time until order is fulfilled
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:
     CustomerOrder: ['AmountofGoods']

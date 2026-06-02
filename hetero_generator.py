@@ -272,17 +272,12 @@ class HeteroGraphsGenerator:
         test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
 
         print("Saving heterographs...")
-        # Check file paths exist
-        path = f"{self.path_dict['pytorch_path']}{self.path_dict['kpi_event']}"
-        if not os.path.exists(path):
-            os.makedirs(path)
-
         graphs = [data for data in train_loader_sg.dataset]
-        torch.save(graphs, f'{path}/train_graphs_sg.pt')
+        torch.save(graphs, f"{self.path_dict['hetero_path']}/train_graphs_sg.pt")
 
         graphs = [data for data in val_loader_sg.dataset]
-        torch.save(graphs, f'{path}/val_graphs_sg.pt')
+        torch.save(graphs, f"{self.path_dict['hetero_path']}/val_graphs_sg.pt")
 
         graphs = [data for data in test_loader_sg.dataset]
-        torch.save(graphs, f'{path}/test_graphs_sg.pt')
+        torch.save(graphs, f"{self.path_dict['hetero_path']}/test_graphs_sg.pt")
         print("Done!")

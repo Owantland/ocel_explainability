@@ -3,22 +3,23 @@ import json
 from model_class import OrderPredictionHeteroGNN_2
 import pandas as pd
 from torch_geometric.loader import DataLoader
-import numpy as np
+import sup_funcs as sf
 import yaml
 import os
 
-class Trainer():
+class Trainer:
     def __init__(self, database):
         self.database = database
-        self.get_paths()
+        self.funcs = sf.SupportFunctions(database)
+        self.path_dict = self.funcs.get_paths()
+        self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
 
         # Add this to config file
-        kpi_event = [x for x in self.kpis.keys()]
+        kpi_event = [x for x in self.path_dict['kpis'].keys()]
         self.kpi_event = kpi_event[0]
 
-        path = f'{self.pytorch_path}{self.kpi_event}'
-        self.train_graphs_sg = torch.load(f'{path}/train_graphs_sg.pt', weights_only=False)
-        self.val_graphs_sg = torch.load(f'{path}/val_graphs_sg.pt', weights_only=False)
+        self.train_graphs_sg = torch.load(f"{self.path_dict['hetero_path']}/train_graphs_sg.pt", weights_only=False)
+        self.val_graphs_sg = torch.load(f"{self.path_dict['hetero_path']}/val_graphs_sg.pt", weights_only=False)
 
         self.criterion = torch.nn.L1Loss()
         # self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -26,22 +27,8 @@ class Trainer():
 
         self.model_params = pd.read_csv("files/model_parameters.csv", delimiter=',')
 
-        with open(f'{self.graph_output_path}tensor_dict.json') as json_file:
+        with open(f"{self.path_dict['graph_output_path']}tensor_dict.json") as json_file:
             self.tensor_dict = json.load(json_file)
-
-    def get_paths(self):
-        with open('files/config.yml', 'r') as file:
-            db_configs = yaml.safe_load(file)
-
-        self.output_path = db_configs[self.database]['ev_output_path']
-        self.ocel_path = db_configs[self.database]['ocel_path']
-        self.kpis = db_configs[self.database]['kpis']
-        self.pd_df = pd.read_csv(self.output_path)
-        self.viewpoint = db_configs[self.database]['viewpoint']
-        self.to_encode = db_configs[self.database]['encoding']
-        self.pytorch_path = db_configs[self.database]['pytorch_path']
-        self.graph_output_path = db_configs[self.database]['graph_output_path']
-        self.model_output_path = db_configs[self.database]['model_output_path']
 
     def training_loop(self, model, train_loader, val_loader, viewpoint, optimizer):
         model.to(self.device)  # Move the model to the GPU (or CPU)
@@ -83,12 +70,13 @@ class Trainer():
         return (train_loss / to_div).item(), (test_loss / to_div_2).item()
 
     def trainer(self):
-        flag = True
-        for key in self.kpis.keys():
-            ob_index = self.kpis[key]
-            for kpi_ob in self.kpis[key]:
+        for key in self.path_dict['kpis'].keys():
+            ob_index = self.path_dict['kpis'][key]
+            for kpi_ob in self.path_dict['kpis'][key]:
+                flag = True
+                print(kpi_ob)
                 # Validate model path exists
-                model_path = f"{self.model_output_path}{self.kpi_event}/{kpi_ob}"
+                model_path = f"{self.path_dict['model_output_path']}/{kpi_ob}"
                 if not os.path.exists(model_path):
                     os.makedirs(model_path)
 

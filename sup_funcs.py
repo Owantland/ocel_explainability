@@ -16,7 +16,7 @@ class SupportFunctions:
         path_dict = {'ocel_path': db_configs[self.database]['ocel_path'],
                      'graph_output_path': db_configs[self.database]['graph_output_path'],
                      'pytorch_path': db_configs[self.database]['pytorch_path'],
-                     'model_output_path': db_configs[self.database]['model_output_path'],
+                     'model_path': db_configs[self.database]['model_output_path'],
                      'viewpoint': db_configs[self.database]['viewpoint'],
                      'depth': db_configs[self.database]['added_depth'],
                      'unique_ids': db_configs[self.database]['unique_ids'],
@@ -37,6 +37,22 @@ class SupportFunctions:
             os.makedirs(path_dict['ev_log_path'])
         path_dict['ev_log_path'] = f"{path_dict['ev_log_path']}/ev_table.csv"
 
+        # Generate appropriate path for saving the heterographs
+        path = f"{path_dict['pytorch_path']}{path_dict['kpi_event']}"
+        if not os.path.exists(path):
+            os.makedirs(path)
+        path_dict['hetero_path'] = path
+
+        # Generate appropriate path for saving models
+        path = f"{path_dict['model_path']}{path_dict['kpi_event']}"
+        # Save the model into the appropriate directory for the KPI type selected
+        if path_dict['kpi_type'] == 0:
+            path = f"{path}/trace"
+        else:
+            path = f"{path}/prefixes"
+        if not os.path.exists(path):
+            os.makedirs(path)
+        path_dict['model_output_path'] = path
         return path_dict
 
     def col_names(self, table_name):

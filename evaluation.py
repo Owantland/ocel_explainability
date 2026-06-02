@@ -1,22 +1,23 @@
-import numpy as np
 import torch
-import warnings
 from torch_geometric.loader import DataLoader
 from model_class import OrderPredictionHeteroGNN_2
 import pandas as pd
 import warnings
 import json
+import sup_funcs as sf
 
 warnings.filterwarnings("ignore")
 
 
-class Evaluation():
-    def __init__(self):
+class Evaluation:
+    def __init__(self, database):
         self.criterion = torch.nn.L1Loss()
         self.device = torch.device('cpu')
+        self.funcs = sf.SupportFunctions(database)
+        self.path_dict = self.funcs.get_paths()
 
         self.model_params = pd.read_csv("files/model_parameters.csv", delimiter=',')
-        with open('files/tensor_dict.json') as json_file:
+        with open(f"{self.path_dict['graph_output_path']}tensor_dict.json") as json_file:
             self.tensor_dict = json.load(json_file)
 
     def eval_model(self, model, viewpoint, loader):
@@ -76,23 +77,25 @@ class Evaluation():
         return loss.item()
 
     def evalutaion(self):
-        obs = ['Orders', 'Items']
+        # obs = self.path_dict['kpis'][self.path_dict['kpi_event']]
+        obs = ['Orders']
         print("Loading models and data...")
         all_results = {}
         all_results = {v: [[], []] for v in obs}
 
-        test_graphs_sg = torch.load(f"files/hetero_structures/test_graphs_sg.pt", weights_only=False)
+        test_graphs_sg = torch.load(f"{self.path_dict['hetero_path']}/test_graphs_sg.pt", weights_only=False)
         test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
 
         for index, kpi_ob in enumerate(obs):
             num_layers = self.model_params.iloc[index, 1]
             width_layers = self.model_params.iloc[index, 2]
             heads = self.model_params.iloc[index, 3]
+            model_path = f"{self.path_dict['model_output_path']}/{kpi_ob}"
 
             for i in range(1, 6):
                 model_sg = OrderPredictionHeteroGNN_2([width_layers] * num_layers, 1, num_layers,
                                                       heads, self.tensor_dict, kpi_ob)
-                state_dict = torch.load(f"files/models/{kpi_ob}/GAT_sg_{i}.pth")
+                state_dict = torch.load(f"{model_path}/GAT_sg_{i}.pth", weights_only=False)
                 model_sg.load_state_dict(state_dict)
 
                 if kpi_ob == 'package':
