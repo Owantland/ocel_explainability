@@ -197,9 +197,6 @@ class HeteroGraphsGenerator:
                         y_vals.append([kpi, order, ob_type, ys])
                     else:
                         y_vals.append([kpi, order, ob_type, []])
-            if order == num_order:
-                print(active_graph)
-                print(y_vals)
 
         for idx, y_val in enumerate(y_vals):
             kpi_id = y_val[0]
