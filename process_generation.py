@@ -224,7 +224,7 @@ class ProcessGeneration:
             kpi_event_time = ev_df[ev_df['type'] == self.path_dict['kpi_event']]['timestamp'].values[-1]
             kpi_event_time = pd.to_datetime(kpi_event_time)
             ev_df['kpi_val'] = kpi_event_time - pd.to_datetime(ev_df['timestamp'])
-            trace_kpi = ev_df['kpi_val'][0]
+            trace_kpi = (ev_df['kpi_val'][0]).total_seconds()
 
             # Add the current viewpoint's elements to the event log
             id_col = [log_id for _ in range(len(ev_df.index))]
