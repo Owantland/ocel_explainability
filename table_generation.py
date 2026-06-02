@@ -190,7 +190,6 @@ class GenerateTables:
                     ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
                     kpi = [vwpnt_cnt, kpi_type, '', ob_type, 0, ts]
                     kpis.append(kpi)
-        print(kpis)
         return kpis
 
     def col_names(self, table_name):

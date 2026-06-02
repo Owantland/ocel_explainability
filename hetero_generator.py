@@ -1,7 +1,6 @@
 import sqlite3
 import pandas as pd
 import numpy as np
-import yaml
 import copy
 from torch_geometric.data import HeteroData
 import torch
@@ -95,8 +94,11 @@ class HeteroGraphsGenerator:
                     vwpnt_y = vwpnt_ys[y_vals['ob_type'] == kpi_ob]['y_val'].to_numpy()
                     vwpnt_mask = vwpnt_ys[y_vals['ob_type'] == kpi_ob]['y_mask'].to_numpy()
 
-                    vwpnt_y = [float(x) for x in vwpnt_y[0]]
-                    vwpnt_mask = vwpnt_mask[0].tolist()
+                    try:
+                        vwpnt_y = [float(x) for x in vwpnt_y[0]]
+                        vwpnt_mask = vwpnt_mask[0].tolist()
+                    except TypeError:
+                        vwpnt_y = [float(x) for x in vwpnt_y]
 
                     # Assign values to the proper tensor
                     data[kpi_ob].y = torch.tensor(vwpnt_y, dtype=torch.float32).reshape(-1, 1)
@@ -151,35 +153,53 @@ class HeteroGraphsGenerator:
         for order in active_orders:
             kpi_df = self.all_kpis[(self.all_kpis['viewpoint_id'] == order)]
             active_graph = self.all_graphs[(self.all_timestamps <= timestamp) & (self.all_idx == order)][-1]
-            for kpi in self.path_dict['kpis'].keys():
-                kpi_df = kpi_df[kpi_df['kpi_type'] == kpi]
+            # If the KPI type == 1 then K value is calculated on a prefix basis
+            if self.path_dict['kpi_type'] == 1:
+                for kpi in self.path_dict['kpis'].keys():
+                    kpi_df = kpi_df[kpi_df['kpi_type'] == kpi]
+                    kpi_ob_types = self.path_dict['kpis'][kpi]
+                    for ob_type in kpi_ob_types:
+                        # For each object type obtains the object IDs present at the time
+                        ob_ids = [x[0] for x in active_graph[ob_type]]
+                        if len(ob_ids) > 0:
+                            ys = []
+                            for ob_id in ob_ids:
+                                kpi_ts = kpi_df[kpi_df['ob_id'] == ob_id]['timestamp'].values
+                                # If the IDs appear in the dictionary it calculates the Y value
+                                if len(kpi_ts) > 0:
+                                    kpi_ts = [pd.to_datetime(ts) - current_time for ts in kpi_ts]
+                                    kpi_ts = [ts.total_seconds() for ts in kpi_ts][-1]
+                                    ys.append(kpi_ts)
+                                # If not it uses the object index to obtain the Y value
+                                else:
+                                    kpi_ts = kpi_df[kpi_df['ob_type'] == ob_type]['timestamp'].values
+                                    kpi_ts = [pd.to_datetime(ts) - current_time for ts in kpi_ts]
+                                    kpi_ts = [ts.total_seconds() for ts in kpi_ts]
+                                    try:
+                                        ob_cnt = len(active_graph[ob_type])
+                                        y = kpi_ts[:ob_cnt]
+                                        ys.extend(y)
+                                    except KeyError:
+                                        pass
+                            y_vals.append([kpi, order, ob_type, ys])
+                        else:
+                            y_vals.append([kpi, order, ob_type, []])
+            else: # Trace KPI
+                y = self.pd_df[self.pd_df['vwpnt_id'] == order]['kpi_val'].values[0]
+                kpi = self.path_dict['kpi_event']
                 kpi_ob_types = self.path_dict['kpis'][kpi]
                 for ob_type in kpi_ob_types:
-                    # For each object type obtains the object IDs present at the time
                     ob_ids = [x[0] for x in active_graph[ob_type]]
                     if len(ob_ids) > 0:
                         ys = []
                         for ob_id in ob_ids:
-                            kpi_ts = kpi_df[kpi_df['ob_id'] == ob_id]['timestamp'].values
-                            # If the IDs appear in the dictionary it calculates the Y value
-                            if len(kpi_ts) > 0:
-                                kpi_ts = [pd.to_datetime(ts) - current_time for ts in kpi_ts]
-                                kpi_ts = [ts.total_seconds() for ts in kpi_ts][-1]
-                                ys.append(kpi_ts)
-                            # If not it uses the object index to obtain the Y value
-                            else:
-                                kpi_ts = kpi_df[kpi_df['ob_type'] == ob_type]['timestamp'].values
-                                kpi_ts = [pd.to_datetime(ts) - current_time for ts in kpi_ts]
-                                kpi_ts = [ts.total_seconds() for ts in kpi_ts]
-                                try:
-                                    ob_cnt = len(active_graph[ob_type])
-                                    y = kpi_ts[:ob_cnt]
-                                    ys.extend(y)
-                                except KeyError:
-                                    pass
+                            ys.append(float(y))
                         y_vals.append([kpi, order, ob_type, ys])
                     else:
                         y_vals.append([kpi, order, ob_type, []])
+            if order == num_order:
+                print(active_graph)
+                print(y_vals)
 
         for idx, y_val in enumerate(y_vals):
             kpi_id = y_val[0]
@@ -188,6 +208,7 @@ class HeteroGraphsGenerator:
             vals = np.array(y_val[3])
             mask = vals > 0
             y_vals[idx] = [kpi_id, vwpnt_id, ob_type, vals, mask]
+
         y_vals = pd.DataFrame(y_vals, columns=['kpi_id', 'vwpnt_id', 'ob_type', 'y_val', 'y_mask'])
         return y_vals, active_graphs
 
