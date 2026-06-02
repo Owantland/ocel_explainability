@@ -156,6 +156,43 @@ class GenerateTables:
                 oh_dict[types[idx]] = a
         return oh_dict
 
+    # Create the kpi dataframe by checking the objects to events dictionary
+    def get_kpis(self, ev_df, ev_by_ob, vwpnt_cnt):
+        kpis = []
+        for kpi_type in self.path_dict['kpis'].keys():
+            ob_cnt = {}
+            kpi_events = ev_df[ev_df['type'] == kpi_type]['index']
+            kpi_ob_types = self.path_dict['kpis'][kpi_type]
+
+            for i, row in ev_by_ob.iterrows():
+                ob_id = row['ob_id']
+                evs_by_ob = row['events']
+                ob_type = row['ob_type']
+                ob_idx = row['index']
+
+                for ev in evs_by_ob:
+                    if ev in kpi_events and ob_type in kpi_ob_types:
+                        # Check if KPI type is 1 - prefix or 0 - Trace
+                        ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
+                        kpi = [vwpnt_cnt, kpi_type, ob_id, ob_type, ob_idx, ts]
+                        kpis.append(kpi)
+
+                        try:
+                            pst_cnt = ob_cnt[ob_type]
+                            ob_cnt[ob_type] = pst_cnt + 1
+                        except KeyError:
+                            ob_cnt[ob_type] = 1
+
+            # If an object type has no direct relation to any particular event of the chosen type
+            # assign the latest possible timestamp for that event type.
+            for ob_type in kpi_ob_types:
+                if ob_type not in ob_cnt.keys():
+                    ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
+                    kpi = [vwpnt_cnt, kpi_type, '', ob_type, 0, ts]
+                    kpis.append(kpi)
+        print(kpis)
+        return kpis
+
     def col_names(self, table_name):
         self.cursor.execute(f"PRAGMA table_info({table_name});")
         columns_info = self.cursor.fetchall()
@@ -408,37 +445,7 @@ class GenerateTables:
                                     tmp_graph[edge_name][1].append(tg_index)
                 all_graphs.append(tmp_graph)
 
-            # Create the kpi dataframe by checking the objects to events dictionary
-            for kpi_type in self.path_dict['kpis'].keys():
-                ob_cnt = {}
-                kpi_events = ev_df[ev_df['type'] == kpi_type]['index']
-                kpi_ob_types = self.path_dict['kpis'][kpi_type]
-
-                for i, row in ev_by_ob.iterrows():
-                    ob_id = row['ob_id']
-                    evs_by_ob = row['events']
-                    ob_type = row['ob_type']
-                    ob_idx = row['index']
-
-                    for ev in evs_by_ob:
-                        if ev in kpi_events and ob_type in kpi_ob_types:
-                            ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
-                            kpi = [vwpnt_cnt, kpi_type, ob_id, ob_type, ob_idx, ts]
-                            all_kpis.append(kpi)
-
-                            try:
-                                pst_cnt = ob_cnt[ob_type]
-                                ob_cnt[ob_type] = pst_cnt + 1
-                            except KeyError:
-                                ob_cnt[ob_type] = 1
-
-                # If an object type has no direct relation to any particular event of the chosen type
-                # assign the latest possible timestamp for that event type.
-                for ob_type in kpi_ob_types:
-                    if ob_type not in ob_cnt.keys():
-                        ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
-                        kpi = [vwpnt_cnt, kpi_type, '', ob_type, 0, ts]
-                        all_kpis.append(kpi)
+            all_kpis.extend(self.get_kpis(ev_df, ev_by_ob, vwpnt_cnt))
 
         # Export the generated files for future use
         with open(f"{self.path_dict['graph_output_path']}tensor_dict.json", "w") as f:
