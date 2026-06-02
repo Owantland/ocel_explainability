@@ -1,11 +1,10 @@
 import pandas as pd
-import yaml
 import sup_funcs as sf
 
-class TrainTestBuilder():
-    def __init__(self, database, CANT):
+class TrainTestBuilder:
+    def __init__(self, database, cant):
         self.database = database
-        self.cant = CANT
+        self.cant = cant
         self.num_vp_obj = self.cant
         self.funcs = sf.SupportFunctions(database)
         self.path_dict = self.funcs.get_paths()
@@ -81,8 +80,6 @@ class TrainTestBuilder():
         train_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(train_orders.values)]['timestamp'].values
         val_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(val_orders.values)]['timestamp'].values
         test_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(test_orders.values)]['timestamp'].values
-
-        tot = len(train_timestamps) + len(val_timestamps) + len(test_timestamps)
 
         train_sampled_timestamps = self.sample_equally(train_timestamps, int(len(train_timestamps) / self.step_size))
         val_sampled_timestamps = self.sample_equally(val_timestamps, int(len(val_timestamps) / self.step_size))
