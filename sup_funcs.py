@@ -1,29 +1,42 @@
 # A collection of support functions used by multiple scripts in the project
 import sqlite3
 import yaml
-import pandas as pd
+import os
 
-class support_functions():
+class SupportFunctions:
     def __init__(self, database):
         self.database = database
-        self.get_paths()
-        conn = sqlite3.connect(self.ocel_path)
+        self.path_dict = self.get_paths()
+        conn = sqlite3.connect(self.path_dict['ocel_path'])
         self.cursor = conn.cursor()
 
     def get_paths(self):
         with open('files/config.yml', 'r') as file:
             db_configs = yaml.safe_load(file)
+        path_dict = {'ocel_path': db_configs[self.database]['ocel_path'],
+                     'graph_output_path': db_configs[self.database]['graph_output_path'],
+                     'pytorch_path': db_configs[self.database]['pytorch_path'],
+                     'model_output_path': db_configs[self.database]['model_output_path'],
+                     'viewpoint': db_configs[self.database]['viewpoint'],
+                     'depth': db_configs[self.database]['added_depth'],
+                     'unique_ids': db_configs[self.database]['unique_ids'],
+                     'kpis': db_configs[self.database]['kpis'],
+                     'filtered_tables': db_configs[self.database]['filtered_tables'],
+                     'attributes': db_configs[self.database]['attributes'],
+                     'time_attributes': db_configs[self.database]['time_attributes'],
+                     'encoding': db_configs[self.database]['encoding']}
 
-        self.ocel_path = db_configs[self.database]['ocel_path']
-        self.ob_output = db_configs[self.database]['ob_output_path']
-        self.ev_output = db_configs[self.database]['ev_output_path']
-        self.ocel_output = db_configs[self.database]['ocel_output_path']
-        self.filtered_tbls = db_configs[self.database]['filtered_tables']
-        self.viewpoint = db_configs[self.database]['viewpoint']
-        self.depth = db_configs[self.database]['added_depth']
-        self.attributes = db_configs[self.database]['attributes']
-        self.time_attributes = db_configs[self.database]['time_attributes']
-        self.kpi_event = db_configs[self.database]['kpi_event']
+        # Calculated values
+        kpi_event = [x for x in path_dict['kpis'].keys()]
+        path_dict['kpi_event'] = kpi_event[0]
+
+        # Generate the appropriate path for saving the process execution log
+        path_dict['ev_log_path'] = f"{path_dict['graph_output_path']}{path_dict['kpi_event']}"
+        if not os.path.exists(path_dict['ev_log_path']):
+            os.makedirs(path_dict['ev_log_path'])
+        path_dict['ev_log_path'] = f"{path_dict['ev_log_path']}/ev_table.csv"
+
+        return path_dict
 
     def col_names(self, table_name):
         self.cursor.execute(f"PRAGMA table_info({table_name});")

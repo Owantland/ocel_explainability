@@ -2,7 +2,6 @@
 # and create a simplified list of process executions.
 
 import sqlite3
-import yaml
 import pandas as pd
 import sup_funcs as sup
 import os
@@ -10,28 +9,14 @@ import os
 '''
     Creating a unified Event table
 '''
-class process_generation():
+class ProcessGeneration:
     def __init__(self, database, cant):
         self.database = database
         self.cant = cant
-        self.funcs = sup.support_functions(database)
-        self.get_paths()
-        conn = sqlite3.connect(self.ocel_path)
+        self.funcs = sup.SupportFunctions(database)
+        self.path_dict = self.funcs.get_paths()
+        conn = sqlite3.connect(self.path_dict['ocel_path'])
         self.cursor = conn.cursor()
-
-    def get_paths(self):
-        with open('files/config.yml', 'r') as file:
-            db_configs = yaml.safe_load(file)
-
-        self.ocel_path = db_configs[self.database]['ocel_path']
-        self.filtered_tbls = db_configs[self.database]['filtered_tables']
-        self.viewpoint = db_configs[self.database]['viewpoint']
-        self.depth = db_configs[self.database]['added_depth']
-        self.attributes = db_configs[self.database]['attributes']
-        self.time_attributes = db_configs[self.database]['time_attributes']
-        self.kpi_event = db_configs[self.database]['kpi_event']
-        self.unique_ids = db_configs[self.database]['unique_ids']
-        self.graph_output_path = db_configs[self.database]['graph_output_path']
 
     def get_data_dictionaries(self):
         # Generate a list of object to object relationships
@@ -96,7 +81,7 @@ class process_generation():
         # Generate a list of all objects of the chosen viewpoint
         qry = f'''
                     SELECT *
-                    FROM OBJECT_{self.viewpoint}
+                    FROM OBJECT_{self.path_dict['viewpoint']}
                     ORDER BY 2
                     LIMIT {self.cant};
                '''
@@ -126,14 +111,14 @@ class process_generation():
                 private_types.add(row['src_type'])
                 private_types.add(row['trgt_type'])
 
-            for i in range(self.depth):
+            for i in range(self.path_dict['depth']):
                 src_objects = o2o_table[(o2o_table['src_id'].isin(ob_list))]
                 trgt_objects = o2o_table[(o2o_table['trgt_id'].isin(ob_list))]
                 rltd_objects = pd.concat([src_objects, trgt_objects])
-                for i, row in rltd_objects.iterrows():
-                    if row['src_type'] in self.unique_ids:
+                for idx, row in rltd_objects.iterrows():
+                    if row['src_type'] in self.path_dict['unique_ids']:
                         ob_list.add(row['src_id'])
-                    if row['trgt_type'] in self.unique_ids:
+                    if row['trgt_type'] in self.path_dict['unique_ids']:
                         ob_list.add(row['trgt_id'])
 
             # Generate a list of related events to the viewpoint object
@@ -202,8 +187,8 @@ class process_generation():
                     pst_type = ob_type
                 else:
                     ob_index += 1
-                object = (ob_index, rltd_object[0], rltd_object[1])
-                rltd_objects.add(object)
+                obj = (ob_index, rltd_object[0], rltd_object[1])
+                rltd_objects.add(obj)
             rltd_objects = sorted(rltd_objects, key=lambda x: (x[2], x[1]))
             rltd_objects = pd.DataFrame(rltd_objects, columns=['index', 'ocel_id', 'type'])
 
@@ -236,7 +221,7 @@ class process_generation():
             ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
 
             # Obtain the trace KPI
-            kpi_event_time = ev_df[ev_df['type'] == self.kpi_event]['timestamp'].values[-1]
+            kpi_event_time = ev_df[ev_df['type'] == self.path_dict['kpi_event']]['timestamp'].values[-1]
             kpi_event_time = pd.to_datetime(kpi_event_time)
             ev_df['kpi_val'] = kpi_event_time - pd.to_datetime(ev_df['timestamp'])
             trace_kpi = ev_df['kpi_val'][0]
@@ -253,7 +238,4 @@ class process_generation():
 
         # Save the event log
         ev_log = pd.concat(log_frames)
-        path = f'{self.graph_output_path}{self.kpi_event}'
-        if not os.path.exists(path):
-            os.makedirs(path)
-        ev_log.to_csv(f'{path}/ev_table.csv', index=False)
+        ev_log.to_csv(f"{self.path_dict['ev_log_path']}", index=False)
