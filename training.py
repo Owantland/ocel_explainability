@@ -74,18 +74,18 @@ class Trainer:
             ob_index = self.path_dict['kpis'][key]
             for kpi_ob in self.path_dict['kpis'][key]:
                 flag = True
-                print(kpi_ob)
+
                 # Validate model path exists
                 model_path = f"{self.path_dict['model_output_path']}/{kpi_ob}"
                 if not os.path.exists(model_path):
                     os.makedirs(model_path)
 
-                index = ob_index.index(kpi_ob)
-                num_layers = self.model_params.iloc[index, 1]
-                width_layers = self.model_params.iloc[index, 2]
-                heads = self.model_params.iloc[index, 3]
-                batch_size = int(self.model_params.iloc[index, 4])
-                epochs_sg = self.model_params.iloc[index, 5]
+                parameters = self.model_params[self.model_params['kpi_ob']==kpi_ob]
+                num_layers = int(parameters['num_layers'].values[0])
+                width_layers = int(parameters['width_layers'].values[0])
+                heads = int(parameters['heads'].values[0])
+                batch_size = int(parameters['batch_size'].values[0])
+                epochs_sg = int(parameters['epochs_sg'].values[0])
 
                 learning_rates = [0.01] * 1 + [0.0075] * 1 + [0.005] * 1 + [0.0025] * 11 + [0.001] * 10 + [0.0005] * 26
                 patience = 5

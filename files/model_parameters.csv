@@ -1,4 +1,7 @@
-﻿kpi_ob,num_layers,width_layers,heads,batch_size,epochs_sg
-ORDER,5,8,3,4,10
-ITEM,3,8,3,4,20
-PACKAGE,3,8,3,4,10
+kpi_ob,num_layers,width_layers,heads,batch_size,epochs_sg
+Orders,5,8,3,4,10
+Items,3,8,3,4,20
+Packages,3,8,3,4,10
+CustomerOrder,5,10,3,,
+TransportDocument,5,10,3,4,13
+Container,5,10,3,,
