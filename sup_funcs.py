@@ -24,7 +24,8 @@ class SupportFunctions:
                      'filtered_tables': db_configs[self.database]['filtered_tables'],
                      'attributes': db_configs[self.database]['attributes'],
                      'time_attributes': db_configs[self.database]['time_attributes'],
-                     'encoding': db_configs[self.database]['encoding']}
+                     'encoding': db_configs[self.database]['encoding'],
+                     'kpi_type': db_configs[self.database]['kpi_type'],}
 
         # Calculated values
         kpi_event = [x for x in path_dict['kpis'].keys()]

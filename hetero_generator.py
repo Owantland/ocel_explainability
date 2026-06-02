@@ -1,11 +1,8 @@
 import sqlite3
 import pandas as pd
-import pm4py
 import numpy as np
 import yaml
-from collections import defaultdict
 import copy
-from itertools import permutations
 from torch_geometric.data import HeteroData
 import torch
 from torch_geometric.loader import DataLoader
@@ -13,9 +10,10 @@ import torch_geometric.transforms as T
 import json
 import warnings
 import os
+import sup_funcs as sf
 warnings.filterwarnings("ignore")
 
-class HeteroGraphsGenerator():
+class HeteroGraphsGenerator:
     def __init__(self, database, cant, train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps):
         self.database = database
         self.cant = cant
@@ -25,48 +23,35 @@ class HeteroGraphsGenerator():
         self.val_sampled_timestamps = val_sampled_timestamps
         self.test_sampled_timestamps = test_sampled_timestamps
 
-        self.get_paths()
-        conn = sqlite3.connect(self.ocel_path)
+        self.funcs = sf.SupportFunctions(database)
+        self.path_dict = self.funcs.get_paths()
+        self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
+        conn = sqlite3.connect(self.path_dict['ocel_path'])
         self.cursor = conn.cursor()
-        kpi_event = [x for x in self.kpis.keys()]
-        self.kpi_event = kpi_event[0]
+        kpi_event = [x for x in self.path_dict['kpis'].keys()]
+        self.path_dict['kpi_event'] = kpi_event[0]
 
         # Open relevant files
-        with open(f'{self.graph_output_path}tensor_dict.json') as json_file:
+        with open(f'{self.path_dict["graph_output_path"]}tensor_dict.json') as json_file:
             self.tensor_dict = json.load(json_file)
 
-        with open(f'{self.graph_output_path}all_graphs.json') as json_file:
+        with open(f'{self.path_dict["graph_output_path"]}all_graphs.json') as json_file:
             all_graphs = json.load(json_file)
             self.all_graphs = np.array(all_graphs)
 
-        with open(f'{self.graph_output_path}all_timestamps.json') as json_file:
+        with open(f'{self.path_dict["graph_output_path"]}all_timestamps.json') as json_file:
             all_timestamps = json.load(json_file)
             self.all_timestamps = np.array(all_timestamps)
 
-        with open(f'{self.graph_output_path}all_idx.json') as json_file:
+        with open(f'{self.path_dict["graph_output_path"]}all_idx.json') as json_file:
             all_idx = json.load(json_file)
             self.all_idx = np.array(all_idx)
 
-        with open(f'{self.graph_output_path}all_kpis.csv') as csv_file:
+        with open(f'{self.path_dict["graph_output_path"]}all_kpis.csv') as csv_file:
             self.all_kpis = pd.read_csv(csv_file)
 
         # Creates a variety of dictionaries of relationships between objects
         self.pd_active_orders, self.active_orders_dict = self.preprocessing_steps()
-
-    def get_paths(self):
-        with open('files/config.yml', 'r') as file:
-            db_configs = yaml.safe_load(file)
-
-        self.output_path = db_configs[self.database]['ev_output_path']
-        self.ocel_path = db_configs[self.database]['ocel_path']
-        self.kpis = db_configs[self.database]['kpis']
-        self.viewpoint = db_configs[self.database]['viewpoint']
-        self.to_encode = db_configs[self.database]['encoding']
-        self.pytorch_path = db_configs[self.database]['pytorch_path']
-        self.graph_output_path = db_configs[self.database]['graph_output_path']
-        self.kpi_event = db_configs[self.database]['kpi_event']
-        path = f'{self.graph_output_path}{self.kpi_event}/ev_table.csv'
-        self.pd_df = pd.read_csv(path)
 
     def preprocessing_steps(self):
         # For each order finds its start time and end time and orders them in relation to which process
@@ -91,18 +76,17 @@ class HeteroGraphsGenerator():
 
     def tensor_maker(self, single_graphs, y_vals, timestamp):
         all_graphs = []
-        kpi_ev = [x for x in self.kpis.keys()]
-        kpi_obs = self.kpis[kpi_ev[0]]
-        y_vals = y_vals[y_vals['kpi_id'] == kpi_ev[0]]
+        kpi_obs = self.path_dict['kpis'][self.path_dict['kpi_event']]
+        y_vals = y_vals[y_vals['kpi_id'] == self.path_dict['kpi_event']]
 
         for idx, graph in enumerate(single_graphs):
-            vwpnt_id = graph[self.viewpoint][0][-1]
-            vwpnt_val = graph[self.viewpoint][0][0]
+            vwpnt_id = graph[self.path_dict['viewpoint']][0][-1]
+            vwpnt_val = graph[self.path_dict['viewpoint']][0][0]
             vwpnt_ys = y_vals[y_vals['vwpnt_id'] == vwpnt_id]
 
             # Initiate the tensor with the viewpoint object
             data = HeteroData()
-            data[self.viewpoint].x = torch.tensor(vwpnt_val, dtype=torch.float32).reshape(-1, 1)
+            data[self.path_dict['viewpoint']].x = torch.tensor(vwpnt_val, dtype=torch.float32).reshape(-1, 1)
 
             # Adds the kpi values for the kpi objects
             for kpi_ob in kpi_obs:
@@ -124,7 +108,7 @@ class HeteroGraphsGenerator():
             # Add the remaining nodes
             edges = []
             for key in graph.keys():
-                if key != self.viewpoint:
+                if key != self.path_dict['viewpoint']:
                     # Edges are added after object nodes
                     if "_to_" in key and key:
                         edges.append(key)
@@ -167,9 +151,9 @@ class HeteroGraphsGenerator():
         for order in active_orders:
             kpi_df = self.all_kpis[(self.all_kpis['viewpoint_id'] == order)]
             active_graph = self.all_graphs[(self.all_timestamps <= timestamp) & (self.all_idx == order)][-1]
-            for kpi in self.kpis.keys():
+            for kpi in self.path_dict['kpis'].keys():
                 kpi_df = kpi_df[kpi_df['kpi_type'] == kpi]
-                kpi_ob_types = self.kpis[kpi]
+                kpi_ob_types = self.path_dict['kpis'][kpi]
                 for ob_type in kpi_ob_types:
                     # For each object type obtains the object IDs present at the time
                     ob_ids = [x[0] for x in active_graph[ob_type]]
@@ -238,8 +222,8 @@ class HeteroGraphsGenerator():
             test_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
 
         # KPI Standardization process
-        kpis = [x for x in self.kpis.keys()]
-        kpi_obs = self.kpis[kpis[0]]
+        kpis = [x for x in self.path_dict['kpis'].keys()]
+        kpi_obs = self.path_dict['kpis'][kpis[0]]
         for kpi_ob in kpi_obs:
             y_train = []
             mask_y = []
@@ -271,7 +255,7 @@ class HeteroGraphsGenerator():
 
         print("Saving heterographs...")
         # Check file paths exist
-        path = f'{self.pytorch_path}{self.kpi_event}'
+        path = f"{self.path_dict['pytorch_path']}{self.path_dict['kpi_event']}"
         if not os.path.exists(path):
             os.makedirs(path)
 
