@@ -1,10 +1,11 @@
 # Given an OCEL 2.0 standard database and a viewpoint, obtain all relevant objects and events for each viewpoint object
 # and create a simplified list of process executions.
-
+import datetime
 import sqlite3
 import pandas as pd
 import sup_funcs as sup
 import os
+import numpy as np
 
 '''
     Creating a unified Event table
@@ -13,10 +14,21 @@ class ProcessGeneration:
     def __init__(self, database, cant):
         self.database = database
         self.cant = cant
-        self.funcs = sup.SupportFunctions(database)
+        self.funcs = sup.SupportFunctions(database, cant)
         self.path_dict = self.funcs.get_paths()
         conn = sqlite3.connect(self.path_dict['ocel_path'])
         self.cursor = conn.cursor()
+
+    def get_quantile(self, kpi_val):
+        if kpi_val <= self.time_quantiles[0]:
+            qt = 0
+        elif kpi_val > self.time_quantiles[0] and kpi_val <= self.time_quantiles[1]:
+            qt =  1
+        elif kpi_val > self.time_quantiles[1] and kpi_val <= self.time_quantiles[2]:
+            qt =  2
+        else:
+            qt =  3
+        return qt
 
     def get_data_dictionaries(self):
         # Generate a list of object to object relationships
@@ -213,6 +225,7 @@ class ProcessGeneration:
     def get_ev_log(self, nodes):
         log_id = 0
         log_frames = []
+        trace_times = []
         for vwpnt_object in nodes.keys():
             log_id += 1
 
@@ -224,7 +237,9 @@ class ProcessGeneration:
             kpi_event_time = ev_df[ev_df['type'] == self.path_dict['kpi_event']]['timestamp'].values[-1]
             kpi_event_time = pd.to_datetime(kpi_event_time)
             ev_df['kpi_val'] = kpi_event_time - pd.to_datetime(ev_df['timestamp'])
+
             trace_kpi = (ev_df['kpi_val'][0]).total_seconds()
+            trace_times.append(trace_kpi)
 
             # Add the current viewpoint's elements to the event log
             id_col = [log_id for _ in range(len(ev_df.index))]
@@ -236,6 +251,15 @@ class ProcessGeneration:
             ev_log['ob_id'] = ob_id
             log_frames.append(ev_log)
 
-        # Save the event log
         ev_log = pd.concat(log_frames)
+
+        #Check in what quantile each kpi value lies
+        self.time_quantiles = np.quantile(trace_times, [0.25, 0.50, 0.75])
+        ev_log['quantile'] = ev_log['kpi_val'].apply(self.get_quantile)
+
+        # Check wether the process is on time or not
+        mean_time = np.mean(trace_times)
+        ev_log['onTime'] = ev_log['kpi_val'].apply(lambda x: 0 if x<=mean_time else 1)
+
+        # Save the event log
         ev_log.to_csv(f"{self.path_dict['ev_log_path']}", index=False)

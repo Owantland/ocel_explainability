@@ -4,8 +4,9 @@ import yaml
 import os
 
 class SupportFunctions:
-    def __init__(self, database):
+    def __init__(self, database, cant):
         self.database = database
+        self.cant = cant
         self.path_dict = self.get_paths()
         conn = sqlite3.connect(self.path_dict['ocel_path'])
         self.cursor = conn.cursor()
@@ -32,7 +33,8 @@ class SupportFunctions:
         path_dict['kpi_event'] = kpi_event[0]
 
         # Generate the appropriate path for saving the process execution log
-        path_dict['ev_log_path'] = f"{path_dict['graph_output_path']}{path_dict['kpi_event']}"
+        path_dict['graph_output_path'] = f"{path_dict['graph_output_path']}{self.cant}/"
+        path_dict['ev_log_path'] = f"{path_dict['graph_output_path']}/{path_dict['kpi_event']}"
         if not os.path.exists(path_dict['ev_log_path']):
             os.makedirs(path_dict['ev_log_path'])
         path_dict['ev_log_path'] = f"{path_dict['ev_log_path']}/ev_table.csv"
