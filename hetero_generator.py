@@ -13,16 +13,16 @@ import sup_funcs as sf
 warnings.filterwarnings("ignore")
 
 class HeteroGraphsGenerator:
-    def __init__(self, database, cant, train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps):
+    def __init__(self, database, cant, train_sample, val_sample, test_sample):
         self.database = database
         self.cant = cant
         self.num_vp_obj = self.cant
 
-        self.train_sampled_timestamps = train_sampled_timestamps
-        self.val_sampled_timestamps = val_sampled_timestamps
-        self.test_sampled_timestamps = test_sampled_timestamps
+        self.train_sample = train_sample
+        self.val_sample = val_sample
+        self.test_sample = test_sample
 
-        self.funcs = sf.SupportFunctions(database)
+        self.funcs = sf.SupportFunctions(database, cant)
         self.path_dict = self.funcs.get_paths()
         self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
         conn = sqlite3.connect(self.path_dict['ocel_path'])
@@ -73,7 +73,59 @@ class HeteroGraphsGenerator:
             active_orders_dict[ob_id] = delivery_time
         return pd_active_orders, active_orders_dict
 
-    def tensor_maker(self, single_graphs, y_vals, timestamp):
+    def tensor_loader(self, graph_set, y_set):
+        all_graphs = []
+        kpi_obs = self.path_dict['kpis'][self.path_dict['kpi_event']]
+        y_vals = y_set[y_set['kpi_id'] == self.path_dict['kpi_event']]
+
+        for idx, graph in enumerate(graph_set):
+            vwpnt_id = graph[self.path_dict['viewpoint']][0][-1]
+            vwpnt_val = graph[self.path_dict['viewpoint']][0][0]
+            vwpnt_ys = y_vals[y_vals['vwpnt_id'] == vwpnt_id]
+
+            # Initiate the tensor with the viewpoint object
+            data = HeteroData()
+            data[self.path_dict['viewpoint']].x = torch.tensor(vwpnt_val, dtype=torch.float32).reshape(-1, 1)
+
+            # Adds the kpi values for the kpi objects
+            for kpi_ob in kpi_obs:
+                # Assign the y and mask values related to the selected viewpoint and object type
+                try:
+                    vwpnt_y = vwpnt_ys[y_vals['ob_type'] == kpi_ob]['y_val'].to_numpy()
+                    vwpnt_mask = vwpnt_ys[y_vals['ob_type'] == kpi_ob]['y_mask'].to_numpy()
+
+                    try:
+                        vwpnt_y = [int(x) for x in vwpnt_y[0]]
+                        vwpnt_mask = vwpnt_mask[0].tolist()
+                    except TypeError:
+                        vwpnt_y = [int(x) for x in vwpnt_y]
+
+                    # Assign values to the proper tensor
+                    data[kpi_ob].y = torch.tensor(vwpnt_y, dtype=torch.int).reshape(-1, 1)
+                    data[kpi_ob].mask = torch.tensor(vwpnt_mask, dtype=torch.bool).reshape(-1, 1)
+                except IndexError:
+                    pass
+
+            # Add the remaining nodes
+            edges = []
+            for key in graph.keys():
+                if key != self.path_dict['viewpoint']:
+                    # Edges are added after object nodes
+                    if "_to_" in key and key:
+                        edges.append(key)
+                    else:
+                        # Obtains the length of each node to ensure proper reshape
+                        ob_len = self.tensor_dict[key]
+                        data[key].x = torch.tensor(graph[key], dtype=torch.float32).reshape(-1, ob_len)
+            for edge in edges:
+                split = edge.split("_to_")
+                data[split[0], 'to', split[1]].edge_index = torch.tensor(graph[edge],
+                                                                         dtype=torch.int64).reshape(2, -1)
+            data = T.ToUndirected()(data)
+            all_graphs.append(data)
+        return all_graphs
+
+    def tensor_maker(self, single_graphs, y_vals):
         all_graphs = []
         kpi_obs = self.path_dict['kpis'][self.path_dict['kpi_event']]
         y_vals = y_vals[y_vals['kpi_id'] == self.path_dict['kpi_event']]
@@ -125,6 +177,52 @@ class HeteroGraphsGenerator:
             data = T.ToUndirected()(data)
             all_graphs.append(data)
         return all_graphs
+
+    def get_learning_set(self, process_set):
+        set_ys = []
+        set_graphs = []
+        for idx, process in enumerate(process_set):
+            if idx % int(len(process_set) / 5) == 0:
+                print(int(idx * 20 / int(len(process_set) / 5)), '%')
+            print(f'IDX: {idx}/ Process ID: {process}')
+
+            # For each process ID obtain the graph representation and its classification
+            active_graph = self.all_graphs[(self.all_idx == process)][-1]
+            y = self.pd_df[self.pd_df['vwpnt_id'] == process]['onTime'].values[0]
+            kpi = self.path_dict['kpi_event']
+
+            kpi_ob_types = self.path_dict['kpis'][kpi]
+            for ob_type in kpi_ob_types:
+                ob_ids = [x[0] for x in active_graph[ob_type]]
+                if len(ob_ids) > 0:
+                    ys = []
+                    for ob_id in ob_ids:
+                        ys.append(int(y))
+                    set_ys.append([kpi, process, ob_type, ys])
+                else:
+                    set_ys.append([kpi, process, ob_type, []])
+            set_graphs.append(active_graph)
+
+        # Clean up the unnecessary identifiers in each object
+        for graph in set_graphs:
+            for key in graph.keys():
+                if "_to_" not in key and key != 'Events':
+                    graph[key] = [x[:-1] for x in graph[key]]
+                    for index, x in enumerate(graph[key]):
+                        if len(x) > 1:
+                            graph[key][index] = x[1:]
+
+        # Create the Y value dataframe
+        for idx, y_val in enumerate(set_ys):
+            kpi_id = y_val[0]
+            vwpnt_id = y_val[1]
+            ob_type = y_val[2]
+            vals = np.array(y_val[3][0])
+            mask = vals >= 0
+            set_ys[idx] = [kpi_id, vwpnt_id, ob_type, vals, mask]
+
+        set_ys = pd.DataFrame(set_ys, columns=['kpi_id', 'vwpnt_id', 'ob_type', 'y_val', 'y_mask'])
+        return set_ys, set_graphs
 
     def builder(self, timestamp):
         num_order = 95
@@ -184,7 +282,7 @@ class HeteroGraphsGenerator:
                             y_vals.append([kpi, order, ob_type, ys])
                         else:
                             y_vals.append([kpi, order, ob_type, []])
-            else: # Trace KPI
+            elif self.path_dict['kpi_type'] == 0: # Trace KPI
                 y = self.pd_df[self.pd_df['vwpnt_id'] == order]['kpi_val'].values[0]
                 kpi = self.path_dict['kpi_event']
                 kpi_ob_types = self.path_dict['kpis'][kpi]
@@ -197,7 +295,19 @@ class HeteroGraphsGenerator:
                         y_vals.append([kpi, order, ob_type, ys])
                     else:
                         y_vals.append([kpi, order, ob_type, []])
-
+            elif self.path_dict['kpi_type'] == 2: # OnTime Classifier
+                y = self.pd_df[self.pd_df['vwpnt_id'] == order]['onTime'].values[0]
+                kpi = self.path_dict['kpi_event']
+                kpi_ob_types = self.path_dict['kpis'][kpi]
+                for ob_type in kpi_ob_types:
+                    ob_ids = [x[0] for x in active_graph[ob_type]]
+                    if len(ob_ids) > 0:
+                        ys = []
+                        for ob_id in ob_ids:
+                            ys.append(int(y))
+                        y_vals.append([kpi, order, ob_type, ys])
+                    else:
+                        y_vals.append([kpi, order, ob_type, []])
         for idx, y_val in enumerate(y_vals):
             kpi_id = y_val[0]
             vwpnt_id = y_val[1]
@@ -211,33 +321,66 @@ class HeteroGraphsGenerator:
 
     def generate_graphs(self):
         print("Generating Heterogeneous graphs...")
+        if self.path_dict['kpi_type'] == 1:
+            self.prefix_kpi()
+        else:
+            self.trace_kpi()
 
+    def trace_kpi(self):
+        train_ys, train_graphs = self.get_learning_set(self.train_sample)
+        train_graphs_sg = self.tensor_maker(train_graphs, train_ys)
+
+        val_ys, val_graphs = self.get_learning_set(self.val_sample)
+        val_graphs_sg = self.tensor_maker(val_graphs, val_ys)
+
+        test_ys, test_graphs = self.get_learning_set(self.test_sample)
+        test_graphs_sg = self.tensor_maker(test_graphs, test_ys)
+
+        # Loading
+        train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
+        val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
+        test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
+
+        print("Saving heterographs...")
+        graphs = [data for data in train_loader_sg.dataset]
+        torch.save(graphs, f"{self.path_dict['hetero_path']}/train_graphs_sg.pt")
+
+        graphs = [data for data in val_loader_sg.dataset]
+        torch.save(graphs, f"{self.path_dict['hetero_path']}/val_graphs_sg.pt")
+
+        graphs = [data for data in test_loader_sg.dataset]
+        torch.save(graphs, f"{self.path_dict['hetero_path']}/test_graphs_sg.pt")
+        print("Done!")
+
+
+    def prefix_kpi(self):
+        # If we're doing a trace we don't need to obtain the traces we can just take every process in each
         train_graphs_sg = []
         print('Train:')
-        for idx, timestamp in enumerate(self.train_sampled_timestamps):
-            if idx % int(len(self.train_sampled_timestamps) / 5) == 0:
-                print(int(idx * 20 / int(len(self.train_sampled_timestamps) / 5)), '%')
+        for idx, timestamp in enumerate(self.train_sample):
+            if idx % int(len(self.train_sample) / 5) == 0:
+                print(int(idx * 20 / int(len(self.train_sample) / 5)), '%')
             print(f'IDX: {idx}/ Timestamp: {timestamp}')
             y_vals, graphs = self.builder(timestamp)
-            train_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
+            train_graphs_sg.extend(self.tensor_maker(graphs, y_vals))
 
         val_graphs_sg = []
         print('Validation:')
-        for idx, timestamp in enumerate(self.val_sampled_timestamps):
-            if idx % int(len(self.val_sampled_timestamps) / 5) == 0:
-                print(int(idx * 20 / int(len(self.val_sampled_timestamps) / 5)), '%')
+        for idx, timestamp in enumerate(self.val_sample):
+            if idx % int(len(self.val_sample) / 5) == 0:
+                print(int(idx * 20 / int(len(self.val_sample) / 5)), '%')
             print(f'IDX: {idx}/ Timestamp: {timestamp}')
             y_vals, graphs = self.builder(timestamp)
-            val_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
+            val_graphs_sg.extend(self.tensor_maker(graphs, y_vals))
 
         test_graphs_sg = []
         print('Testing:')
-        for idx, timestamp in enumerate(self.test_sampled_timestamps):
-            if idx % int(len(self.test_sampled_timestamps) / 5) == 0:
-                print(int(idx * 20 / int(len(self.test_sampled_timestamps) / 5)), '%')
+        for idx, timestamp in enumerate(self.test_sample):
+            if idx % int(len(self.test_sample) / 5) == 0:
+                print(int(idx * 20 / int(len(self.test_sample) / 5)), '%')
             print(f'IDX: {idx}/ Timestamp: {timestamp}')
             y_vals, graphs = self.builder(timestamp)
-            test_graphs_sg.extend(self.tensor_maker(graphs, y_vals, timestamp))
+            test_graphs_sg.extend(self.tensor_maker(graphs, y_vals))
 
         # KPI Standardization process
         kpis = [x for x in self.path_dict['kpis'].keys()]
