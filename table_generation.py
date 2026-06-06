@@ -16,7 +16,7 @@ class GenerateTables:
     def __init__(self, database, cant):
         self.database = database
         self.cant = cant
-        self.funcs = sf.SupportFunctions(database)
+        self.funcs = sf.SupportFunctions(database, cant)
         self.path_dict = self.funcs.get_paths()
 
         conn = sqlite3.connect(self.path_dict['ocel_path'])
