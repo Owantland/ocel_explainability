@@ -78,16 +78,4 @@ class TrainTestBuilder:
         test_orders = self.pd_active_orders[self.pd_active_orders[1] > last_timestamp_val][0]
 
         # If we're working with values tied to the whole process execution then we don't need the timestamps
-        if self.path_dict['kpi_type'] != 1:
-            return train_orders, val_orders, test_orders
-
-        # Else, obtain the relevant timestamps
-        else:
-            train_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(train_orders.values)]['timestamp'].values
-            val_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(val_orders.values)]['timestamp'].values
-            test_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(test_orders.values)]['timestamp'].values
-
-            train_sampled_timestamps = self.sample_equally(train_timestamps, int(len(train_timestamps) / self.step_size))
-            val_sampled_timestamps = self.sample_equally(val_timestamps, int(len(val_timestamps) / self.step_size))
-            test_sampled_timestamps = self.sample_equally(test_timestamps, int(len(test_timestamps) / self.step_size))
-            return train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps
+        return train_orders, val_orders, test_orders
