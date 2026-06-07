@@ -101,8 +101,8 @@ class HeteroGraphsGenerator:
                         vwpnt_y = [int(x) for x in vwpnt_y]
 
                     # Assign values to the proper tensor
-                    data[kpi_ob].y = torch.tensor(vwpnt_y, dtype=torch.long).reshape(-1, 1)
-                    data[kpi_ob].mask = torch.tensor(vwpnt_mask, dtype=torch.bool).reshape(-1, 1)
+                    data[kpi_ob].y = torch.tensor(vwpnt_y, dtype=torch.long)
+                    data[kpi_ob].mask = torch.tensor(vwpnt_mask, dtype=torch.bool)
 
                 except IndexError:
                     pass
@@ -176,6 +176,7 @@ class HeteroGraphsGenerator:
         return set_ys, set_graphs
 
     def trace_kpi(self):
+        # Obtain the collection of relevant subgraphs for each set
         train_ys, train_graphs = self.get_learning_set(self.train_sample)
         train_graphs_sg = self.tensor_loader(train_graphs, train_ys)
 
@@ -216,6 +217,7 @@ class HeteroGraphsGenerator:
                             pass
 
         # Loading
+        # DataLoader lets us use the list of data objects as a batch for training
         train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
         val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
         test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
