@@ -126,10 +126,16 @@ class HeteroGraphsGenerator:
             all_graphs.append(data)
         return all_graphs
 
-    def get_learning_set(self, process_set):
+    def get_learning_set(self, timestamp):
         set_ys = []
         set_graphs = []
-        for idx, process in enumerate(process_set):
+        num_order = 95
+
+        # Get a list of processes that begin before the timestamp and finish after the timestamp
+        active_processes = self.pd_active_orders[(self.pd_active_orders[1] <= timestamp) &
+                                              (self.pd_active_orders[2] >= timestamp)][0]
+
+        for process in active_processes:
             # For each process ID obtain the graph representation and its y value
             if self.path_dict['kpi_type'] == 0:
                 y = self.pd_df[self.pd_df['vwpnt_id'] == process]['kpi_val'].values[0]
@@ -137,7 +143,7 @@ class HeteroGraphsGenerator:
                 y = self.pd_df[self.pd_df['vwpnt_id'] == process]['onTime'].values[0]
             elif self.path_dict['kpi_type'] == 2:
                 y = self.pd_df[self.pd_df['vwpnt_id'] == process]['quantile'].values[0]
-            active_graph = self.all_graphs[(self.all_idx == process)][-1]
+            active_graph = self.all_graphs[(self.all_timestamps <= timestamp) & (self.all_idx == process)][-1]
             kpi = self.path_dict['kpi_event']
 
             # For each relevant object type obtain its Y value and add it to a
@@ -155,6 +161,7 @@ class HeteroGraphsGenerator:
             # Also save the relevant graph structure
             set_graphs.append(active_graph)
 
+        set_graphs = [copy.deepcopy(graph) for graph in set_graphs]
         # Clean up the unnecessary identifiers in each object
         for graph in set_graphs:
             for key in graph.keys():
@@ -176,15 +183,21 @@ class HeteroGraphsGenerator:
         return set_ys, set_graphs
 
     def trace_kpi(self):
-        # Obtain the collection of relevant subgraphs for each set
-        train_ys, train_graphs = self.get_learning_set(self.train_sample)
-        train_graphs_sg = self.tensor_loader(train_graphs, train_ys)
+        train_graphs_sg = []
+        for timestamp in self.train_sample:
+            train_ys, train_graphs = self.get_learning_set(timestamp)
+            self.tensor_loader(train_graphs, train_ys)
+            train_graphs_sg.extend(self.tensor_loader(train_graphs, train_ys))
 
-        val_ys, val_graphs = self.get_learning_set(self.val_sample)
-        val_graphs_sg = self.tensor_loader(val_graphs, val_ys)
+        val_graphs_sg = []
+        for timestamp in self.val_sample:
+            val_ys, val_graphs = self.get_learning_set(timestamp)
+            val_graphs_sg.extend(self.tensor_loader(val_graphs, val_ys))
 
-        test_ys, test_graphs = self.get_learning_set(self.test_sample)
-        test_graphs_sg = self.tensor_loader(test_graphs, test_ys)
+        test_graphs_sg = []
+        for timestamp in self.test_sample:
+            test_ys, test_graphs = self.get_learning_set(timestamp)
+            test_graphs_sg.extend(self.tensor_loader(test_graphs, test_ys))
 
         # KPI Standardization process
         if self.path_dict['kpi_type'] == 0:

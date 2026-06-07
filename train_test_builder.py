@@ -83,8 +83,7 @@ class TrainTestBuilder:
         val_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(val_orders.values)]['timestamp'].values
         test_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(test_orders.values)]['timestamp'].values
 
-        train_sampled_timestamps = self.sample_equally(train_timestamps,
-                                                       int(len(train_timestamps) / self.step_size))
+        train_sampled_timestamps = self.sample_equally(train_timestamps,int(len(train_timestamps) / self.step_size))
         val_sampled_timestamps = self.sample_equally(val_timestamps, int(len(val_timestamps) / self.step_size))
         test_sampled_timestamps = self.sample_equally(test_timestamps, int(len(test_timestamps) / self.step_size))
         return train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps
