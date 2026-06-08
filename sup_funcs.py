@@ -41,6 +41,14 @@ class SupportFunctions:
 
         # Generate appropriate path for saving the heterographs
         path = f"{path_dict['pytorch_path']}{path_dict['kpi_event']}"
+        # Save the model into the appropriate directory for the KPI type selected
+        if path_dict['kpi_type'] == 0:
+            path = f"{path}/totalTime"
+        elif path_dict['kpi_type'] == 1:
+            path = f"{path}/deliveryOnTime"
+        elif path_dict['kpi_type'] == 2:
+            path = f"{path}/timeQuantile"
+
         if not os.path.exists(path):
             os.makedirs(path)
         path_dict['hetero_path'] = path
@@ -49,9 +57,12 @@ class SupportFunctions:
         path = f"{path_dict['model_path']}{path_dict['kpi_event']}"
         # Save the model into the appropriate directory for the KPI type selected
         if path_dict['kpi_type'] == 0:
-            path = f"{path}/trace"
-        else:
-            path = f"{path}/prefixes"
+            path = f"{path}/totalTime"
+        elif path_dict['kpi_type'] == 1:
+            path = f"{path}/deliveryOnTime"
+        elif path_dict['kpi_type'] == 2:
+            path = f"{path}/timeQuantile"
+
         if not os.path.exists(path):
             os.makedirs(path)
         path_dict['model_output_path'] = path
