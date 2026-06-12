@@ -319,40 +319,6 @@ class HeteroGraphsGenerator:
         y_vals = pd.DataFrame(y_vals, columns=['kpi_id', 'vwpnt_id', 'ob_type', 'y_val', 'y_mask'])
         return y_vals, active_graphs
 
-    def generate_graphs(self):
-        print("Generating Heterogeneous graphs...")
-        if self.path_dict['kpi_type'] == 1:
-            self.prefix_kpi()
-        else:
-            self.trace_kpi()
-
-    def trace_kpi(self):
-        train_ys, train_graphs = self.get_learning_set(self.train_sample)
-        train_graphs_sg = self.tensor_maker(train_graphs, train_ys)
-
-        val_ys, val_graphs = self.get_learning_set(self.val_sample)
-        val_graphs_sg = self.tensor_maker(val_graphs, val_ys)
-
-        test_ys, test_graphs = self.get_learning_set(self.test_sample)
-        test_graphs_sg = self.tensor_maker(test_graphs, test_ys)
-
-        # Loading
-        train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
-        val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
-        test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
-
-        print("Saving heterographs...")
-        graphs = [data for data in train_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['hetero_path']}/train_graphs_sg.pt")
-
-        graphs = [data for data in val_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['hetero_path']}/val_graphs_sg.pt")
-
-        graphs = [data for data in test_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['hetero_path']}/test_graphs_sg.pt")
-        print("Done!")
-
-
     def prefix_kpi(self):
         # If we're doing a trace we don't need to obtain the traces we can just take every process in each
         train_graphs_sg = []
