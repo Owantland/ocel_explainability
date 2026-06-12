@@ -2,7 +2,7 @@ import sqlite3
 import pandas as pd
 import numpy as np
 import copy
-from torch_geometric.data import HeteroData
+from torch_geometric.data import HeteroData, Data
 import torch
 from torch_geometric.loader import DataLoader
 import torch_geometric.transforms as T
@@ -72,6 +72,44 @@ class HeteroGraphsGenerator:
             ob_id = self.pd_df[self.pd_df['vwpnt_id'] == idx].iloc[0, 3]
             active_orders_dict[ob_id] = delivery_time
         return pd_active_orders, active_orders_dict
+
+    def homogeneous_loader(self, graph_set, y_set):
+        """
+        :param graph_set:
+        :param y_set:
+        :return: homogeneous graph of the event log
+        """
+
+        all_graphs = []
+        kpi_obs = self.path_dict['kpis'][self.path_dict['kpi_event']]
+        y_vals = y_set[y_set['kpi_id'] == self.path_dict['kpi_event']]
+
+        for idx, graph in enumerate(graph_set):
+            vwpnt_id = graph[self.path_dict['viewpoint']][0][-1]
+            vwpnt_val = graph[self.path_dict['viewpoint']][0][0]
+            vwpnt_ys = y_vals[y_vals['vwpnt_id'] == vwpnt_id]
+
+            ob_len = self.tensor_dict['Events']
+            x = torch.tensor(graph['Events'], dtype=torch.float32).reshape(-1, ob_len)
+            edge_index = torch.tensor(graph['Events_to_Events'],dtype=torch.int64)
+
+            # Adds the kpi values for the kpi objects
+            for kpi_ob in kpi_obs:
+                # Assign the y and mask values related to the selected viewpoint and object type
+                try:
+                    vwpnt_y = vwpnt_ys[y_vals['ob_type'] == kpi_ob]['y_val'].to_numpy()
+                    try:
+                        vwpnt_y = [int(x) for x in vwpnt_y[0]]
+                    except TypeError:
+                        vwpnt_y = [int(x) for x in vwpnt_y]
+                    y = torch.tensor(vwpnt_y, dtype=torch.long)
+
+                    if len(graph['Events_to_Events'][0]) > 0:
+                        data = Data(x=x, y=y, edge_index=edge_index)
+                        all_graphs.append(data)
+                except IndexError:
+                    pass
+        return all_graphs
 
     def tensor_loader(self, graph_set, y_set):
         all_graphs = []
@@ -184,20 +222,26 @@ class HeteroGraphsGenerator:
 
     def trace_kpi(self):
         train_graphs_sg = []
+        train_graphs_hom = []
         for timestamp in self.train_sample:
             train_ys, train_graphs = self.get_learning_set(timestamp)
             self.tensor_loader(train_graphs, train_ys)
             train_graphs_sg.extend(self.tensor_loader(train_graphs, train_ys))
+            train_graphs_hom.extend(self.homogeneous_loader(train_graphs, train_ys))
 
         val_graphs_sg = []
+        val_graphs_hom = []
         for timestamp in self.val_sample:
             val_ys, val_graphs = self.get_learning_set(timestamp)
             val_graphs_sg.extend(self.tensor_loader(val_graphs, val_ys))
+            val_graphs_hom.extend(self.homogeneous_loader(val_graphs, val_ys))
 
         test_graphs_sg = []
+        test_graphs_hom = []
         for timestamp in self.test_sample:
             test_ys, test_graphs = self.get_learning_set(timestamp)
             test_graphs_sg.extend(self.tensor_loader(test_graphs, test_ys))
+            test_graphs_hom.extend(self.homogeneous_loader(test_graphs, test_ys))
 
         # KPI Standardization process
         if self.path_dict['kpi_type'] == 0:
@@ -229,7 +273,7 @@ class HeteroGraphsGenerator:
                         except KeyError:
                             pass
 
-        # Loading
+        # Loading Heterogeneous datasets
         # DataLoader lets us use the list of data objects as a batch for training
         train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
         val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
@@ -244,4 +288,21 @@ class HeteroGraphsGenerator:
 
         graphs = [data for data in test_loader_sg.dataset]
         torch.save(graphs, f"{self.path_dict['hetero_path']}/test_graphs_sg.pt")
+        print("Done!")
+
+        # Loading Homogeneous datasets
+        # DataLoader lets us use the list of data objects as a batch for training
+        train_loader_hom = DataLoader(train_graphs_hom, batch_size=len(train_graphs_hom), shuffle=True)
+        val_loader_hom = DataLoader(val_graphs_hom, batch_size=len(val_graphs_hom))
+        test_loader_hom = DataLoader(test_graphs_hom, batch_size=len(test_graphs_hom))
+
+        print("Saving homographs...")
+        # graphs = [data for data in train_loader_hom.dataset]
+        torch.save(train_loader_hom, f"{self.path_dict['hetero_path']}/train_graphs_hom.pt")
+
+        graphs = [data for data in val_loader_hom.dataset]
+        torch.save(graphs, f"{self.path_dict['hetero_path']}/val_graphs_hom.pt")
+
+        graphs = [data for data in test_loader_hom.dataset]
+        torch.save(graphs, f"{self.path_dict['hetero_path']}/test_graphs_hom.pt")
         print("Done!")
