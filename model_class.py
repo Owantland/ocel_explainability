@@ -23,26 +23,10 @@ class OrderPredictionHeteroGNN_2(torch.nn.Module):
 
         for i in range(num_layers):
             for key in edges:
-                if "_to_event" in key:
-                    if key == 'event_to_event':
-                        key = 'Events_to_Events'
-                        name = tuple(key.split('_'))
-                        val = GATConv(-1, hidden_channels_list[i], heads=num_heads, add_self_loops=False)
-                        edges_dict[name] = val
-                    else:
-                        name = key.split('_')
-                        name[2] = 'Events'
-                        name = tuple(name)
-                        val = GATConv((-1, -1), hidden_channels_list[i], heads=num_heads, add_self_loops=False)
-                        edges_dict[name] = val
-
-                        name = key.replace('_to_', '--rev_to--')
-                        name = name.split('--')
-                        name[2] = 'Events'
-                        name = tuple(reversed(name))
-                        val = GATConv((-1, -1), hidden_channels_list[i], heads=num_heads, add_self_loops=False)
-                        edges_dict[name] = val
-
+                if key == 'Events_to_Events':
+                    name = tuple(key.split('_'))
+                    val = GATConv(-1, hidden_channels_list[i], heads=num_heads, add_self_loops=False)
+                    edges_dict[name] = val
                 else:
                     name = tuple(key.split('_'))
                     val = GATConv((-1, -1), hidden_channels_list[i], heads=num_heads, add_self_loops=False)

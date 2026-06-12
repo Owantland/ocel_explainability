@@ -10,17 +10,34 @@ warnings.filterwarnings("ignore")
 
 
 class Evaluation:
-    def __init__(self, database):
+    def __init__(self, database, cant):
         self.criterion = torch.nn.L1Loss()
         self.device = torch.device('cpu')
-        self.funcs = sf.SupportFunctions(database)
+        self.funcs = sf.SupportFunctions(database, cant)
         self.path_dict = self.funcs.get_paths()
 
         self.model_params = pd.read_csv("files/model_parameters.csv", delimiter=',')
         with open(f"{self.path_dict['graph_output_path']}tensor_dict.json") as json_file:
             self.tensor_dict = json.load(json_file)
 
-    def eval_model(self, model, viewpoint, loader):
+    @torch.no_grad()
+    def acc_eval(self, model, loader, kpi_ob):
+        model.to(self.device)
+        model.eval()
+
+        total_examples = total_right = 0
+        for idx, batch in enumerate(loader):
+            batch = batch.to(self.device)
+            # Move the batch to the appropriate device
+
+            out = model(batch).argmax(dim=-1)
+            mask = batch[kpi_ob].mask
+            correct = (out[mask] == batch.y_dict[kpi_ob][mask]).sum()
+            total_examples += sum(mask)
+            total_right += correct
+        return (total_right / total_examples).item()
+
+    def eval_model(self, model, loader, kpi_ob):
         model.to(self.device)
         model.eval()
 
@@ -31,8 +48,8 @@ class Evaluation:
             for idx, batch in enumerate(loader):
                 batch = batch.to(self.device)
                 out = model(batch)
-                mask = batch[viewpoint].mask
-                loss = self.criterion(out[mask], batch.y_dict[viewpoint][mask])
+                mask = batch[kpi_ob].mask
+                loss = self.criterion(out[mask], batch.y_dict[kpi_ob][mask])
 
                 to_div_2 += sum(mask)
                 test_loss += loss.item() * sum(mask)
@@ -92,16 +109,23 @@ class Evaluation:
 
             model_path = f"{self.path_dict['model_output_path']}/{kpi_ob}"
 
+            if self.path_dict['kpi_type'] == 0:
+                num_variables = 1
+            elif self.path_dict['kpi_type'] == 1:
+                num_variables = 2
+            elif self.path_dict['kpi_type'] == 2:
+                num_variables = 4
+
             for i in range(1, 6):
-                model_sg = OrderPredictionHeteroGNN_2([width_layers] * num_layers, 1, num_layers,
+                model_sg = OrderPredictionHeteroGNN_2([width_layers] * num_layers, num_variables, num_layers,
                                                       heads, self.tensor_dict, kpi_ob)
                 state_dict = torch.load(f"{model_path}/GAT_sg_{i}.pth", weights_only=False)
                 model_sg.load_state_dict(state_dict)
 
-                if kpi_ob == 'package':
-                    loss_sg = round(self.eval_model_package(model_sg, test_loader_sg), 5)
-                else:
-                    loss_sg = round(self.eval_model(model_sg, kpi_ob, test_loader_sg), 5)
+                if self.path_dict['kpi_type'] == 0:
+                    loss_sg = round(self.eval_model(model_sg, test_loader_sg, kpi_ob), 5)
+                elif self.path_dict['kpi_type'] == 1 or self.path_dict['kpi_type'] == 2:
+                    loss_sg = round(self.acc_eval(model_sg, test_loader_sg, kpi_ob), 5)
 
                 print(f"{i} - {kpi_ob} - Loss SG : {loss_sg}")
 
