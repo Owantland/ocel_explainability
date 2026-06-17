@@ -236,20 +236,24 @@ class ProcessGeneration:
 
             ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
 
-            # Obtain the trace KPI
+            """
+                Calculate the total time it takes to complete the trace and then calculate the time until the 
+                trace reaches the expected event for every prefix in the trace for "time_to_event"
+            """
             kpi_event_time = ev_df[ev_df['type'] == self.path_dict['kpi_event']]['timestamp'].values[-1]
             kpi_event_time = pd.to_datetime(kpi_event_time)
-            ev_df['kpi_val'] = kpi_event_time - pd.to_datetime(ev_df['timestamp'])
+            ev_df['time_to_event'] = kpi_event_time - pd.to_datetime(ev_df['timestamp'])
+            ev_df['time_to_event'] = ev_df['time_to_event'].apply(lambda x: x.total_seconds())
 
-            trace_kpi = (ev_df['kpi_val'][0]).total_seconds()
+            trace_kpi = ev_df['time_to_event'][0]
             trace_times.append(trace_kpi)
 
             # Add the current viewpoint's elements to the event log
             id_col = [log_id for _ in range(len(ev_df.index))]
             ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
             trace_kpi = [trace_kpi for _ in range(len(ev_df.index))]
-            ev_log = ev_df[['ocel_id', 'type', 'timestamp']]
-            ev_log['kpi_val'] = trace_kpi
+            ev_log = ev_df[['ocel_id', 'type', 'timestamp', 'time_to_event']]
+            ev_log['total_time'] = trace_kpi
             ev_log['vwpnt_id'] = id_col
             ev_log['ob_id'] = ob_id
             log_frames.append(ev_log)
@@ -289,17 +293,35 @@ class ProcessGeneration:
                         kpis.append(kpi)
             all_kpis.extend(kpis)
 
+
+
+
         ev_log = pd.concat(log_frames)
         all_kpis = pd.DataFrame(all_kpis,columns=['viewpoint_id', 'kpi_type', 'ob_id', 'ob_type', 'index', 'timestamp'])
         all_kpis.to_csv(f"{self.path_dict['graph_output_path']}all_kpis.csv", index=False)
 
+        """
+            Calculate classification KPIs
+        """
         #Check in what quantile each kpi value lies
         self.time_quantiles = np.quantile(trace_times, [0.25, 0.50, 0.75])
-        ev_log['quantile'] = ev_log['kpi_val'].apply(self.get_quantile)
+        ev_log['quantile'] = ev_log['total_time'].apply(self.get_quantile)
 
         # Check wether the process is on time or not
         mean_time = np.mean(trace_times)
-        ev_log['onTime'] = ev_log['kpi_val'].apply(lambda x: 0 if x<=mean_time else 1)
+        ev_log['onTime'] = ev_log['total_time'].apply(lambda x: 0 if x<=mean_time else 1)
+
+        # Check whether more than one package was created for the order
+        package_exsts = []
+        for i in range(1, log_id+1):
+            evs = ev_log[(ev_log['vwpnt_id'] == i)]
+            trace_evs = len(evs.values)
+            evs = evs[evs['type'] == 'CreatePackage'].values
+            if len(evs) > 1:
+                package_exsts.extend([1]*trace_evs)
+            else:
+                package_exsts.extend([0]*trace_evs)
+        ev_log['mult_pckgs'] = package_exsts
 
         # Save the event log
         ev_log.to_csv(f"{self.path_dict['ev_log_path']}", index=False)
