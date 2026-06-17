@@ -226,12 +226,15 @@ class ProcessGeneration:
         log_id = 0
         log_frames = []
         trace_times = []
+        all_kpis = []
         for vwpnt_object in nodes.keys():
             log_id += 1
 
             # Each related element is saved as a dictionary with the viewpoint object as key
             rltd_events = nodes[vwpnt_object]['related_events']
             ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
+
+            ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
 
             # Obtain the trace KPI
             kpi_event_time = ev_df[ev_df['type'] == self.path_dict['kpi_event']]['timestamp'].values[-1]
@@ -251,7 +254,44 @@ class ProcessGeneration:
             ev_log['ob_id'] = ob_id
             log_frames.append(ev_log)
 
+            # Calculate timeUntil KPIS that depend on chosen object types
+            kpis = []
+            for kpi_type in self.path_dict['kpis'].keys():
+                ob_cnt = {}
+                evs = ev_df[ev_df['type'] == kpi_type]
+                kpi_events = ev_df[ev_df['type'] == kpi_type]['index']
+                kpi_ob_types = self.path_dict['kpis'][kpi_type]
+
+                for i, row in ev_by_ob.iterrows():
+                    ob_id = row['ob_id']
+                    evs_by_ob = row['events']
+                    ob_type = row['ob_type']
+                    ob_idx = row['index']
+
+                    for ev in evs_by_ob:
+                        if ev in kpi_events and ob_type in kpi_ob_types:
+                            ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
+                            kpi = [log_id, kpi_type, ob_id, ob_type, ob_idx, ts]
+                            kpis.append(kpi)
+
+                            try:
+                                pst_cnt = ob_cnt[ob_type]
+                                ob_cnt[ob_type] = pst_cnt + 1
+                            except KeyError:
+                                ob_cnt[ob_type] = 1
+
+                # If an object type has no direct relation to any particular event of the chosen type
+                # assign the latest possible timestamp for that event type.
+                for ob_type in kpi_ob_types:
+                    if ob_type not in ob_cnt.keys():
+                        ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
+                        kpi = [log_id, kpi_type, '', ob_type, 0, ts]
+                        kpis.append(kpi)
+            all_kpis.extend(kpis)
+
         ev_log = pd.concat(log_frames)
+        all_kpis = pd.DataFrame(all_kpis,columns=['viewpoint_id', 'kpi_type', 'ob_id', 'ob_type', 'index', 'timestamp'])
+        all_kpis.to_csv(f"{self.path_dict['graph_output_path']}all_kpis.csv", index=False)
 
         #Check in what quantile each kpi value lies
         self.time_quantiles = np.quantile(trace_times, [0.25, 0.50, 0.75])
