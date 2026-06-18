@@ -21,16 +21,13 @@ class SupportFunctions:
                      'viewpoint': db_configs[self.database]['viewpoint'],
                      'depth': db_configs[self.database]['added_depth'],
                      'unique_ids': db_configs[self.database]['unique_ids'],
-                     'kpis': db_configs[self.database]['kpis'],
+                     'kpi_event': db_configs[self.database]['kpi_event'],
+                     'kpi_viewpoint': db_configs[self.database]['kpi_viewpoint'],
                      'filtered_tables': db_configs[self.database]['filtered_tables'],
                      'attributes': db_configs[self.database]['attributes'],
                      'time_attributes': db_configs[self.database]['time_attributes'],
                      'encoding': db_configs[self.database]['encoding'],
                      'kpi_type': db_configs[self.database]['kpi_type'],}
-
-        # Calculated values
-        kpi_event = [x for x in path_dict['kpis'].keys()]
-        path_dict['kpi_event'] = kpi_event[0]
 
         # Generate the appropriate path for saving the process execution log
         path_dict['graph_output_path'] = f"{path_dict['graph_output_path']}{self.cant}/"
@@ -48,6 +45,8 @@ class SupportFunctions:
             path = f"{path}/deliveryOnTime"
         elif path_dict['kpi_type'] == 2:
             path = f"{path}/timeQuantile"
+        elif path_dict['kpi_type'] == 3:
+            path = f"{path}/multPackages"
 
         if not os.path.exists(path):
             os.makedirs(path)

@@ -7,9 +7,8 @@ order_management:
   added_depth: 0
   unique_ids: ['Orders', 'Items', 'Packages']
   kpi_type: 0
-  kpis:
-    PackageDelivered: ['Orders'] #Time until order is delivered
-#    PayOrder: ['Orders'] #Time until order is payd
+  kpi_event: "CreatePackage"
+  kpi_viewpoint: "Orders"
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:
     Orders: ['price']
@@ -27,7 +26,7 @@ logistics:
   viewpoint: "CustomerOrder"
   added_depth: 2
   unique_ids: ['CustomerOrder', 'TransportDocument', 'Container', 'HandlingUnit']
-  kpi_type: 0
+  kpi_type: 1
   kpis:
     Depart: ['TransportDocument'] # Time until order is fulfilled
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
