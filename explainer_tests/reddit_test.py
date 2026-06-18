@@ -11,6 +11,11 @@ from torch_geometric.explain import GNNExplainer, DummyExplainer, CaptumExplaine
 from torch_geometric.explain.config import ExplainerConfig, ModelMode
 import numpy as np
 from torch_geometric.explain import ThresholdConfig
+from torch_geometric.explain.metric import (
+   fidelity,
+   characterization_score,
+   fidelity_curve_auc,
+)
 
 import matplotlib.pyplot as plt
 
@@ -255,14 +260,14 @@ mean_difference = difference.mean(dim=0).cpu().numpy()
     most sensitive to masking, where a positive difference means masking node 5 increases the logits on average, 
     while a negative difference means masking node 5 decreases the logits on average.
 """
-# plt.rcParams.update({'font.size': 50})
-# plt.figure(figsize=(50, 35))
-# plt.plot(mean_difference, color="olive", linewidth=3.5, label="Mean Difference")
-# plt.title('Mean Difference Between Original and Masked Predictions')
-# plt.xlabel('Class')
-# plt.ylabel('Mean Difference in Logits')
-# plt.legend()
-# plt.show()
+plt.rcParams.update({'font.size': 50})
+plt.figure(figsize=(50, 35))
+plt.plot(mean_difference, color="olive", linewidth=3.5, label="Mean Difference")
+plt.title('Mean Difference Between Original and Masked Predictions')
+plt.xlabel('Class')
+plt.ylabel('Mean Difference in Logits')
+plt.legend()
+plt.show()
 
 """
     We can perform more granular analysis by finding the explanation subgraphs.
@@ -327,5 +332,60 @@ model_explanation.visualize_graph('model_graph.png')
 """
 model_explanation.visualize_feature_importance("model_topk.png", top_k=k)
 
+# Choose a node that you're interested in explaining
+index = 100
+
+# Create model_based explainer
+metric_explainer = Explainer(
+    model=model,
+    algorithm=GNNExplainer(epochs=200),
+    explanation_type='model',
+    node_mask_type='object',
+    edge_mask_type='object',
+    model_config=dict(
+        mode='multiclass_classification',
+        task_level='node',
+        return_type='log_probs',
+    )
+  )
+
+# Call model_based explainer
+metric_explanation = metric_explainer(
+    batch.x,
+    batch.edge_index,
+    index=index
+)
+
 # phen_explanation.visualize_feature_importance("phen_topk.png", top_k=k)
-# phen_explanation.visualize_graph('phen_graph.png', backend="graphviz")
+is_valid = model_explanation.validate()
+
+# Fidelity
+fid_pos, fid_neg = fidelity(
+   explainer=metric_explainer,
+   explanation=metric_explanation
+)
+
+#Characterization score
+char_score = characterization_score(
+    fid_pos,
+    fid_neg,
+    pos_weight=0.7,    # Higher weight
+    neg_weight=0.3     # Lower weight
+)
+
+
+# Fidelity curve AUC
+pos_fidelity = torch.tensor([0.9, 0.8, 0.7, 0.6, 0.5])
+neg_fidelity = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5])
+
+# x-axis values (e.g., thresholds or steps), sorted in ascending order
+x = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5])
+
+# Call the fidelity_curve_auc function
+auc = fidelity_curve_auc(pos_fidelity, neg_fidelity, x)
+
+
+# Print results
+print(f"Fidelity Score: {fid_pos}, {fid_neg}")
+print(f"Characterization Score: {char_score}")
+print("Fidelity Curve AUC:", auc.item())
