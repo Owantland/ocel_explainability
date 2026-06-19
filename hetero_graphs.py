@@ -271,13 +271,13 @@ class HeteroGraphsGenerator:
 
         print("Saving heterographs...")
         graphs = [data for data in train_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['hetero_path']}/train_graphs_sg.pt")
+        torch.save(graphs, f"{self.path_dict['pytorch_path']}/train_graphs_sg.pt")
 
         graphs = [data for data in val_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['hetero_path']}/val_graphs_sg.pt")
+        torch.save(graphs, f"{self.path_dict['pytorch_path']}/val_graphs_sg.pt")
 
         graphs = [data for data in test_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['hetero_path']}/test_graphs_sg.pt")
+        torch.save(graphs, f"{self.path_dict['pytorch_path']}/test_graphs_sg.pt")
         print("Done!")
 
         # Loading Homogeneous datasets
@@ -289,13 +289,13 @@ class HeteroGraphsGenerator:
         exp_loader_hom = DataLoader(train_graphs_hom, batch_size=round((len(train_graphs_hom)/num_batches)))
 
         print("Saving homographs...")
-        torch.save(train_loader_hom, f"{self.path_dict['hetero_path']}/train_graphs_hom.pt")
+        torch.save(train_loader_hom, f"{self.path_dict['pytorch_path']}/train_graphs_hom.pt")
 
         # graphs = [data for data in val_loader_hom.dataset]
-        torch.save(val_loader_hom, f"{self.path_dict['hetero_path']}/val_graphs_hom.pt")
+        torch.save(val_loader_hom, f"{self.path_dict['pytorch_path']}/val_graphs_hom.pt")
 
         # graphs = [data for data in test_loader_hom.dataset]
-        torch.save(test_loader_hom, f"{self.path_dict['hetero_path']}/test_graphs_hom.pt")
+        torch.save(test_loader_hom, f"{self.path_dict['pytorch_path']}/test_graphs_hom.pt")
 
-        torch.save(exp_loader_hom, f"{self.path_dict['hetero_path']}/exp_graphs_hom.pt")
+        torch.save(exp_loader_hom, f"{self.path_dict['pytorch_path']}/exp_graphs_hom.pt")
         print("Done!")
