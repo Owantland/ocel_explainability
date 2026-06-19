@@ -27,8 +27,6 @@ class HeteroGraphsGenerator:
         self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
         conn = sqlite3.connect(self.path_dict['ocel_path'])
         self.cursor = conn.cursor()
-        kpi_event = [x for x in self.path_dict['kpis'].keys()]
-        self.path_dict['kpi_event'] = kpi_event[0]
 
         # Open relevant files
         with open(f'{self.path_dict["graph_output_path"]}tensor_dict.json') as json_file:
@@ -60,7 +58,7 @@ class HeteroGraphsGenerator:
             temp = self.pd_df[self.pd_df['vwpnt_id'] == i + 1]
             strt_time = temp.iloc[0, 2]
             end_time = temp.iloc[-1, 2]
-            ob_id = temp.iloc[0, 4]
+            ob_id = temp.iloc[0, 3]
             active_orders.append([ob_id, strt_time, end_time])
         pd_active_orders = pd.DataFrame(active_orders)
         pd_active_orders.sort_values(by=2, inplace=True)
@@ -81,7 +79,6 @@ class HeteroGraphsGenerator:
         """
 
         all_graphs = []
-        kpi_obs = self.path_dict['kpis'][self.path_dict['kpi_event']]
         y_vals = y_set[y_set['kpi_id'] == self.path_dict['kpi_event']]
 
         for idx, graph in enumerate(graph_set):
@@ -94,26 +91,25 @@ class HeteroGraphsGenerator:
             edge_index = torch.tensor(graph['Events_to_Events'],dtype=torch.int64)
 
             # Adds the kpi values for the kpi objects
-            for kpi_ob in kpi_obs:
-                # Assign the y and mask values related to the selected viewpoint and object type
+            kpi_ob = self.path_dict['kpi_viewpoint']
+            # Assign the y and mask values related to the selected viewpoint and object type
+            try:
+                vwpnt_y = vwpnt_ys[y_vals['ob_type'] == kpi_ob]['y_val'].to_numpy()
                 try:
-                    vwpnt_y = vwpnt_ys[y_vals['ob_type'] == kpi_ob]['y_val'].to_numpy()
-                    try:
-                        vwpnt_y = [int(x) for x in vwpnt_y[0]]
-                    except TypeError:
-                        vwpnt_y = [int(x) for x in vwpnt_y]
-                    y = torch.tensor(vwpnt_y, dtype=torch.long)
+                    vwpnt_y = [int(x) for x in vwpnt_y[0]]
+                except TypeError:
+                    vwpnt_y = [int(x) for x in vwpnt_y]
+                y = torch.tensor(vwpnt_y, dtype=torch.long)
 
-                    if len(graph['Events_to_Events'][0]) > 0:
-                        data = Data(x=x, y=y, edge_index=edge_index)
-                        all_graphs.append(data)
-                except IndexError:
-                    pass
+                if len(graph['Events_to_Events'][0]) > 0:
+                    data = Data(x=x, y=y, edge_index=edge_index)
+                    all_graphs.append(data)
+            except IndexError:
+                pass
         return all_graphs
 
     def tensor_loader(self, graph_set, y_set):
         all_graphs = []
-        kpi_obs = self.path_dict['kpis'][self.path_dict['kpi_event']]
         y_vals = y_set[y_set['kpi_id'] == self.path_dict['kpi_event']]
 
         for idx, graph in enumerate(graph_set):
@@ -126,24 +122,24 @@ class HeteroGraphsGenerator:
             data[self.path_dict['viewpoint']].x = torch.tensor(vwpnt_val, dtype=torch.float32).reshape(-1, 1)
 
             # Adds the kpi values for the kpi objects
-            for kpi_ob in kpi_obs:
-                # Assign the y and mask values related to the selected viewpoint and object type
+            kpi_ob = self.path_dict['kpi_viewpoint']
+            # Assign the y and mask values related to the selected viewpoint and object type
+            try:
+                vwpnt_y = vwpnt_ys[y_vals['ob_type'] == kpi_ob]['y_val'].to_numpy()
+                vwpnt_mask = vwpnt_ys[y_vals['ob_type'] == kpi_ob]['y_mask'].to_numpy()
+
                 try:
-                    vwpnt_y = vwpnt_ys[y_vals['ob_type'] == kpi_ob]['y_val'].to_numpy()
-                    vwpnt_mask = vwpnt_ys[y_vals['ob_type'] == kpi_ob]['y_mask'].to_numpy()
+                    vwpnt_y = [int(x) for x in vwpnt_y[0]]
+                    vwpnt_mask = vwpnt_mask[0].tolist()
+                except TypeError:
+                    vwpnt_y = [int(x) for x in vwpnt_y]
 
-                    try:
-                        vwpnt_y = [int(x) for x in vwpnt_y[0]]
-                        vwpnt_mask = vwpnt_mask[0].tolist()
-                    except TypeError:
-                        vwpnt_y = [int(x) for x in vwpnt_y]
+                # Assign values to the proper tensor
+                data[kpi_ob].y = torch.tensor(vwpnt_y, dtype=torch.long)
+                data[kpi_ob].mask = torch.tensor(vwpnt_mask, dtype=torch.bool)
 
-                    # Assign values to the proper tensor
-                    data[kpi_ob].y = torch.tensor(vwpnt_y, dtype=torch.long)
-                    data[kpi_ob].mask = torch.tensor(vwpnt_mask, dtype=torch.bool)
-
-                except IndexError:
-                    pass
+            except IndexError:
+                pass
 
             # Add the remaining nodes
             edges = []
@@ -169,34 +165,32 @@ class HeteroGraphsGenerator:
         set_graphs = []
         num_order = 95
 
-        # Get a list of processes that begin before the timestamp and finish after the timestamp
+        """
+            Identify which processes are active at the chosen time by checking whether they started before the timestamp
+            and will end after the timestamp.
+            For each of those active processes:
+                * Obtain the relevant KPI value or values
+                * Obtain the prefix subgraph for the timestamp
+                * Add each of the obtained values to the list of all KPIs and the list of all graphs to create the 
+                  pyg dataset.
+        """
         active_processes = self.pd_active_orders[(self.pd_active_orders[1] <= timestamp) &
                                               (self.pd_active_orders[2] >= timestamp)][0]
-
         for process in active_processes:
-            # For each process ID obtain the graph representation and its y value
-            if self.path_dict['kpi_type'] == 0:
-                y = self.pd_df[self.pd_df['vwpnt_id'] == process]['kpi_val'].values[0]
-            elif self.path_dict['kpi_type'] == 1:
-                y = self.pd_df[self.pd_df['vwpnt_id'] == process]['onTime'].values[0]
-            elif self.path_dict['kpi_type'] == 2:
-                y = self.pd_df[self.pd_df['vwpnt_id'] == process]['quantile'].values[0]
+            y_df = self.all_kpis[self.all_kpis['timestamp'] <= timestamp]
+            y_df = y_df[y_df['viewpoint_id'] == process]
+            y = y_df['kpi_val'].values[-1]
             active_graph = self.all_graphs[(self.all_timestamps <= timestamp) & (self.all_idx == process)][-1]
             kpi = self.path_dict['kpi_event']
 
-            # For each relevant object type obtain its Y value and add it to a
-            # dataframe
-            kpi_ob_types = self.path_dict['kpis'][kpi]
-            for ob_type in kpi_ob_types:
-                ob_ids = [x[0] for x in active_graph[ob_type]]
-                if len(ob_ids) > 0:
-                    ys = []
-                    for ob_id in ob_ids:
-                        ys.append(float(y))
-                    set_ys.append([kpi, process, ob_type, ys])
-                else:
-                    set_ys.append([kpi, process, ob_type, []])
-            # Also save the relevant graph structure
+            ob_ids = [x[0] for x in active_graph[self.path_dict['kpi_viewpoint']]]
+            if len(ob_ids) > 0:
+                ys = []
+                for ob_id in ob_ids:
+                    ys.append(y)
+                set_ys.append([kpi, process, self.path_dict['kpi_viewpoint'], ys])
+            else:
+                set_ys.append([kpi, process, self.path_dict['kpi_viewpoint'], []])
             set_graphs.append(active_graph)
 
         set_graphs = [copy.deepcopy(graph) for graph in set_graphs]
@@ -225,9 +219,8 @@ class HeteroGraphsGenerator:
         train_graphs_hom = []
         for timestamp in self.train_sample:
             train_ys, train_graphs = self.get_learning_set(timestamp)
-            self.tensor_loader(train_graphs, train_ys)
-            train_graphs_sg.extend(self.tensor_loader(train_graphs, train_ys))
             train_graphs_hom.extend(self.homogeneous_loader(train_graphs, train_ys))
+            train_graphs_sg.extend(self.tensor_loader(train_graphs, train_ys))
 
         val_graphs_sg = []
         val_graphs_hom = []
@@ -273,36 +266,41 @@ class HeteroGraphsGenerator:
                         except KeyError:
                             pass
 
-        # Loading Heterogeneous datasets
-        # DataLoader lets us use the list of data objects as a batch for training
-        train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
-        val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
-        test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
+        # # Loading Heterogeneous datasets
+        # # DataLoader lets us use the list of data objects as a batch for training
+        # train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
+        # val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
+        # test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
+        #
+        # print("Saving heterographs...")
+        # graphs = [data for data in train_loader_sg.dataset]
+        # torch.save(graphs, f"{self.path_dict['hetero_path']}/train_graphs_sg.pt")
+        #
+        # graphs = [data for data in val_loader_sg.dataset]
+        # torch.save(graphs, f"{self.path_dict['hetero_path']}/val_graphs_sg.pt")
+        #
+        # graphs = [data for data in test_loader_sg.dataset]
+        # torch.save(graphs, f"{self.path_dict['hetero_path']}/test_graphs_sg.pt")
+        # print("Done!")
 
-        print("Saving heterographs...")
-        graphs = [data for data in train_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['hetero_path']}/train_graphs_sg.pt")
-
-        graphs = [data for data in val_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['hetero_path']}/val_graphs_sg.pt")
-
-        graphs = [data for data in test_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['hetero_path']}/test_graphs_sg.pt")
-        print("Done!")
-
-        # Loading Homogeneous datasets
-        # DataLoader lets us use the list of data objects as a batch for training
-        train_loader_hom = DataLoader(train_graphs_hom, batch_size=len(train_graphs_hom), shuffle=True)
-        val_loader_hom = DataLoader(val_graphs_hom, batch_size=len(val_graphs_hom))
-        test_loader_hom = DataLoader(test_graphs_hom, batch_size=len(test_graphs_hom))
-
-        print("Saving homographs...")
-        # graphs = [data for data in train_loader_hom.dataset]
-        torch.save(train_loader_hom, f"{self.path_dict['hetero_path']}/train_graphs_hom.pt")
-
-        graphs = [data for data in val_loader_hom.dataset]
-        torch.save(graphs, f"{self.path_dict['hetero_path']}/val_graphs_hom.pt")
-
-        graphs = [data for data in test_loader_hom.dataset]
-        torch.save(graphs, f"{self.path_dict['hetero_path']}/test_graphs_hom.pt")
-        print("Done!")
+        # # Loading Homogeneous datasets
+        # # DataLoader lets us use the list of data objects as a batch for training
+        # num_batches = 5
+        # train_loader_hom = DataLoader(train_graphs_hom, batch_size=round((len(train_graphs_hom)/num_batches)), shuffle=True)
+        # val_loader_hom = DataLoader(val_graphs_hom, batch_size=round((len(val_graphs_hom)/num_batches)))
+        # test_loader_hom = DataLoader(test_graphs_hom, batch_size=round((len(test_graphs_hom)/num_batches)))
+        # exp_loader_hom = DataLoader(train_graphs_hom, batch_size=round((len(train_graphs_hom)/num_batches)))
+        #
+        # print("Saving homographs...")
+        # for d in train_loader_hom:
+        #     print(d)
+        # torch.save(train_loader_hom, f"{self.path_dict['hetero_path']}/train_graphs_hom.pt")
+        #
+        # # graphs = [data for data in val_loader_hom.dataset]
+        # torch.save(val_loader_hom, f"{self.path_dict['hetero_path']}/val_graphs_hom.pt")
+        #
+        # # graphs = [data for data in test_loader_hom.dataset]
+        # torch.save(test_loader_hom, f"{self.path_dict['hetero_path']}/test_graphs_hom.pt")
+        #
+        # torch.save(exp_loader_hom, f"{self.path_dict['hetero_path']}/exp_graphs_hom.pt")
+        # print("Done!")
