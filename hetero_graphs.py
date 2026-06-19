@@ -236,71 +236,66 @@ class HeteroGraphsGenerator:
             test_graphs_sg.extend(self.tensor_loader(test_graphs, test_ys))
             test_graphs_hom.extend(self.homogeneous_loader(test_graphs, test_ys))
 
-        # KPI Standardization process
+        """
+            Apply Z-score method
+            
+            Standardize the data so that each value has a mean of 0 and a standard deviation of 1.
+            This technique is best when your data follow a normal distribution or when you want to treat values 
+            in terms of how far they are from the average. 
+        """
         if self.path_dict['kpi_type'] == 0:
-            kpis = [x for x in self.path_dict['kpis'].keys()]
-            kpi_obs = self.path_dict['kpis'][kpis[0]]
-            for kpi_ob in kpi_obs:
-                y_train = []
-                mask_y = []
-                for graph in train_graphs_sg:
-                    try:
-                        y_train.extend(graph[kpi_ob]['y'])
-                        mask_y.extend(graph[kpi_ob]['mask'].reshape(-1))
-                    except KeyError:
-                        pass
+            y_train = []
 
-                y_train = [a.item() for a in y_train]
-                mask_y = [a.item() for a in mask_y]
-                y_train = np.array(y_train)
-                mask_y = np.array(mask_y)
-                mean = np.mean(y_train[mask_y])
-                std = np.std(y_train[mask_y])
+            for graph in train_graphs_hom:
+                y_train.extend(graph.y)
+            y_train = [a.item() for a in y_train]
+            y_train = np.array(y_train)
 
-                print(f'mean: {mean}, std: {std}')
+            mean = np.mean(y_train)
+            std = np.std(y_train)
 
-                for graphs in [train_graphs_sg, val_graphs_sg, test_graphs_sg]:
-                    for graph in graphs:
-                        try:
-                            graph[kpi_ob]['y'] = (graph[kpi_ob]['y'] - mean) / std
-                        except KeyError:
-                            pass
+            mean_time = pd.Timedelta(round(mean,2), unit='s')
+            std_time = pd.Timedelta(round(std,2), unit='s')
+            print(f"The mean value is: {mean_time} / {mean} and std is: {std_time} / {std}")
 
-        # # Loading Heterogeneous datasets
-        # # DataLoader lets us use the list of data objects as a batch for training
-        # train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
-        # val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
-        # test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
-        #
-        # print("Saving heterographs...")
-        # graphs = [data for data in train_loader_sg.dataset]
-        # torch.save(graphs, f"{self.path_dict['hetero_path']}/train_graphs_sg.pt")
-        #
-        # graphs = [data for data in val_loader_sg.dataset]
-        # torch.save(graphs, f"{self.path_dict['hetero_path']}/val_graphs_sg.pt")
-        #
-        # graphs = [data for data in test_loader_sg.dataset]
-        # torch.save(graphs, f"{self.path_dict['hetero_path']}/test_graphs_sg.pt")
-        # print("Done!")
+            for graphs in [train_graphs_hom, val_graphs_hom, test_graphs_hom]:
+                for graph in graphs:
+                    normalized_y = (graph.y - mean) / std
+                    graph.y = normalized_y
 
-        # # Loading Homogeneous datasets
-        # # DataLoader lets us use the list of data objects as a batch for training
-        # num_batches = 5
-        # train_loader_hom = DataLoader(train_graphs_hom, batch_size=round((len(train_graphs_hom)/num_batches)), shuffle=True)
-        # val_loader_hom = DataLoader(val_graphs_hom, batch_size=round((len(val_graphs_hom)/num_batches)))
-        # test_loader_hom = DataLoader(test_graphs_hom, batch_size=round((len(test_graphs_hom)/num_batches)))
-        # exp_loader_hom = DataLoader(train_graphs_hom, batch_size=round((len(train_graphs_hom)/num_batches)))
-        #
-        # print("Saving homographs...")
-        # for d in train_loader_hom:
-        #     print(d)
-        # torch.save(train_loader_hom, f"{self.path_dict['hetero_path']}/train_graphs_hom.pt")
-        #
-        # # graphs = [data for data in val_loader_hom.dataset]
-        # torch.save(val_loader_hom, f"{self.path_dict['hetero_path']}/val_graphs_hom.pt")
-        #
-        # # graphs = [data for data in test_loader_hom.dataset]
-        # torch.save(test_loader_hom, f"{self.path_dict['hetero_path']}/test_graphs_hom.pt")
-        #
-        # torch.save(exp_loader_hom, f"{self.path_dict['hetero_path']}/exp_graphs_hom.pt")
-        # print("Done!")
+        # Loading Heterogeneous datasets
+        # DataLoader lets us use the list of data objects as a batch for training
+        train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
+        val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
+        test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
+
+        print("Saving heterographs...")
+        graphs = [data for data in train_loader_sg.dataset]
+        torch.save(graphs, f"{self.path_dict['hetero_path']}/train_graphs_sg.pt")
+
+        graphs = [data for data in val_loader_sg.dataset]
+        torch.save(graphs, f"{self.path_dict['hetero_path']}/val_graphs_sg.pt")
+
+        graphs = [data for data in test_loader_sg.dataset]
+        torch.save(graphs, f"{self.path_dict['hetero_path']}/test_graphs_sg.pt")
+        print("Done!")
+
+        # Loading Homogeneous datasets
+        # DataLoader lets us use the list of data objects as a batch for training
+        num_batches = 5
+        train_loader_hom = DataLoader(train_graphs_hom, batch_size=round((len(train_graphs_hom)/num_batches)), shuffle=True)
+        val_loader_hom = DataLoader(val_graphs_hom, batch_size=round((len(val_graphs_hom)/num_batches)))
+        test_loader_hom = DataLoader(test_graphs_hom, batch_size=round((len(test_graphs_hom)/num_batches)))
+        exp_loader_hom = DataLoader(train_graphs_hom, batch_size=round((len(train_graphs_hom)/num_batches)))
+
+        print("Saving homographs...")
+        torch.save(train_loader_hom, f"{self.path_dict['hetero_path']}/train_graphs_hom.pt")
+
+        # graphs = [data for data in val_loader_hom.dataset]
+        torch.save(val_loader_hom, f"{self.path_dict['hetero_path']}/val_graphs_hom.pt")
+
+        # graphs = [data for data in test_loader_hom.dataset]
+        torch.save(test_loader_hom, f"{self.path_dict['hetero_path']}/test_graphs_hom.pt")
+
+        torch.save(exp_loader_hom, f"{self.path_dict['hetero_path']}/exp_graphs_hom.pt")
+        print("Done!")
