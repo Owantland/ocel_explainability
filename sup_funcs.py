@@ -31,20 +31,15 @@ class SupportFunctions:
 
         # Generate the appropriate path for saving the process execution log
         path_dict['graph_output_path'] = f"{path_dict['graph_output_path']}{self.cant}/"
-        path_dict['ev_log_path'] = f"{path_dict['graph_output_path']}/{path_dict['kpi_event']}"
-        if not os.path.exists(path_dict['ev_log_path']):
-            os.makedirs(path_dict['ev_log_path'])
-        path_dict['ev_log_path'] = f"{path_dict['ev_log_path']}/ev_table.csv"
+        if not os.path.exists(path_dict['graph_output_path']):
+            os.makedirs(path_dict['graph_output_path'])
+        path_dict['ev_log_path'] = f"{path_dict['graph_output_path']}/ev_table.csv"
 
         # Generate appropriate path for saving the heterographs
         path = f"{path_dict['pytorch_path']}{path_dict['kpi_event']}"
         # Save the model into the appropriate directory for the KPI type selected
         if path_dict['kpi_type'] == 0:
-            path = f"{path}/totalTime"
-        elif path_dict['kpi_type'] == 1:
-            path = f"{path}/deliveryOnTime"
-        elif path_dict['kpi_type'] == 2:
-            path = f"{path}/timeQuantile"
+            path = f"{path}/timeToEvent"
         elif path_dict['kpi_type'] == 3:
             path = f"{path}/multPackages"
 

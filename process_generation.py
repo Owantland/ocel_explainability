@@ -225,7 +225,6 @@ class ProcessGeneration:
     def get_ev_log(self, nodes):
         log_id = 0
         log_frames = []
-        trace_times = []
         all_kpis = []
         for vwpnt_object in nodes.keys():
             log_id += 1
@@ -233,95 +232,79 @@ class ProcessGeneration:
             # Each related element is saved as a dictionary with the viewpoint object as key
             rltd_events = nodes[vwpnt_object]['related_events']
             ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
-
             ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
-
-            """
-                Calculate the total time it takes to complete the trace and then calculate the time until the 
-                trace reaches the expected event for every prefix in the trace for "time_to_event"
-            """
-            kpi_event_time = ev_df[ev_df['type'] == self.path_dict['kpi_event']]['timestamp'].values[-1]
-            kpi_event_time = pd.to_datetime(kpi_event_time)
-            ev_df['time_to_event'] = kpi_event_time - pd.to_datetime(ev_df['timestamp'])
-            ev_df['time_to_event'] = ev_df['time_to_event'].apply(lambda x: x.total_seconds())
-
-            trace_kpi = ev_df['time_to_event'][0]
-            trace_times.append(trace_kpi)
 
             # Add the current viewpoint's elements to the event log
             id_col = [log_id for _ in range(len(ev_df.index))]
             ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
-            trace_kpi = [trace_kpi for _ in range(len(ev_df.index))]
-            ev_log = ev_df[['ocel_id', 'type', 'timestamp', 'time_to_event']]
-            ev_log['total_time'] = trace_kpi
+            ev_log = ev_df[['ocel_id', 'type', 'timestamp']]
             ev_log['vwpnt_id'] = id_col
             ev_log['ob_id'] = ob_id
             log_frames.append(ev_log)
 
-            # Calculate timeUntil KPIS that depend on chosen object types
-            kpis = []
-            for kpi_type in self.path_dict['kpis'].keys():
-                ob_cnt = {}
-                evs = ev_df[ev_df['type'] == kpi_type]
-                kpi_events = ev_df[ev_df['type'] == kpi_type]['index']
-                kpi_ob_types = self.path_dict['kpis'][kpi_type]
+            """
+                Calculate the chosen KPI
+                
+                Depending on the option given in the config file calculate the appropriate KPI value and add it
+                to the kpi dictionary file
+            """
+            kpi_event = self.path_dict['kpi_event']
+            kpi_ob = self.path_dict['kpi_viewpoint']
+            kpi_events = ev_df[ev_df['type'] == kpi_event]['index']
 
+            if self.path_dict['kpi_type'] == 0:
                 for i, row in ev_by_ob.iterrows():
                     ob_id = row['ob_id']
                     evs_by_ob = row['events']
                     ob_type = row['ob_type']
                     ob_idx = row['index']
 
-                    for ev in evs_by_ob:
-                        if ev in kpi_events and ob_type in kpi_ob_types:
-                            ts = ev_df[(ev_df['type'] == kpi_type) & (ev_df['index'] == ev)]['timestamp'].values[0]
-                            kpi = [log_id, kpi_type, ob_id, ob_type, ob_idx, ts]
-                            kpis.append(kpi)
+                    if ob_type == kpi_ob:
+                        first_event = evs_by_ob[0]
+                        # Identify the end event for the trace
+                        try:
+                            end_event = [ev for ev in evs_by_ob if ev in kpi_events][-1]
+                        except IndexError: #In case the object is not tied to the event type just take the last instance.
+                            end_event = ev_df[ev_df['type'] == self.path_dict['kpi_event']]['index'].values[-1]
+                        start_time = ev_df[ev_df['index'] == first_event]['timestamp'].values[0]
+                        end_time = ev_df[ev_df['index'] == end_event]['timestamp'].values[0]
 
-                            try:
-                                pst_cnt = ob_cnt[ob_type]
-                                ob_cnt[ob_type] = pst_cnt + 1
-                            except KeyError:
-                                ob_cnt[ob_type] = 1
+                        # Begin calculating the timeToEvent for each step of the process
+                        event_log = ev_df[ev_df['timestamp'] >= start_time]
+                        event_log = event_log[event_log['timestamp'] <= end_time]
 
-                # If an object type has no direct relation to any particular event of the chosen type
-                # assign the latest possible timestamp for that event type.
-                for ob_type in kpi_ob_types:
-                    if ob_type not in ob_cnt.keys():
-                        ts = ev_df[ev_df['type'] == kpi_type]['timestamp'].values[-1]
-                        kpi = [log_id, kpi_type, '', ob_type, 0, ts]
-                        kpis.append(kpi)
-            all_kpis.extend(kpis)
+                        event_log['kpi_val'] = pd.to_datetime(end_time) - pd.to_datetime(event_log['timestamp'])
+                        event_log['kpi_val'] = event_log['kpi_val'].apply(lambda x: x.total_seconds())
 
+                        viewpoint_id = [log_id for _ in range(len(event_log.index))]
+                        kpi_event = [kpi_event for _ in range(len(event_log.index))]
+                        ob_id = [ob_id for _ in range(len(event_log.index))]
+                        ob_idx = [ob_idx for _ in range(len(event_log.index))]
+                        kpi = event_log[['timestamp', 'kpi_val']]
+                        kpi['viewpoint_id'] = viewpoint_id
+                        kpi['kpi_event'] = kpi_event
+                        kpi['ob_id'] = ob_id
+                        kpi['ob_idx'] = ob_idx
+                        all_kpis.append(kpi)
+            elif self.path_dict['kpi_type'] == 1:
+                evs = ev_df[ev_df['type'] == kpi_event]
+                trace_evs = len(evs.values)
+                mult_pckgs = [1 if trace_evs > 1 else 0]
+                kpi_val = [mult_pckgs[0] for _ in range(len(ev_df.index))]
+                viewpoint_id = [log_id for _ in range(len(ev_df.index))]
+                kpi_event = [kpi_event for _ in range(len(ev_df.index))]
+                ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
+                ob_idx = [0 for _ in range(len(ev_df.index))]
+                kpi = ev_df[['timestamp']]
+                kpi['kpi_val'] = kpi_val
+                kpi['viewpoint_id'] = viewpoint_id
+                kpi['kpi_event'] = kpi_event
+                kpi['ob_id'] = ob_id
+                kpi['ob_idx'] = ob_idx
+                all_kpis.append(kpi)
 
-
-
+        all_kpis = pd.concat(all_kpis)
         ev_log = pd.concat(log_frames)
-        all_kpis = pd.DataFrame(all_kpis,columns=['viewpoint_id', 'kpi_type', 'ob_id', 'ob_type', 'index', 'timestamp'])
         all_kpis.to_csv(f"{self.path_dict['graph_output_path']}all_kpis.csv", index=False)
-
-        """
-            Calculate classification KPIs
-        """
-        #Check in what quantile each kpi value lies
-        self.time_quantiles = np.quantile(trace_times, [0.25, 0.50, 0.75])
-        ev_log['quantile'] = ev_log['total_time'].apply(self.get_quantile)
-
-        # Check wether the process is on time or not
-        mean_time = np.mean(trace_times)
-        ev_log['onTime'] = ev_log['total_time'].apply(lambda x: 0 if x<=mean_time else 1)
-
-        # Check whether more than one package was created for the order
-        package_exsts = []
-        for i in range(1, log_id+1):
-            evs = ev_log[(ev_log['vwpnt_id'] == i)]
-            trace_evs = len(evs.values)
-            evs = evs[evs['type'] == 'CreatePackage'].values
-            if len(evs) > 1:
-                package_exsts.extend([1]*trace_evs)
-            else:
-                package_exsts.extend([0]*trace_evs)
-        ev_log['mult_pckgs'] = package_exsts
-
         # Save the event log
         ev_log.to_csv(f"{self.path_dict['ev_log_path']}", index=False)
