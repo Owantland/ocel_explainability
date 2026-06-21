@@ -273,6 +273,14 @@ class ProcessGeneration:
                         event_log = ev_df[ev_df['timestamp'] >= start_time]
                         event_log = event_log[event_log['timestamp'] <= end_time]
 
+                        # Add lines to event log file
+                        id_col = [log_id for _ in range(len(event_log.index))]
+                        ob_id = [vwpnt_object for _ in range(len(event_log.index))]
+                        ev_log = event_log[['ocel_id', 'type', 'timestamp']]
+                        ev_log['vwpnt_id'] = id_col
+                        ev_log['ob_id'] = ob_id
+                        log_frames.append(ev_log)
+
                         event_log['kpi_val'] = pd.to_datetime(end_time) - pd.to_datetime(event_log['timestamp'])
                         event_log['kpi_val'] = event_log['kpi_val'].apply(lambda x: x.total_seconds())
 
