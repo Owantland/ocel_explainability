@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 from torch_geometric.nn import global_mean_pool
 
-class GNN(torch.nn.Module):
+class REG_GNN(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels=64, num_layers=3):
         super().__init__()
         self.convs = torch.nn.ModuleList()

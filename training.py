@@ -6,7 +6,8 @@ from torch_geometric.nn import GCNConv, GraphConv
 from torch_geometric.nn import global_mean_pool
 from torch_geometric.loader import DataLoader
 
-from model_classes.REG_GNN import *
+from model_classes import REG_GNN, CLASS_GNN
+from torchmetrics import F1Score, ConfusionMatrix, Accuracy
 
 import sup_funcs as sf
 import pandas as pd
@@ -32,7 +33,7 @@ class Modelling:
         timestamp = pd.Timedelta(round(total_secs, 2), unit='s')
         return timestamp
 
-    def reg_train(self, model, train_loader, train_data, optimizer, criterion, device):
+    def train(self, model, train_loader, train_data, optimizer, criterion, device):
         model.train()
         total_loss = 0
         for data in train_loader:  # Iterate in batches over the training dataset.
@@ -50,7 +51,7 @@ class Modelling:
         return total_loss / len(train_data)
 
     @torch.no_grad()
-    def reg_test(self, loader, model, criterion, device, std, mean):
+    def loss_test(self, loader, model, criterion, device, std, mean):
         model.eval()
         total_mae = 0
         for data in loader:
@@ -63,6 +64,20 @@ class Modelling:
             true = data.y  # * target_std.to(device) + target_mean.to(device)
             total_mae += (pred - true).abs().sum().item()
         return total_mae / len(loader.dataset)
+
+    @torch.no_grad()
+    def acc_test(self, loader, model, device):
+        model.eval()
+        f1 = F1Score("binary")
+        total_correct = 0
+        for data in loader:  # Iterate in batches over the training/test dataset.
+            data = data.to(device)
+            out = model(data.x, data.edge_index, data.batch)
+            pred = out.argmax(dim=1)  # Use the class with highest probability.
+            total_correct += int((pred == data.y).sum())  # Check against ground-truth labels.
+            f1(pred, data.y)
+        return f1.compute().item()
+
 
     def RegressionModelling(self, train_data, val_data, test_data):
         """
@@ -85,7 +100,7 @@ class Modelling:
 
         # Define some variables for the models
         num_node_features = 11
-        model = GNN(in_channels=num_node_features, hidden_channels=64, num_layers=3)
+        model = REG_GNN.REG_GNN(in_channels=num_node_features, hidden_channels=64, num_layers=3)
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
         criterion = F.mse_loss
         device = torch.device("cpu")
@@ -96,13 +111,42 @@ class Modelling:
         pbar = tqdm(range(1, 101))
         best_val_mae = float("inf")
         for epoch in pbar:
-            train_loss = self.reg_train(model, train_loader, train_data, optimizer, criterion, device)
-            val_mae = self.reg_test(val_loader, model, criterion, device, std, mean)
+            train_loss = self.train(model, train_loader, train_data, optimizer, criterion, device)
+            val_mae = self.loss_test(val_loader, model, criterion, device, std, mean)
             print(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Val MAE: {self.decode_time(val_mae)}')
 
             if val_mae < best_val_mae:
                 print("New best!")
                 best_val_mae = val_mae
+                torch.save(model.state_dict(), model_path)
+        pbar.close()
+
+    def BinaryModelling(self, train_data, val_data, test_data):
+        # Create appropriate loaders
+        train_loader = DataLoader(train_data, batch_size=64, shuffle=True)
+        val_loader = DataLoader(val_data, batch_size=64)
+        test_loader = DataLoader(test_data, batch_size=64)
+
+        # Define variables for the model
+        num_node_features = 11
+        model = CLASS_GNN.GNN(in_channels=num_node_features, hidden_channels=64, out_channels=2)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        criterion = F.cross_entropy
+        device = torch.device("cpu")
+        model_path = self.path_dict['model_path']
+        kpi_event = self.path_dict['kpi_event']
+        model_path = f"{model_path}/BinaryClass_{kpi_event}.pth"
+
+        min_val = 0.5
+        pbar = tqdm(range(1, 301))
+        for epoch in pbar:
+            train_loss = self.train(model, train_loader, train_data, optimizer, criterion, device)
+            train_acc = self.acc_test(train_loader, model, device)
+            val_acc = self.acc_test(val_loader, model, device)
+            print(f'Epoch: {epoch:03d}, Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f}')
+            if val_acc > min_val:
+                print("New best!")
+                min_val = val_acc
                 torch.save(model.state_dict(), model_path)
         pbar.close()
 
@@ -120,5 +164,5 @@ class Modelling:
         kpi_type = self.path_dict['kpi_type']
         if kpi_type == 0: # Regression
             self.RegressionModelling(train_data, val_data, test_data)
-        # elif kpi_type == 1: #Binary Classification
-        #     self.BinaryModelling(train_data, val_data, test_data)
+        elif kpi_type == 1: #Binary Classification
+            self.BinaryModelling(train_data, val_data, test_data)
