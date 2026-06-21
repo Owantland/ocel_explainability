@@ -18,6 +18,7 @@ class SupportFunctions:
                      'graph_output_path': db_configs[self.database]['graph_output_path'],
                      'pytorch_path': db_configs[self.database]['pytorch_path'],
                      'model_path': db_configs[self.database]['model_output_path'],
+                     'explainer_path': db_configs[self.database]['explainer_output_path'],
                      'viewpoint': db_configs[self.database]['viewpoint'],
                      'depth': db_configs[self.database]['added_depth'],
                      'unique_ids': db_configs[self.database]['unique_ids'],
@@ -34,6 +35,10 @@ class SupportFunctions:
         if not os.path.exists(path_dict['graph_output_path']):
             os.makedirs(path_dict['graph_output_path'])
         path_dict['ev_log_path'] = f"{path_dict['graph_output_path']}/ev_log.csv"
+
+        # Validate that explainer path exists
+        if not os.path.exists(path_dict['explainer_path']):
+            os.makedirs(path_dict['explainer_path'])
         return path_dict
 
     def col_names(self, table_name):

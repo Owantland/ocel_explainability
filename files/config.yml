@@ -3,6 +3,7 @@ order_management:
   graph_output_path: "files/graph_structures/order_management/"
   pytorch_path: 'files/hetero_structures/order_management/'
   model_output_path: 'files/models/order_management/'
+  explainer_output_path: 'files/explainer_outputs/order_management/'
   viewpoint: "Orders"
   added_depth: 0
   unique_ids: ['Orders', 'Items', 'Packages']
@@ -23,6 +24,7 @@ logistics:
   graph_output_path: "files/graph_structures/logistics/"
   pytorch_path: 'files/hetero_structures/logistics/'
   model_output_path: 'files/models/logistics/'
+  explainer_output_path: 'files/explainer_outputs/logistics/'
   viewpoint: "CustomerOrder"
   added_depth: 2
   unique_ids: ['CustomerOrder', 'TransportDocument', 'Container', 'HandlingUnit']
