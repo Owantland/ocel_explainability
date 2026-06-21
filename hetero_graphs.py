@@ -11,6 +11,8 @@ import warnings
 import os
 import sup_funcs as sf
 warnings.filterwarnings("ignore")
+import pandas as pd
+import datetime as dt
 
 class HeteroGraphsGenerator:
     def __init__(self, database, cant, train_sample, val_sample, test_sample):
@@ -71,7 +73,7 @@ class HeteroGraphsGenerator:
             active_orders_dict[ob_id] = delivery_time
         return pd_active_orders, active_orders_dict
 
-    def homogeneous_loader(self, graph_set, y_set):
+    def homogeneous_loader(self, graph_set, y_set, timestamp):
         """
         :param graph_set:
         :param y_set:
@@ -89,6 +91,11 @@ class HeteroGraphsGenerator:
             ob_len = self.tensor_dict['Events']
             x = torch.tensor(graph['Events'], dtype=torch.float32).reshape(-1, ob_len)
             edge_index = torch.tensor(graph['Events_to_Events'],dtype=torch.int64)
+            vwpnt_tensor = torch.tensor(vwpnt_id,dtype=torch.long)
+            timestamp = pd.Timestamp(timestamp)
+            start = dt.datetime(1970,1,1)
+            timestamp_tensor = (timestamp-start).total_seconds()
+            timestamp_tensor = torch.tensor(timestamp_tensor,dtype=torch.float)
 
             # Adds the kpi values for the kpi objects
             kpi_ob = self.path_dict['kpi_viewpoint']
@@ -99,10 +106,14 @@ class HeteroGraphsGenerator:
                     vwpnt_y = [int(x) for x in vwpnt_y[0]]
                 except TypeError:
                     vwpnt_y = [int(x) for x in vwpnt_y]
-                y = torch.tensor(vwpnt_y, dtype=torch.long)
+
+                if self.path_dict['kpi_type'] == 0:
+                    y = torch.tensor(vwpnt_y, dtype=torch.float)
+                else:
+                    y = torch.tensor(vwpnt_y, dtype=torch.long)
 
                 if len(graph['Events_to_Events'][0]) > 0:
-                    data = Data(x=x, y=y, edge_index=edge_index)
+                    data = Data(x=x, y=y, edge_index=edge_index, vwpnt_id=vwpnt_tensor, timestamp=timestamp_tensor)
                     all_graphs.append(data)
             except IndexError:
                 pass
@@ -219,7 +230,7 @@ class HeteroGraphsGenerator:
         train_graphs_hom = []
         for timestamp in self.train_sample:
             train_ys, train_graphs = self.get_learning_set(timestamp)
-            train_graphs_hom.extend(self.homogeneous_loader(train_graphs, train_ys))
+            train_graphs_hom.extend(self.homogeneous_loader(train_graphs, train_ys, timestamp))
             train_graphs_sg.extend(self.tensor_loader(train_graphs, train_ys))
 
         val_graphs_sg = []
@@ -227,41 +238,14 @@ class HeteroGraphsGenerator:
         for timestamp in self.val_sample:
             val_ys, val_graphs = self.get_learning_set(timestamp)
             val_graphs_sg.extend(self.tensor_loader(val_graphs, val_ys))
-            val_graphs_hom.extend(self.homogeneous_loader(val_graphs, val_ys))
+            val_graphs_hom.extend(self.homogeneous_loader(val_graphs, val_ys, timestamp))
 
         test_graphs_sg = []
         test_graphs_hom = []
         for timestamp in self.test_sample:
             test_ys, test_graphs = self.get_learning_set(timestamp)
             test_graphs_sg.extend(self.tensor_loader(test_graphs, test_ys))
-            test_graphs_hom.extend(self.homogeneous_loader(test_graphs, test_ys))
-
-        """
-            Apply Z-score method
-            
-            Standardize the data so that each value has a mean of 0 and a standard deviation of 1.
-            This technique is best when your data follow a normal distribution or when you want to treat values 
-            in terms of how far they are from the average. 
-        """
-        if self.path_dict['kpi_type'] == 0:
-            y_train = []
-
-            for graph in train_graphs_hom:
-                y_train.extend(graph.y)
-            y_train = [a.item() for a in y_train]
-            y_train = np.array(y_train)
-
-            mean = np.mean(y_train)
-            std = np.std(y_train)
-
-            mean_time = pd.Timedelta(round(mean,2), unit='s')
-            std_time = pd.Timedelta(round(std,2), unit='s')
-            print(f"The mean value is: {mean_time} / {mean} and std is: {std_time} / {std}")
-
-            for graphs in [train_graphs_hom, val_graphs_hom, test_graphs_hom]:
-                for graph in graphs:
-                    normalized_y = (graph.y - mean) / std
-                    graph.y = normalized_y
+            test_graphs_hom.extend(self.homogeneous_loader(test_graphs, test_ys, timestamp))
 
         # Loading Heterogeneous datasets
         # DataLoader lets us use the list of data objects as a batch for training
@@ -282,20 +266,20 @@ class HeteroGraphsGenerator:
 
         # Loading Homogeneous datasets
         # DataLoader lets us use the list of data objects as a batch for training
-        num_batches = 5
-        train_loader_hom = DataLoader(train_graphs_hom, batch_size=round((len(train_graphs_hom)/num_batches)), shuffle=True)
-        val_loader_hom = DataLoader(val_graphs_hom, batch_size=round((len(val_graphs_hom)/num_batches)))
-        test_loader_hom = DataLoader(test_graphs_hom, batch_size=round((len(test_graphs_hom)/num_batches)))
-        exp_loader_hom = DataLoader(train_graphs_hom, batch_size=round((len(train_graphs_hom)/num_batches)))
+        train_loader_hom = DataLoader(train_graphs_hom, batch_size=len(train_graphs_hom), shuffle=True)
+        val_loader_hom = DataLoader(val_graphs_hom, batch_size=len(val_graphs_hom))
+        test_loader_hom = DataLoader(test_graphs_hom, batch_size=len(test_graphs_hom))
+        exp_loader_hom = DataLoader(train_graphs_hom, batch_size=len(train_graphs_hom))
 
         print("Saving homographs...")
-        torch.save(train_loader_hom, f"{self.path_dict['pytorch_path']}/train_graphs_hom.pt")
+        graphs = [data for data in train_loader_hom.dataset]
+        torch.save(graphs, f"{self.path_dict['pytorch_path']}/train_graphs_hom.pt")
 
-        # graphs = [data for data in val_loader_hom.dataset]
-        torch.save(val_loader_hom, f"{self.path_dict['pytorch_path']}/val_graphs_hom.pt")
+        graphs = [data for data in val_loader_hom.dataset]
+        torch.save(graphs, f"{self.path_dict['pytorch_path']}/val_graphs_hom.pt")
 
-        # graphs = [data for data in test_loader_hom.dataset]
-        torch.save(test_loader_hom, f"{self.path_dict['pytorch_path']}/test_graphs_hom.pt")
+        graphs = [data for data in test_loader_hom.dataset]
+        torch.save(graphs, f"{self.path_dict['pytorch_path']}/test_graphs_hom.pt")
 
         torch.save(exp_loader_hom, f"{self.path_dict['pytorch_path']}/exp_graphs_hom.pt")
         print("Done!")
