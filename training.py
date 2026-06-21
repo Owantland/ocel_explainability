@@ -6,7 +6,7 @@ from torch_geometric.nn import GCNConv, GraphConv
 from torch_geometric.nn import global_mean_pool
 from torch_geometric.loader import DataLoader
 
-from model_classes import REG_GNN, CLASS_GNN
+from model_classes import REG_GNN, CLASS_GNN, REG_GAT
 from torchmetrics import F1Score, ConfusionMatrix, Accuracy
 
 import sup_funcs as sf
@@ -99,8 +99,9 @@ class Modelling:
         test_loader = DataLoader(test_data, batch_size=64)
 
         # Define some variables for the models
-        num_node_features = 11
-        model = REG_GNN.REG_GNN(in_channels=num_node_features, hidden_channels=64, num_layers=3)
+        num_node_features = 11 if self.database == 'order_management' else 14
+        # model = REG_GNN.REG_GNN(in_channels=num_node_features, hidden_channels=64, num_layers=3)
+        model = REG_GAT.REG_GAT(in_channels=num_node_features, hidden_channels=64, num_layers=3)
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
         criterion = F.mse_loss
         device = torch.device("cpu")
@@ -120,6 +121,10 @@ class Modelling:
                 best_val_mae = val_mae
                 torch.save(model.state_dict(), model_path)
         pbar.close()
+
+        test_mae = self.loss_test(test_loader, model, criterion, device, std, mean)
+        test_mae = self.decode_time(test_mae)
+        print(f'Final MAE: {test_mae} \nMean: {self.decode_time(mean.item())}\nSTD: {self.decode_time(std.item())}')
 
     def BinaryModelling(self, train_data, val_data, test_data):
         # Create appropriate loaders
@@ -149,6 +154,9 @@ class Modelling:
                 min_val = val_acc
                 torch.save(model.state_dict(), model_path)
         pbar.close()
+
+        test_acc = self.acc_test(test_loader, model, device)
+        print(f'Final Test Acc: {test_acc:.4f}')
 
     def Modelling(self):
         """
