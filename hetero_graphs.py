@@ -231,45 +231,24 @@ class HeteroGraphsGenerator:
         for timestamp in self.train_sample:
             train_ys, train_graphs = self.get_learning_set(timestamp)
             train_graphs_hom.extend(self.homogeneous_loader(train_graphs, train_ys, timestamp))
-            train_graphs_sg.extend(self.tensor_loader(train_graphs, train_ys))
 
         val_graphs_sg = []
         val_graphs_hom = []
         for timestamp in self.val_sample:
             val_ys, val_graphs = self.get_learning_set(timestamp)
-            val_graphs_sg.extend(self.tensor_loader(val_graphs, val_ys))
             val_graphs_hom.extend(self.homogeneous_loader(val_graphs, val_ys, timestamp))
 
         test_graphs_sg = []
         test_graphs_hom = []
         for timestamp in self.test_sample:
             test_ys, test_graphs = self.get_learning_set(timestamp)
-            test_graphs_sg.extend(self.tensor_loader(test_graphs, test_ys))
             test_graphs_hom.extend(self.homogeneous_loader(test_graphs, test_ys, timestamp))
-
-        # Loading Heterogeneous datasets
-        # DataLoader lets us use the list of data objects as a batch for training
-        train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
-        val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
-        test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
-
-        print("Saving heterographs...")
-        graphs = [data for data in train_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['pytorch_path']}/train_graphs_sg.pt")
-
-        graphs = [data for data in val_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['pytorch_path']}/val_graphs_sg.pt")
-
-        graphs = [data for data in test_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['pytorch_path']}/test_graphs_sg.pt")
-        print("Done!")
 
         # Loading Homogeneous datasets
         # DataLoader lets us use the list of data objects as a batch for training
         train_loader_hom = DataLoader(train_graphs_hom, batch_size=len(train_graphs_hom), shuffle=True)
         val_loader_hom = DataLoader(val_graphs_hom, batch_size=len(val_graphs_hom))
         test_loader_hom = DataLoader(test_graphs_hom, batch_size=len(test_graphs_hom))
-        exp_loader_hom = DataLoader(train_graphs_hom, batch_size=len(train_graphs_hom))
 
         print("Saving homographs...")
         graphs = [data for data in train_loader_hom.dataset]
@@ -280,6 +259,4 @@ class HeteroGraphsGenerator:
 
         graphs = [data for data in test_loader_hom.dataset]
         torch.save(graphs, f"{self.path_dict['pytorch_path']}/test_graphs_hom.pt")
-
-        torch.save(exp_loader_hom, f"{self.path_dict['pytorch_path']}/exp_graphs_hom.pt")
         print("Done!")
