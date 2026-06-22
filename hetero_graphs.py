@@ -131,8 +131,8 @@ class HeteroGraphsGenerator:
             # Initiate the tensor with the viewpoint object
             data = HeteroData()
             data[self.path_dict['viewpoint']].x = torch.tensor(vwpnt_val, dtype=torch.float32).reshape(-1, 1)
-
-            # Adds the kpi values for the kpi objects
+            data[self.path_dict['viewpoint']].id = torch.tensor(vwpnt_id, dtype=torch.long).reshape(-1, 1)
+            # Adds the kpi values for the kpi object
             kpi_ob = self.path_dict['kpi_viewpoint']
             # Assign the y and mask values related to the selected viewpoint and object type
             try:
@@ -174,7 +174,7 @@ class HeteroGraphsGenerator:
     def get_learning_set(self, timestamp):
         set_ys = []
         set_graphs = []
-        num_order = 95
+        num_order = 852
 
         """
             Identify which processes are active at the chosen time by checking whether they started before the timestamp
@@ -204,6 +204,9 @@ class HeteroGraphsGenerator:
                 set_ys.append([kpi, process, self.path_dict['kpi_viewpoint'], []])
             set_graphs.append(active_graph)
 
+            if process == num_order:
+                print(active_graph)
+
         set_graphs = [copy.deepcopy(graph) for graph in set_graphs]
         # Clean up the unnecessary identifiers in each object
         for graph in set_graphs:
@@ -231,18 +234,21 @@ class HeteroGraphsGenerator:
         for timestamp in self.train_sample:
             train_ys, train_graphs = self.get_learning_set(timestamp)
             train_graphs_hom.extend(self.homogeneous_loader(train_graphs, train_ys, timestamp))
+            train_graphs_sg.extend(self.tensor_loader(train_graphs, train_ys))
 
         val_graphs_sg = []
         val_graphs_hom = []
         for timestamp in self.val_sample:
             val_ys, val_graphs = self.get_learning_set(timestamp)
             val_graphs_hom.extend(self.homogeneous_loader(val_graphs, val_ys, timestamp))
+            val_graphs_sg.extend(self.tensor_loader(val_graphs, val_ys))
 
         test_graphs_sg = []
         test_graphs_hom = []
         for timestamp in self.test_sample:
             test_ys, test_graphs = self.get_learning_set(timestamp)
             test_graphs_hom.extend(self.homogeneous_loader(test_graphs, test_ys, timestamp))
+            test_graphs_sg.extend(self.tensor_loader(test_graphs, test_ys))
 
         # Loading Homogeneous datasets
         # DataLoader lets us use the list of data objects as a batch for training
@@ -258,5 +264,21 @@ class HeteroGraphsGenerator:
         torch.save(graphs, f"{self.path_dict['pytorch_path']}/val_graphs_hom.pt")
 
         graphs = [data for data in test_loader_hom.dataset]
+        torch.save(graphs, f"{self.path_dict['pytorch_path']}/test_graphs_hom.pt")
+        print("Done!")
+
+        # Loading Heterogeneous datasets
+        train_loader_sg = DataLoader(train_graphs_sg, batch_size=len(train_graphs_sg), shuffle=True)
+        val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
+        test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
+
+        print("Saving homographs...")
+        graphs = [data for data in train_loader_sg.dataset]
+        torch.save(graphs, f"{self.path_dict['pytorch_path']}/train_graphs_hom.pt")
+
+        graphs = [data for data in val_loader_sg.dataset]
+        torch.save(graphs, f"{self.path_dict['pytorch_path']}/val_graphs_hom.pt")
+
+        graphs = [data for data in test_loader_sg.dataset]
         torch.save(graphs, f"{self.path_dict['pytorch_path']}/test_graphs_hom.pt")
         print("Done!")
