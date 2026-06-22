@@ -16,10 +16,12 @@ class REG_GNN(torch.nn.Module):
         self.lin1 = Linear(hidden_channels, hidden_channels)
         self.lin2 = Linear(hidden_channels, 1)  # single scalar output
 
-    def forward(self, x, edge_index, batch):
-        # Node-level message passing
+    def forward(self, x, edge_index, batch, edge_weight=None):
+        # Node-level message passing. `edge_weight` lets us softly scale
+        # each edge's contribution (used later for explanation fidelity --
+        # not needed for normal training/inference, where it stays None).
         for conv in self.convs:
-            x = conv(x, edge_index)
+            x = conv(x, edge_index, edge_weight=edge_weight)
             x = F.relu(x)
 
         # Pool node embeddings -> one vector per graph
