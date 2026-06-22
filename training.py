@@ -100,8 +100,8 @@ class Modelling:
 
         # Define some variables for the models
         num_node_features = 11 if self.database == 'order_management' else 14
-        # model = REG_GNN.REG_GNN(in_channels=num_node_features, hidden_channels=64, num_layers=3)
-        model = REG_GAT.REG_GAT(in_channels=num_node_features, hidden_channels=64, num_layers=3)
+        model = REG_GNN.REG_GNN(in_channels=num_node_features, hidden_channels=64, num_layers=3)
+        # model = REG_GAT.REG_GAT(in_channels=num_node_features, hidden_channels=64, num_layers=3)
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
         criterion = F.mse_loss
         device = torch.device("cpu")
@@ -125,6 +125,7 @@ class Modelling:
         test_mae = self.loss_test(test_loader, model, criterion, device, std, mean)
         test_mae = self.decode_time(test_mae)
         print(f'Final MAE: {test_mae} \nMean: {self.decode_time(mean.item())}\nSTD: {self.decode_time(std.item())}')
+        return std, mean
 
     def BinaryModelling(self, train_data, val_data, test_data):
         # Create appropriate loaders
@@ -171,6 +172,7 @@ class Modelling:
 
         kpi_type = self.path_dict['kpi_type']
         if kpi_type == 0: # Regression
-            self.RegressionModelling(train_data, val_data, test_data)
+            std, mean = self.RegressionModelling(train_data, val_data, test_data)
+            return std, mean
         elif kpi_type == 1: #Binary Classification
             self.BinaryModelling(train_data, val_data, test_data)
