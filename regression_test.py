@@ -40,7 +40,7 @@ class GCN(torch.nn.Module):
         self.conv4 = GCNConv(hidden_channels, hidden_channels)
 
         # Output Layer
-        self.lin = Linear(hidden_channels, num_classes)
+        self.lin = Linear(hidden_channels, 11)
 
     def forward(self, x, edge_index, batch):
         # 1. Obtain node embeddings
@@ -128,7 +128,7 @@ def decode_time(total_secs):
 
 """
     Step 1: Loading the dataset
-    
+
     Load the list of data structures saved from the previous step and preprocess them:
         * Standardize the Y value for ease of use in the GNN architecture
         * Create a dataloader to more efficiently handle the large swat of data
@@ -138,8 +138,6 @@ train_data = torch.load(f"files/hetero_structures/order_management/train_graphs_
 val_data = torch.load(f"files/hetero_structures/order_management/val_graphs_hom.pt", weights_only=False)
 test_data = torch.load(f"files/hetero_structures/order_management/test_graphs_hom.pt", weights_only=False)
 
-ys = torch.cat([d.y for d in train_data])
-target_mean, target_std = ys.mean(), ys.std()
 
 def normalize_target(data):
     data.y = (data.y - target_mean) / target_std
@@ -188,36 +186,44 @@ print(model)
 criterion = F.mse_loss
 device = torch.device("cpu")
 
-# # Train the model
-# # pbar = tqdm(range(1, 51))
-# # best_val_mae = float("inf")
-# # for epoch in pbar:
-# #     train_loss = train()
-# #     val_mae = test(val_loader)
-# #     print(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Val MAE: {val_mae:.4f}')
-# #
-# #     if val_mae < best_val_mae:
-# #         print("New best!")
-# #         best_val_mae = val_mae
-# #         torch.save(model.state_dict(), f"./GNN_Delivery_Reg.pth")
-# # pbar.close()
-#
-# test_mae = test(test_loader)
-# print(f"\nFinal Test MAE: {test_mae:.4f} (best Val MAE: {best_val_mae:.4f})")
+# Train the model
+pbar = tqdm(range(1, 51))
+best_val_mae = float("inf")
+for epoch in pbar:
+    train_loss = train()
+    val_mae = test(val_loader)
+    print(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Val MAE: {val_mae:.4f}')
+
+    if val_mae < best_val_mae:
+        print("New best!")
+        best_val_mae = val_mae
+        torch.save(model.state_dict(), f"./GNN_Delivery_Reg.pth")
+pbar.close()
+
+test_mae = test(test_loader)
+print(f"\nFinal Test MAE: {test_mae:.4f} (best Val MAE: {best_val_mae:.4f})")
 
 """
     Load the best saved model so we can make some explainer tests
 """
-state_dict_path = ("./GNN_Delivery_Reg.pth")
+train_data = torch.load(f"files/hetero_structures/order_management/train_graphs_hom.pt", weights_only=False)
+val_data = torch.load(f"files/hetero_structures/order_management/val_graphs_hom.pt", weights_only=False)
+test_data = torch.load(f"files/hetero_structures/order_management/test_graphs_hom.pt", weights_only=False)
+test_loader = DataLoader(test_data, batch_size=64)
+device = torch.device('cpu')
+criterion = F.mse_loss
+ys = torch.cat([d.y for d in train_data])
+target_mean, target_std = ys.mean(), ys.std()
+
+state_dict_path = ("files/models/order_management/TimeUntil_PackageDelivered.pth")
+model = GNN(in_channels=11, hidden_channels=64, num_layers=3)
 model.load_state_dict(torch.load(state_dict_path))
 test_mae = test(test_loader)
 test_mae = decode_time(test_mae)
-print(f'Final MAE: {test_mae}')
 
 # Create another loader to make batches for explainability
 # explain_loader = DataLoader(train_data, batch_size=64)
 # batch = next(iter(explain_loader)).to(device)
-device = torch.device('cpu')
 index = 15
 
 data = test_data[index]

@@ -127,15 +127,15 @@ def test():
     return accs
 
 # # Import the dataset
-# path = osp.join(osp.dirname(osp.realpath(__file__)), '../../data/DBLP')
-# dataset = DBLP(path, transform=T.Constant(node_types='conference'))
+path = osp.join(osp.dirname(osp.realpath(__file__)), '../../data/DBLP')
+dataset = DBLP(path, transform=T.Constant(node_types='conference'))
 
-dataset = OGB_MAG(root='./data', preprocess='metapath2vec')
+# dataset = OGB_MAG(root='./data', preprocess='metapath2vec')
 data = dataset[0]
-
-data = dataset[0]
+print(data)
 transform = T.Compose([
-    T.NormalizeFeatures()
+    T.NormalizeFeatures(),
+    T.ToUndirected() # Ensure graph is undirected for simpler relation handling
 ])
 data = transform(data)
 print(data.edge_types)
