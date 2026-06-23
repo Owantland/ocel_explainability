@@ -5,70 +5,23 @@ import torch.nn.functional as F
 
 import torch_geometric
 import torch_geometric.transforms as T
-from torch_geometric.datasets import DBLP, OGB_MAG
-from torch_geometric.nn import HANConv, Linear, HeteroConv, GCNConv, SAGEConv, GATConv, Linear, to_hetero
-from torch_geometric.explain import CaptumExplainer, Explainer, GNNExplainer
+from torch_geometric.datasets import DBLP
+from torch_geometric.nn import HeteroConv, Linear, SAGEConv
+from torch_geometric.loader import DataLoader
 
+from torchmetrics import F1Score
 from tqdm import tqdm
 
-class HAN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, metadata, heads=8):
-        """
-        Initializes the HAN model.
-
-        Args:
-            in_channels (int or dict): Size of input features. If int, assumes all node types
-                                        have the same feature size. If dict, maps node types
-                                        to their feature sizes.
-            hidden_channels (int): Size of the hidden embeddings.
-            out_channels (int): Number of output classes.
-            metadata (tuple): Metadata tuple containing node types and edge types,
-                              obtained from data.metadata().
-            heads (int, optional): Number of attention heads. Defaults to 8.
-        """
-        super().__init__()
-        # HANConv layer automatically handles multiple meta-paths based on metadata
-        # It performs node-level and semantic-level attention.
-        # We specify '-1' for in_channels to let HANConv infer input sizes
-        # per node type from the metadata and input data.
-        self.conv1 = HANConv(in_channels=-1, out_channels=hidden_channels,
-                             metadata=metadata, heads=heads, dropout=0.6)
-        self.conv2 = HANConv(in_channels=hidden_channels, out_channels=out_channels,
-                             metadata=metadata, heads=1, dropout=0.6) # Usually 1 head for final layer
-
-    def forward(self, x_dict, edge_index_dict):
-        """
-        Forward pass of the HAN model.
-
-        Args:
-            x_dict (dict): Dictionary mapping node types to their feature tensors.
-            edge_index_dict (dict): Dictionary mapping edge types to their edge index tensors.
-
-        Returns:
-            torch.Tensor: Output logits for the target node type ('author').
-        """
-        # Note: HANConv returns a dictionary of embeddings for all node types reached
-        #       through the defined meta-paths originating from the source nodes.
-        x_dict = self.conv1(x_dict, edge_index_dict)
-        # Apply activation (optional, depends on layer implementation details)
-        # x_dict = {key: F.elu(x) for key, x in x_dict.items()} # Example activation
-
-        x_dict = self.conv2(x_dict, edge_index_dict)
-
-        # We only need the output for the 'author' node type for our classification task
-        return x_dict['author']
-
 class HeteroGNN(torch.nn.Module):
-    def __init__(self, data, hidden_channels, out_channels, num_layers):
+    def __init__(self, metadata, hidden_channels, out_channels, num_layers):
         super().__init__()
 
         self.convs = torch.nn.ModuleList()
         for _ in range(num_layers):
-            conv_dict = {}
-            for edge in data.edge_types:
-                conv_dict[edge] = GATConv((-1, -1), hidden_channels, add_self_loops=False)
-            print(conv_dict)
-            conv = HeteroConv(conv_dict, aggr='sum')
+            conv = HeteroConv({
+                edge_type: SAGEConv((-1, -1), hidden_channels)
+                for edge_type in metadata[1]
+            })
             self.convs.append(conv)
 
         self.lin = Linear(hidden_channels, out_channels)
@@ -76,119 +29,92 @@ class HeteroGNN(torch.nn.Module):
     def forward(self, x_dict, edge_index_dict):
         for conv in self.convs:
             x_dict = conv(x_dict, edge_index_dict)
-            x_dict = {key: x.relu() for key, x in x_dict.items()}
-        return self.lin(x_dict['author'])
-
-class GAT(torch.nn.Module):
-    def __init__(self, hidden_channels, out_channels):
-        super().__init__()
-        self.conv1 = GATConv((-1, -1), hidden_channels, add_self_loops=False)
-        self.lin1 = Linear(-1, hidden_channels)
-        self.conv2 = GATConv((-1, -1), out_channels, add_self_loops=False)
-        self.lin2 = Linear(-1, out_channels)
-
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index) + self.lin1(x)
-        x = x.relu()
-        x = self.conv2(x, edge_index) + self.lin2(x)
-        return x
-
-class Model(torch.nn.Module):
-    def __init__(self, hidden_channels, out_channels):
-        super().__init__()
-        self.encoder = GAT(hidden_channels, out_channels)
-        self.encoder = to_hetero(self.encoder, data.metadata(), aggr='sum')
-
-    def forward(self, x_dict, edge_index_dict):
-        z_dict = self.encoder(x_dict, edge_index_dict)
-        return z_dict['author']
+            x_dict = {key: F.leaky_relu(x) for key, x in x_dict.items()}
+        return self.lin(x_dict[viewpoint_object])
 
 def train():
     model.train()
-    optimizer.zero_grad()
-    out = model(data.x_dict, data.edge_index_dict)
-    mask = data['author'].train_mask
-    loss = F.cross_entropy(out[mask], data['author'].y[mask])
-    loss.backward()
-    optimizer.step()
-    return float(loss)
 
+    total_examples = total_loss = 0
+    for batch in train_loader:
+        optimizer.zero_grad()
+        batch = batch.to(device)
+        batch_size = len(batch[viewpoint_object].batch)
+        out = model(batch.x_dict, batch.edge_index_dict)
+        loss = F.cross_entropy(out[:batch_size],
+                               batch[viewpoint_object].y[:batch_size])
+        loss.backward()
+        optimizer.step()
+
+        total_examples += batch_size
+        total_loss += float(loss) * batch_size
+    return total_loss / total_examples
 
 @torch.no_grad()
-def test():
+def test(loader):
     model.eval()
-    pred = model(data.x_dict, data.edge_index_dict).argmax(dim=-1)
+    f1 = F1Score("binary")
+    total_correct = 0
+    for data in loader:
+        data = data.to(device)
+        batch_size = len(data[viewpoint_object].batch)
+        out = model(data.x_dict, data.edge_index_dict)
+        pred = out.argmax(dim=1)
+        total_correct += int((pred[:batch_size] == data[viewpoint_object].y[:batch_size]).sum())
+        f1(pred[:batch_size], data[viewpoint_object].y[:batch_size])
+    return f1.compute().item()
 
-    accs = []
-    for split in ['train_mask', 'val_mask', 'test_mask']:
-        mask = data['author'][split]
-        acc = (pred[mask] == data['author'].y[mask]).sum() / mask.sum()
-        accs.append(float(acc))
-    return accs
 
-# # Import the dataset
-path = osp.join(osp.dirname(osp.realpath(__file__)), '../../data/DBLP')
-dataset = DBLP(path, transform=T.Constant(node_types='conference'))
+# # We initialize conference node features with a single one-vector as feature:
+# path = osp.join(osp.dirname(osp.realpath(__file__)), '../../data/DBLP')
+# dataset = DBLP(path, transform=T.Constant(node_types='conference'))
+# data = dataset[0]
 
-# dataset = OGB_MAG(root='./data', preprocess='metapath2vec')
-data = dataset[0]
-print(data)
-transform = T.Compose([
-    T.NormalizeFeatures(),
-    T.ToUndirected() # Ensure graph is undirected for simpler relation handling
-])
-data = transform(data)
-print(data.edge_types)
-print(data.edge_index_dict.keys())
+viewpoint_object = 'Orders'
+training_data = torch.load('../files/hetero_structures/order_management/train_graphs_sg.pt', weights_only=False)
+val_data = torch.load('../files/hetero_structures/order_management/val_graphs_sg.pt', weights_only=False)
+test_data = torch.load('../files/hetero_structures/order_management/test_graphs_sg.pt', weights_only=False)
 
-# # Define the model
-# # model = HAN(in_channels=-1, hidden_channels=128,
-# #             out_channels=4, metadata=data.metadata(), heads=8)
-#
-# # model = HeteroGNN(data, hidden_channels=64, out_channels=4, num_layers=2)
-# model = Model(hidden_channels=64, out_channels=4)
-#
-# device = torch.device('mps')
-# data, model = data.to(device), model.to(device)
-#
-# # Optimizer
-# optimizer = torch.optim.Adam(model.parameters(), lr=0.005, weight_decay=0.001)
-#
-# pbar = tqdm(range(1, 101))
-# for epoch in pbar:
-#     loss = train()
-#     train_acc, val_acc, test_acc = test()
-#     print(f'Epoch: {epoch:03d}, Loss: {loss:.4f}, Train: {train_acc:.4f}, '
-#           f'Val: {val_acc:.4f}, Test: {test_acc:.4f}')
-# pbar.close()
-#
-# explainer = Explainer(
-#     model,  # It is assumed that model outputs a single tensor.
-#     algorithm=CaptumExplainer('IntegratedGradients'),
-#     explanation_type='model',
-#     node_mask_type='attributes',
-#     edge_mask_type='object',
-#     model_config = dict(
-#         mode='multiclass_classification',
-#         task_level='node',
-#         return_type='probs',  # Model returns probabilities.
-#     ),
-# )
+train_loader = DataLoader(training_data, batch_size=64, shuffle=True)
+val_loader = DataLoader(val_data, batch_size=64)
+test_loader = DataLoader(test_data, batch_size=64)
 
-# # Generate batch-wise heterogeneous explanations for
-# # the nodes at index `1` and `3`:
-# hetero_explanation = explainer(
-#     data.x_dict,
-#     data.edge_index_dict,
-#     index=torch.tensor([1, 3]),
-# )
-# print(hetero_explanation.edge_mask_dict)
-# print(hetero_explanation.node_mask_dict)
+for step, data in enumerate(train_loader):
+    print(f'Step {step + 1}:')
+    print('=======')
+    print(f'Number of graphs in the current batch: {len(data['Orders'].batch)}')
+    print(data)
 
-# path = 'feature_importance.png'
-# explanation.visualize_feature_importance(path, top_k=10)
-# print(f"Feature importance plot has been saved to '{path}'")
-#
-# path = 'subgraph.pdf'
-# explanation.visualize_graph(path)
-# print(f"Subgraph visualization plot has been saved to '{path}'")
+# for step, data in enumerate(val_loader):
+#     print(f'Step {step + 1}:')
+#     print('=======')
+#     print(f'Number of graphs in the current batch: {len(data['Orders'].batch)}')
+#     print(data)
+
+model = HeteroGNN(training_data[0].metadata(), hidden_channels=64, out_channels=2, num_layers=2)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.005, weight_decay=0.001)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = model.to(device)
+
+data = next(iter(train_loader))
+with torch.no_grad():  # Initialize lazy modules.
+    out = model(data.x_dict, data.edge_index_dict)
+
+best_val = 0
+pbar = tqdm(range(1, 101))
+for epoch in pbar:
+    loss = train()
+    train_acc = test(train_loader)
+    val_acc = test(val_loader)
+    print(f"Epoch: {epoch:03d}, Loss: {loss:.4f}, Train: {train_acc:.4f}, 'f'Val: {val_acc:.4f}")
+
+    if val_acc > best_val:
+        best_val = val_acc
+        print("Best value found!")
+        torch.save(model.state_dict(), f"../files/models/order_management/het_BinaryClassifier.pt")
+pbar.close()
+
+test_acc = test(test_loader)
+print(f"Final test Accuracy: {test_acc:.4f}")
+
+# We have a simple test setup. We now have to try regression
