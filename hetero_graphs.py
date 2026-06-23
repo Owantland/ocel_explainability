@@ -131,7 +131,7 @@ class HeteroGraphsGenerator:
             # Initiate the tensor with the viewpoint object
             data = HeteroData()
             data[self.path_dict['viewpoint']].x = torch.tensor(vwpnt_val, dtype=torch.float32).reshape(-1, 1)
-            data[self.path_dict['viewpoint']].id = torch.tensor(vwpnt_id, dtype=torch.long).reshape(-1, 1)
+            data[self.path_dict['viewpoint']].id = torch.tensor(vwpnt_id, dtype=torch.long).reshape
             # Adds the kpi values for the kpi object
             kpi_ob = self.path_dict['kpi_viewpoint']
             # Assign the y and mask values related to the selected viewpoint and object type
@@ -272,13 +272,13 @@ class HeteroGraphsGenerator:
         val_loader_sg = DataLoader(val_graphs_sg, batch_size=len(val_graphs_sg))
         test_loader_sg = DataLoader(test_graphs_sg, batch_size=len(test_graphs_sg))
 
-        print("Saving homographs...")
+        print("Saving heterographs...")
         graphs = [data for data in train_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['pytorch_path']}/train_graphs_hom.pt")
+        torch.save(graphs, f"{self.path_dict['pytorch_path']}/train_graphs_sg.pt")
 
         graphs = [data for data in val_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['pytorch_path']}/val_graphs_hom.pt")
+        torch.save(graphs, f"{self.path_dict['pytorch_path']}/val_graphs_sg.pt")
 
         graphs = [data for data in test_loader_sg.dataset]
-        torch.save(graphs, f"{self.path_dict['pytorch_path']}/test_graphs_hom.pt")
+        torch.save(graphs, f"{self.path_dict['pytorch_path']}/test_graphs_sg.pt")
         print("Done!")
