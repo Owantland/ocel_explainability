@@ -199,6 +199,9 @@ class Modelling:
         test_loss = self.het_loss_test(test_loader, model, criterion, device)
         print(f'Final MAE: {test_loss} \nMean: {mean.item()}\nSTD: {std.item()}')
 
+        # Save the results in a result file
+        self.SaveResults('Heterogeneous', test_kpi, test_loss, mean, std)
+
     def RegressionModelling(self, train_data, val_data, test_data):
         """
         :param train_data: training dataset
@@ -262,6 +265,7 @@ class Modelling:
                         best_val = val_loss
                         torch.save(model.state_dict(),
                                    f"{model_path}_{i}.pth")
+                        model_name = f"{test_kpi}_{i}.pth"
                         counter = 0
                     else:
                         counter += 1
@@ -278,7 +282,7 @@ class Modelling:
         print(f'Final MAE: {test_mae} \nMean: {mean.item()}\nSTD: {std.item()}')
 
         # Save the results in a result file
-        self.SaveResults('Homogeneous', test_kpi, test_mae, mean, std)
+        self.SaveResults('Homogeneous', test_kpi, test_mae, mean, std, model_name)
         return std, mean
 
     def BinaryModelling(self, train_data, val_data, test_data):
@@ -313,7 +317,7 @@ class Modelling:
         test_acc = self.acc_test(test_loader, model, device)
         print(f'Final Test Acc: {test_acc:.4f}')
 
-    def SaveResults(self, type, kpi, value, mean, std):
+    def SaveResults(self, type, kpi, value, mean, std, model):
         # Open the results file
         results = pd.read_csv(self.path_dict['results_path'])
 
@@ -321,9 +325,9 @@ class Modelling:
             if row['KPI'] == kpi:
                 if row['Graph Type'] == type:
                     val = row['Metric']
-                    new_val = [value if value < val else val]
-                    row['Metric'] = new_val
-                    print('Metric updated')
+                    if value < val:
+                        results.loc[(results.KPI == kpi) & (results['Graph Type'] == type), 'Metric'] = value
+                        results.loc[(results.KPI == kpi) & (results['Graph Type'] == type), 'Model'] = model
                     found = True
                 else:
                     found = False
@@ -332,13 +336,57 @@ class Modelling:
 
         # If the KPI isnt logged, create a new entry
         if not found:
-            result = {"Graph Type": ["Homogeneous"], "KPI": [kpi], "Metric": [value],
-                      "Mean": [mean.item()], "STD": [std.item()]}
+            result = {"Graph Type": [type], "KPI": [kpi], "Metric": [value],
+                      "Mean": [mean.item()], "STD": [std.item()], "Model":[model]}
             res_df = pd.DataFrame(result)
             results = pd.concat([results, res_df])
 
         # Save the updated result file
         results.to_csv(self.path_dict['results_path'], index=False)
+
+    def SaveBestResult(self):
+        """
+        :return:
+        Unlike SaveResult this function checks all 5 generated models for the best one and saves it to the file so we
+        can compare the most effective results for each KPI
+        """
+
+        model_path = self.path_dict['model_path']
+        kpi_event = self.path_dict['kpi_event']
+        kpi_type = self.path_dict['kpi_type']
+        device = torch.device("cpu")
+        num_node_features = 11 if self.database == 'order_management' else 14
+
+        # Prepare test data
+        # Load homogeneous data sets
+        file_path = self.path_dict['pytorch_path']
+        hom_train_data = torch.load(f"{file_path}/train_graphs_hom.pt", weights_only=False)
+        hom_test_data = torch.load(f"{file_path}/test_graphs_hom.pt", weights_only=False)
+
+        ys = torch.cat([d.y for d in hom_train_data])
+        mean, std = ys.mean(), ys.std()
+        test_data = [self.normalize_target(d, mean, std) for d in hom_test_data]
+        test_loader = DataLoader(test_data, batch_size=64)
+
+        if kpi_type == 0:
+            kpi = f"TimeFrom_{self.viewpoint_object}_to_{kpi_event}"
+        else:
+            kpi = f"BinaryClass_{kpi_event}.pth"
+
+        hom_models_path = f"{model_path}Homo"
+        het_models_path = f"{model_path}Hetero"
+
+        directory = os.fsencode(hom_models_path)
+        for file in os.listdir(directory):
+            filename = os.fsdecode(file)
+            if filename.__contains__(kpi):
+                model = REG_GNN.REG_GNN(in_channels=num_node_features, hidden_channels=64, num_layers=3)
+                model.load_state_dict(torch.load(f"{hom_models_path}/{filename}", weights_only=False))
+                criterion = torch.nn.L1Loss()
+
+                test_mae = self.loss_test(test_loader, model, criterion, device)
+                self.SaveResults('Homogeneous', kpi, test_mae, mean, std, filename)
+                print(f'Final MAE: {test_mae}')
 
     def Modelling(self):
         """
