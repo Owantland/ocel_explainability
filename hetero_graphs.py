@@ -145,10 +145,12 @@ class HeteroGraphsGenerator:
                 except TypeError:
                     vwpnt_y = [int(x) for x in vwpnt_y]
 
-                # Assign values to the proper tensor
-                data[kpi_ob].y = torch.tensor(vwpnt_y, dtype=torch.long)
-                data[kpi_ob].mask = torch.tensor(vwpnt_mask, dtype=torch.bool)
-
+                if self.path_dict['kpi_type'] == 0:
+                    data[kpi_ob].y = torch.tensor(vwpnt_y, dtype = torch.float32).reshape(-1,1)
+                    data[kpi_ob].mask = torch.tensor(vwpnt_mask, dtype = torch.bool).reshape(-1,1)
+                else:
+                    data[kpi_ob].y = torch.tensor(vwpnt_y, dtype=torch.long)
+                    data[kpi_ob].mask = torch.tensor(vwpnt_mask, dtype=torch.bool)
             except IndexError:
                 pass
 
