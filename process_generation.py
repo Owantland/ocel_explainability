@@ -234,14 +234,6 @@ class ProcessGeneration:
             ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
             ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
 
-            # Add the current viewpoint's elements to the event log
-            id_col = [log_id for _ in range(len(ev_df.index))]
-            ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
-            ev_log = ev_df[['ocel_id', 'type', 'timestamp']]
-            ev_log['vwpnt_id'] = id_col
-            ev_log['ob_id'] = ob_id
-            log_frames.append(ev_log)
-
             """
                 Calculate the chosen KPI
                 
@@ -295,6 +287,14 @@ class ProcessGeneration:
                         kpi['ob_idx'] = ob_idx
                         all_kpis.append(kpi)
             elif self.path_dict['kpi_type'] == 1:
+                # Add the current viewpoint's elements to the event log
+                id_col = [log_id for _ in range(len(ev_df.index))]
+                ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
+                ev_log = ev_df[['ocel_id', 'type', 'timestamp']]
+                ev_log['vwpnt_id'] = id_col
+                ev_log['ob_id'] = ob_id
+                log_frames.append(ev_log)
+
                 evs = ev_df[ev_df['type'] == kpi_event]
                 trace_evs = len(evs.values)
                 mult_pckgs = [1 if trace_evs > 1 else 0]
