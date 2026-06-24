@@ -19,6 +19,7 @@ class SupportFunctions:
                      'pytorch_path': db_configs[self.database]['pytorch_path'],
                      'model_path': db_configs[self.database]['model_output_path'],
                      'explainer_path': db_configs[self.database]['explainer_output_path'],
+                     'results_path': f"files/results.csv",
                      'viewpoint': db_configs[self.database]['viewpoint'],
                      'depth': db_configs[self.database]['added_depth'],
                      'unique_ids': db_configs[self.database]['unique_ids'],
