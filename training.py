@@ -104,7 +104,8 @@ class Modelling:
         device = torch.device("cpu")
         model_path = self.path_dict['model_path']
         kpi_event = self.path_dict['kpi_event']
-        model_path = f"{model_path}/TimeUntil_{kpi_event}.pth"
+        test_kpi = f"TimeUntil_{kpi_event}"
+        model_path = f"{model_path}/{test_kpi}.pth"
 
         pbar = tqdm(range(1, 101))
         best_val_loss = float("inf")
@@ -121,6 +122,12 @@ class Modelling:
 
         test_mae = self.loss_test(test_loader, model, criterion, device, std, mean)
         print(f'Final MAE: {test_mae} \nMean: {mean.item()}\nSTD: {std.item()}')
+
+        # Save the results in a result file
+        result = {"Graph Type": ["Homogeneous"], "KPI": [test_kpi], "Metric": [test_mae],
+                  "Mean": [mean.item()], "STD": [std.item()]}
+        results_df = pd.DataFrame(result)
+        results_df.to_csv(self.path_dict['results_path'], index=False)
         return std, mean
 
     def BinaryModelling(self, train_data, val_data, test_data):
