@@ -274,27 +274,11 @@ class Modelling:
             if len(to_train) == 0:
                 flag = False
 
-        # pbar = tqdm(range(1, 101))
-        # best_val_loss = float("inf")
-        # for epoch in pbar:
-        #     train_loss = self.train(model, train_loader, train_data, optimizer, criterion, device)
-        #     val_loss = self.loss_test(val_loader, model, criterion, device)
-        #     print(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss}')
-        #
-        #     if val_loss < best_val_loss:
-        #         print("New best!")
-        #         best_val_loss = val_loss
-        #         torch.save(model.state_dict(), model_path)
-        # pbar.close()
-
         test_mae = self.loss_test(test_loader, model, criterion, device)
         print(f'Final MAE: {test_mae} \nMean: {mean.item()}\nSTD: {std.item()}')
 
         # Save the results in a result file
-        result = {"Graph Type": ["Homogeneous"], "KPI": [test_kpi], "Metric": [test_mae],
-                  "Mean": [mean.item()], "STD": [std.item()]}
-        results_df = pd.DataFrame(result)
-        results_df.to_csv(self.path_dict['results_path'], index=False)
+        self.SaveResults('Homogeneous', test_kpi, test_mae, mean, std)
         return std, mean
 
     def BinaryModelling(self, train_data, val_data, test_data):
@@ -329,6 +313,33 @@ class Modelling:
         test_acc = self.acc_test(test_loader, model, device)
         print(f'Final Test Acc: {test_acc:.4f}')
 
+    def SaveResults(self, type, kpi, value, mean, std):
+        # Open the results file
+        results = pd.read_csv(self.path_dict['results_path'])
+
+        for i, row in results.iterrows():
+            if row['KPI'] == kpi:
+                if row['Graph Type'] == type:
+                    val = row['Metric']
+                    new_val = [value if value < val else val]
+                    row['Metric'] = new_val
+                    print('Metric updated')
+                    found = True
+                else:
+                    found = False
+            else:
+                found = False
+
+        # If the KPI isnt logged, create a new entry
+        if not found:
+            result = {"Graph Type": ["Homogeneous"], "KPI": [kpi], "Metric": [value],
+                      "Mean": [mean.item()], "STD": [std.item()]}
+            res_df = pd.DataFrame(result)
+            results = pd.concat([results, res_df])
+
+        # Save the updated result file
+        results.to_csv(self.path_dict['results_path'], index=False)
+
     def Modelling(self):
         """
             Main function, obtains the relevant files and selects the appropriate training and validation functions to
@@ -348,7 +359,7 @@ class Modelling:
         kpi_type = self.path_dict['kpi_type']
         if kpi_type == 0: # Regression
             std, mean = self.RegressionModelling(hom_train_data, hom_val_data, hom_test_data)
-            self.Het_Reg_Modelling(het_train_data, het_val_data, het_test_data)
+            # self.Het_Reg_Modelling(het_train_data, het_val_data, het_test_data)
             return std, mean
         elif kpi_type == 1: #Binary Classification
             self.BinaryModelling(hom_train_data, hom_val_data, hom_test_data)
