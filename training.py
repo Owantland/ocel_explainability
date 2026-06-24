@@ -143,7 +143,7 @@ class Modelling:
         # Define save path for the models
         model_path = self.path_dict['model_path']
         kpi_event = self.path_dict['kpi_event']
-        test_kpi = f"TimeUntil_{kpi_event}"
+        test_kpi = f"TimeFrom_{self.viewpoint_object}_to_{kpi_event}"
 
         if not os.path.exists(f"{model_path}/Hetero"):
             os.makedirs(f"{model_path}/Hetero")
@@ -219,30 +219,73 @@ class Modelling:
         val_loader = DataLoader(val_data, batch_size=64)
         test_loader = DataLoader(test_data, batch_size=64)
 
-        # Define some variables for the models
-        num_node_features = 11 if self.database == 'order_management' else 14
-        model = REG_GNN.REG_GNN(in_channels=num_node_features, hidden_channels=64, num_layers=3)
-        # model = REG_GAT.REG_GAT(in_channels=num_node_features, hidden_channels=64, num_layers=3)
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-        criterion = torch.nn.L1Loss()
-        device = torch.device("cpu")
+        # Define save path for the models
         model_path = self.path_dict['model_path']
         kpi_event = self.path_dict['kpi_event']
-        test_kpi = f"TimeUntil_{kpi_event}"
-        model_path = f"{model_path}/{test_kpi}.pth"
+        test_kpi = f"TimeFrom_{self.viewpoint_object}_to_{kpi_event}"
 
-        pbar = tqdm(range(1, 101))
-        best_val_loss = float("inf")
-        for epoch in pbar:
-            train_loss = self.train(model, train_loader, train_data, optimizer, criterion, device)
-            val_loss = self.loss_test(val_loader, model, criterion, device)
-            print(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss}')
+        if not os.path.exists(f"{model_path}/Homo"):
+            os.makedirs(f"{model_path}/Homo")
+        model_path = f"{model_path}/Homo/{test_kpi}"
 
-            if val_loss < best_val_loss:
-                print("New best!")
-                best_val_loss = val_loss
-                torch.save(model.state_dict(), model_path)
-        pbar.close()
+        # Model values
+        num_node_features = 11 if self.database == 'order_management' else 14
+        device = torch.device("cpu")
+        num_layers = 5
+        width_layers = 8
+        num_heads = 3
+        hidden_channels = [width_layers] * num_layers
+        criterion = torch.nn.L1Loss()
+
+        learning_rates = [0.01] * 1 + [0.0075] * 1 + [0.005] * 1 + [0.0025] * 11 + [0.001] * 10 + [0.0005] * 26
+        patience = 5
+        epochs_sg = 10
+        """
+            Homogeneous model training loop:
+            Trains 5 different instances of the model with decreasing learning rates in each epoch.
+        """
+        to_train = [i for i in range(1, 6)]
+        flag = True
+        while flag:
+            for i in to_train:
+                model = REG_GNN.REG_GNN(in_channels=num_node_features, hidden_channels=64, num_layers=3)
+                model = model.to(device)
+                best_val = float("inf")
+                counter = 0
+                for epoch, lr in enumerate(learning_rates):
+                    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+                    loss = self.train(model, train_loader, train_data, optimizer, criterion, device)
+                    val_loss = self.loss_test(val_loader, model, criterion, device)
+                    print(f"{i} - Epoch: {epoch:03d}, LR: {lr}, Loss: {loss:.4f}, Val Loss: {val_loss}")
+                    if val_loss < best_val:
+                        print('New Best')
+                        best_val = val_loss
+                        torch.save(model.state_dict(),
+                                   f"{model_path}_{i}.pth")
+                        counter = 0
+                    else:
+                        counter += 1
+
+                    if counter > patience:
+                        print('---')
+                        break
+                if epoch + 1 >= epochs_sg:
+                    to_train.remove(i)
+            if len(to_train) == 0:
+                flag = False
+
+        # pbar = tqdm(range(1, 101))
+        # best_val_loss = float("inf")
+        # for epoch in pbar:
+        #     train_loss = self.train(model, train_loader, train_data, optimizer, criterion, device)
+        #     val_loss = self.loss_test(val_loader, model, criterion, device)
+        #     print(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss}')
+        #
+        #     if val_loss < best_val_loss:
+        #         print("New best!")
+        #         best_val_loss = val_loss
+        #         torch.save(model.state_dict(), model_path)
+        # pbar.close()
 
         test_mae = self.loss_test(test_loader, model, criterion, device)
         print(f'Final MAE: {test_mae} \nMean: {mean.item()}\nSTD: {std.item()}')
