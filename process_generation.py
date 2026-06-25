@@ -320,6 +320,8 @@ class ProcessGeneration:
         mean, std = ys.mean(), ys.std()
         all_kpis['kpi_val'] = all_kpis['kpi_val'].apply(lambda x: (x-mean)/std)
         all_kpis.to_csv(f"{self.path_dict['graph_output_path']}all_kpis.csv", index=False)
+
+        # To do, add the value to the result file
         print(f"For {self.path_dict['kpi_viewpoint']}_to_{self.path_dict['kpi_event']}:")
         print(f"Mean (hours): {round(mean/3600)}, STD (hours): {round(std/3600)}")
 

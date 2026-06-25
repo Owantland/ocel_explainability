@@ -131,7 +131,7 @@ class HeteroGraphsGenerator:
             # Initiate the tensor with the viewpoint object
             data = HeteroData()
             data[self.path_dict['viewpoint']].x = torch.tensor(vwpnt_val, dtype=torch.float32).reshape(-1, 1)
-            data[self.path_dict['viewpoint']].id = torch.tensor(vwpnt_id, dtype=torch.long).reshape
+            data[self.path_dict['viewpoint']].id = torch.tensor(vwpnt_id, dtype=torch.long)
             # Adds the kpi values for the kpi object
             kpi_ob = self.path_dict['kpi_viewpoint']
             # Assign the y and mask values related to the selected viewpoint and object type
@@ -168,6 +168,7 @@ class HeteroGraphsGenerator:
             for edge in edges:
                 split = edge.split("_to_")
                 data[split[0], 'to', split[1]].edge_index = torch.tensor(graph[edge],dtype=torch.int64).reshape(2, -1)
+
             # Add return indexes to all edges
             data = T.ToUndirected()(data)
             all_graphs.append(data)
@@ -176,7 +177,7 @@ class HeteroGraphsGenerator:
     def get_learning_set(self, timestamp):
         set_ys = []
         set_graphs = []
-        num_order = 852
+        num_order = 95
 
         """
             Identify which processes are active at the chosen time by checking whether they started before the timestamp
@@ -190,24 +191,25 @@ class HeteroGraphsGenerator:
         active_processes = self.pd_active_orders[(self.pd_active_orders[1] <= timestamp) &
                                               (self.pd_active_orders[2] >= timestamp)][0]
         for process in active_processes:
+            active_graph = self.all_graphs[(self.all_timestamps <= timestamp) & (self.all_idx == process)][-1]
+
+            # Active kpi objects
+            ob_ids = [x[0] for x in active_graph[self.path_dict['kpi_viewpoint']]]
+
+            # Find the related KPIs
             y_df = self.all_kpis[self.all_kpis['timestamp'] <= timestamp]
             y_df = y_df[y_df['viewpoint_id'] == process]
-            y = y_df['kpi_val'].values[-1]
-            active_graph = self.all_graphs[(self.all_timestamps <= timestamp) & (self.all_idx == process)][-1]
             kpi = self.path_dict['kpi_event']
 
-            ob_ids = [x[0] for x in active_graph[self.path_dict['kpi_viewpoint']]]
             if len(ob_ids) > 0:
                 ys = []
                 for ob_id in ob_ids:
+                    y = y_df[y_df['ob_id'] == ob_id]['kpi_val'].values[-1]
                     ys.append(y)
                 set_ys.append([kpi, process, self.path_dict['kpi_viewpoint'], ys])
             else:
                 set_ys.append([kpi, process, self.path_dict['kpi_viewpoint'], []])
             set_graphs.append(active_graph)
-
-            if process == num_order:
-                print(active_graph)
 
         set_graphs = [copy.deepcopy(graph) for graph in set_graphs]
         # Clean up the unnecessary identifiers in each object
@@ -224,9 +226,10 @@ class HeteroGraphsGenerator:
             kpi_id = y_val[0]
             vwpnt_id = y_val[1]
             ob_type = y_val[2]
-            vals = np.array(y_val[3][0])
+            vals = np.array(y_val[3])
             mask = vals >= 0
             set_ys[idx] = [kpi_id, vwpnt_id, ob_type, vals, mask]
+
         set_ys = pd.DataFrame(set_ys, columns=['kpi_id', 'vwpnt_id', 'ob_type', 'y_val', 'y_mask'])
         return set_ys, set_graphs
 
