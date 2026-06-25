@@ -224,8 +224,8 @@ class ProcessGeneration:
 
     def get_ev_log(self, nodes):
         log_id = 0
-        log_frames = []
-        all_kpis = []
+        log_frames = pd.DataFrame()
+        all_kpis = pd.DataFrame()
         for vwpnt_object in nodes.keys():
             log_id += 1
 
@@ -252,6 +252,8 @@ class ProcessGeneration:
                     ob_idx = row['index']
 
                     if ob_type == kpi_ob:
+                        if vwpnt_object == 12:
+                            print(ob_id, ob_type, ob_idx)
                         first_event = evs_by_ob[0]
                         # Identify the end event for the trace
                         try:
@@ -267,11 +269,11 @@ class ProcessGeneration:
 
                         # Add lines to event log file
                         id_col = [log_id for _ in range(len(event_log.index))]
-                        ob_id = [vwpnt_object for _ in range(len(event_log.index))]
+                        trace_id = [vwpnt_object for _ in range(len(event_log.index))]
                         ev_log = event_log[['ocel_id', 'type', 'timestamp']]
                         ev_log['vwpnt_id'] = id_col
-                        ev_log['ob_id'] = ob_id
-                        log_frames.append(ev_log)
+                        ev_log['ob_id'] = trace_id
+                        log_frames = pd.concat([log_frames, ev_log])
 
                         event_log['kpi_val'] = pd.to_datetime(end_time) - pd.to_datetime(event_log['timestamp'])
                         event_log['kpi_val'] = event_log['kpi_val'].apply(lambda x: x.total_seconds())
@@ -285,7 +287,9 @@ class ProcessGeneration:
                         kpi['kpi_event'] = kpi_event
                         kpi['ob_id'] = ob_id
                         kpi['ob_idx'] = ob_idx
-                        all_kpis.append(kpi)
+                        all_kpis = pd.concat([all_kpis, kpi])
+
+
             elif self.path_dict['kpi_type'] == 1:
                 # Add the current viewpoint's elements to the event log
                 id_col = [log_id for _ in range(len(ev_df.index))]
@@ -311,8 +315,13 @@ class ProcessGeneration:
                 kpi['ob_idx'] = ob_idx
                 all_kpis.append(kpi)
 
-        all_kpis = pd.concat(all_kpis)
-        ev_log = pd.concat(log_frames)
+        # Standardize the KPI values for the dataset
+        ys = all_kpis['kpi_val'].to_numpy()
+        mean, std = ys.mean(), ys.std()
+        all_kpis['kpi_val'] = all_kpis['kpi_val'].apply(lambda x: (x-mean)/std)
         all_kpis.to_csv(f"{self.path_dict['graph_output_path']}all_kpis.csv", index=False)
+        print(f"For {self.path_dict['kpi_viewpoint']}_to_{self.path_dict['kpi_event']}:")
+        print(f"Mean (hours): {round(mean/3600)}, STD (hours): {round(std/3600)}")
+
         # Save the event log
-        ev_log.to_csv(f"{self.path_dict['ev_log_path']}", index=False)
+        log_frames.to_csv(f"{self.path_dict['ev_log_path']}", index=False)
