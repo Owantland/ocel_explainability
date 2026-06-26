@@ -5,6 +5,9 @@ import copy
 import sup_funcs as sf
 
 from collections import defaultdict
+from sklearn.preprocessing import StandardScaler
+import numpy as np
+import ast
 
 '''
     Creating a unified Event table
@@ -176,6 +179,19 @@ class Generator:
                 oh_dict[types[idx]] = a
         return oh_dict
 
+    def get_ev_encoding(self, ev_type):
+        qry = f'''
+               SELECT DISTINCT OCEL_TYPE_MAP
+               FROM EVENT_MAP_TYPE
+               ORDER BY 1;
+               '''
+        self.cursor.execute(qry)
+        types = self.cursor.fetchall()
+        types = [ev_type[0] for ev_type in types]
+        events = [[0] * len(types)]
+        events[0][types.index(ev_type)] = 1
+        return events[0]
+
     def col_names(self, table_name):
         self.cursor.execute(f"PRAGMA table_info({table_name});")
         columns_info = self.cursor.fetchall()
@@ -259,6 +275,9 @@ class Generator:
                 timestamp = row['timestamp']
                 objects_in_event = []
 
+                encode = self.get_ev_encoding(ev_type)
+                self.tensor_dict['Events'] = len(encode)
+
                 # Add values for the numpy lists used for filtering
                 all_timestamps.append(timestamp)
                 all_idx.append(vwpnt_cnt)
@@ -266,7 +285,7 @@ class Generator:
 
                 # Add event identifiers to the row
                 ocel_row.append(ev_id)
-                ocel_row.append(ev_type)
+                ocel_row.append(encode)
                 ocel_row.append(ev_idx)
                 ocel_row.append(pd.to_datetime(timestamp))
                 ocel_row_cols.append('ev_id')
@@ -295,7 +314,6 @@ class Generator:
                     ob_type = row['ob_type']
                     ob_idx = row['index']
                     edge_type = f"{ob_type}_to_Events"
-
                     ob_attrs[ob_type] = [] if ob_type not in ob_attrs.keys() else ob_attrs[ob_type]
                     edge_attrs[edge_type] = [[], []] if edge_type not in edge_attrs.keys() else edge_attrs[edge_type]
                     # Identify if the object needs to be added to the graph

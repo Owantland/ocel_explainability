@@ -93,7 +93,7 @@ class ProcessGeneration:
         # Generate a list of all objects of the chosen viewpoint
         qry = f'''
                     SELECT *
-                    FROM OBJECT_{self.path_dict['viewpoint']}
+                    FROM object_{self.path_dict['viewpoint']}
                     ORDER BY 2
                     LIMIT {self.cant};
                '''
