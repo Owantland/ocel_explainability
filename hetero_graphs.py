@@ -43,24 +43,12 @@ class HeteroGraphsGenerator:
         with open(f'{self.path_dict["graph_output_path"]}edges.csv') as csv_file:
             self.edges = pd.read_csv(csv_file)
 
+        with open(f'{self.path_dict["graph_output_path"]}ev_log.csv') as csv_file:
+            self.ev_log = pd.read_csv(csv_file)
+
         # Open relevant files
         with open(f'{self.path_dict["graph_output_path"]}tensor_dict.json') as json_file:
             self.tensor_dict = json.load(json_file)
-
-        # with open(f'{self.path_dict["graph_output_path"]}all_graphs.json') as json_file:
-        #     all_graphs = json.load(json_file)
-        #     self.all_graphs = np.array(all_graphs)
-        #
-        # with open(f'{self.path_dict["graph_output_path"]}all_timestamps.json') as json_file:
-        #     all_timestamps = json.load(json_file)
-        #     self.all_timestamps = np.array(all_timestamps)
-        #
-        # with open(f'{self.path_dict["graph_output_path"]}all_idx.json') as json_file:
-        #     all_idx = json.load(json_file)
-        #     self.all_idx = np.array(all_idx)
-        #
-        # with open(f'{self.path_dict["graph_output_path"]}all_kpis.csv') as csv_file:
-        #     self.all_kpis = pd.read_csv(csv_file)
 
         # Creates a variety of dictionaries of relationships between objects
         self.pd_active_orders, self.active_orders_dict = self.preprocessing_steps()
@@ -197,7 +185,11 @@ class HeteroGraphsGenerator:
 
         for process in sample:
             # Go row for row obtaining the relevant values
+            end_time = self.ev_log[self.ev_log['vwpnt_id'] == process]['timestamp'].values[-1]
             active_df = self.ocel_df[self.ocel_df['vwpnt_id'] == process]
+            active_df = active_df[active_df['timestamp'] <= end_time]
+            edges = self.edges[self.edges['vwpnt_id'] == process]
+            edges = edges[edges['timestamp'] <= end_time]
             y_df = self.all_kpis[self.all_kpis['viewpoint_id'] == process]
             ys = y_df['kpi_val'].to_list()
 
@@ -223,29 +215,24 @@ class HeteroGraphsGenerator:
                     active_graph[col_name] = attrs
 
                 # Add edges
-                active_edges = self.edges.loc[self.edges['ev_id'] == ev_id]
-                active_edges = active_edges[:1]
+                active_edges = edges.loc[edges['ev_id'] == ev_id]
 
                 cols = [col for col in active_edges.columns if col not in ev_cols]
                 for col in cols:
                     edge = active_edges[col].values[0]
                     edge = ast.literal_eval(edge)
                     active_graph[col] = edge
-
-                try:
-                    y_val = ys[cnt]
-                except IndexError:
-                    break
+                y_val = ys[cnt]
                 cnt += 1
 
                 # Create heterogeneous graph
                 data = HeteroData()
 
                 # Add the nodes
-                edges = []
+                edge_list = []
                 for key in active_graph.keys():
                     if "_to_" in key and key:
-                        edges.append(key)
+                        edge_list.append(key)
                     else:
                         # Obtains the length of each node to ensure proper reshape
                         ob_len = self.tensor_dict[key]
@@ -254,7 +241,7 @@ class HeteroGraphsGenerator:
                         except TypeError:
                             print(key)
                             print(active_graph[key])
-                for edge in edges:
+                for edge in edge_list:
                     split = edge.split("_to_")
                     data[split[0], 'to', split[1]].edge_index = torch.tensor(active_graph[edge],
                                                                              dtype=torch.int64).reshape(2, -1)
@@ -278,26 +265,29 @@ class HeteroGraphsGenerator:
         val_graphs_sg = []
         test_graphs_sg = []
 
+        # self.get_learning_set(self.train_sample)
+        # self.get_learning_set(self.val_sample)
+        # self.get_learning_set(self.test_sample)
         train_graphs_sg.extend(self.get_learning_set(self.train_sample))
         val_graphs_sg.extend(self.get_learning_set(self.val_sample))
         test_graphs_sg.extend(self.get_learning_set(self.test_sample))
 
-        # # # Loading Homogeneous datasets
-        # # # DataLoader lets us use the list of data objects as a batch for training
-        # # train_loader_hom = DataLoader(train_graphs_hom, batch_size=len(train_graphs_hom), shuffle=True)
-        # # val_loader_hom = DataLoader(val_graphs_hom, batch_size=len(val_graphs_hom))
-        # # test_loader_hom = DataLoader(test_graphs_hom, batch_size=len(test_graphs_hom))
-        # #
-        # # print("Saving homographs...")
-        # # graphs = [data for data in train_loader_hom.dataset]
-        # # torch.save(graphs, f"{self.path_dict['pytorch_path']}/train_graphs_hom.pt")
-        # #
-        # # graphs = [data for data in val_loader_hom.dataset]
-        # # torch.save(graphs, f"{self.path_dict['pytorch_path']}/val_graphs_hom.pt")
-        # #
-        # # graphs = [data for data in test_loader_hom.dataset]
-        # # torch.save(graphs, f"{self.path_dict['pytorch_path']}/test_graphs_hom.pt")
-        # # print("Done!")
+        # # # # Loading Homogeneous datasets
+        # # # # DataLoader lets us use the list of data objects as a batch for training
+        # # # train_loader_hom = DataLoader(train_graphs_hom, batch_size=len(train_graphs_hom), shuffle=True)
+        # # # val_loader_hom = DataLoader(val_graphs_hom, batch_size=len(val_graphs_hom))
+        # # # test_loader_hom = DataLoader(test_graphs_hom, batch_size=len(test_graphs_hom))
+        # # #
+        # # # print("Saving homographs...")
+        # # # graphs = [data for data in train_loader_hom.dataset]
+        # # # torch.save(graphs, f"{self.path_dict['pytorch_path']}/train_graphs_hom.pt")
+        # # #
+        # # # graphs = [data for data in val_loader_hom.dataset]
+        # # # torch.save(graphs, f"{self.path_dict['pytorch_path']}/val_graphs_hom.pt")
+        # # #
+        # # # graphs = [data for data in test_loader_hom.dataset]
+        # # # torch.save(graphs, f"{self.path_dict['pytorch_path']}/test_graphs_hom.pt")
+        # # # print("Done!")
 
         # Loading Heterogeneous datasets
         print("Saving heterographs...")

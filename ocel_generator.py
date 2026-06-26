@@ -255,7 +255,6 @@ class Generator:
             vwpnt_cnt += 1
 
             # Prepare the dataframes that will be used throughout the process
-            graph = {}
             past_events = []
             ob_df = nodes[vwpnt_object]['related_objects'][0]
             ev_by_ob = nodes[vwpnt_object]['events_by_objects'][0]
@@ -286,19 +285,21 @@ class Generator:
                 # Add event identifiers to the row
                 ocel_row.append(ev_id)
                 ocel_row.append(encode)
-                ocel_row.append(ev_idx)
                 ocel_row.append(pd.to_datetime(timestamp))
+                ocel_row.append(vwpnt_cnt)
                 ocel_row_cols.append('ev_id')
                 ocel_row_cols.append('ev_type')
-                ocel_row_cols.append('ev_idx')
                 ocel_row_cols.append('timestamp')
+                ocel_row_cols.append('vwpnt_id')
 
                 # Add the event_to_event edges to edges_dataframe
                 edges.append(ev_id)
                 edges.append(timestamp)
+                edges.append(vwpnt_cnt)
                 edges.append(self.generate_adjacency_list_with_k(ev_by_ob, ev_idx))
                 edges_cols.append('ev_id')
                 edges_cols.append('timestamp')
+                edges_cols.append('vwpnt_id')
                 edges_cols.append('Events_to_Events')
 
                 self.tensor_dict['Events_to_Events'] = 1
@@ -429,5 +430,9 @@ class Generator:
         edges = pd.DataFrame(all_edges, columns=edges_cols)
         ocel.to_csv(f"files/graph_structures/{self.database}/{self.cant}/ocel.csv", index=False)
         edges.to_csv(f"files/graph_structures/{self.database}/{self.cant}/edges.csv", index=False)
-
         print('Done')
+
+    def encode_events(self):
+        ocel = pd.read_csv(f"files/graph_structures/{self.database}/{self.cant}/ocel.csv")
+        ocel['ev_type'] = ocel['ev_type'].apply(lambda x: self.get_ev_encoding(x))
+        ocel.to_csv(f"files/graph_structures/{self.database}/{self.cant}/ocel.csv", index=False)

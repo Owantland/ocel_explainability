@@ -4,20 +4,20 @@ order_management:
   pytorch_path: 'files/hetero_structures/order_management/'
   model_output_path: 'files/models/order_management/'
   explainer_output_path: 'files/explainer_outputs/order_management/'
-  viewpoint: "orders"
+  viewpoint: "Orders"
   added_depth: 0
-  unique_ids: ['orders', 'items', 'packages']
+  unique_ids: ['Orders', 'Items', 'Packages']
   kpi_type: 0
-  kpi_event: "packagedelivered" #"createpackage" "packagedelivered" "payorder"
-  kpi_viewpoint: "orders"
+  kpi_event: "PackageDelivered" #"CreatePackage" "PackageDelivered" "PayOrder"
+  kpi_viewpoint: "Orders"
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:
-    orders: ['price']
-    items: ['weight', 'price']
-    packages: ['weight']
+    Orders: ['price']
+    Items: ['weight', 'price']
+    Packages: ['weight']
   time_attributes:
-    products: ['weight', 'price'] # First value is the set attribute and the second one is the time sensitive one
-  encoding: ['customers', 'employees']
+    Products: ['weight', 'price'] # First value is the set attribute and the second one is the time sensitive one
+  encoding: ['Customers', 'Employees']
 
 logistics:
   ocel_path: "files/databases/logistics.sqlite"

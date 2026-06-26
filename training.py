@@ -6,7 +6,7 @@ from torch_geometric.nn import GCNConv, GraphConv
 from torch_geometric.nn import global_mean_pool
 from torch_geometric.loader import DataLoader
 
-from model_classes import REG_GNN, CLASS_GNN, REG_GAT, HET_GNN
+from model_classes import REG_GNN, CLASS_GNN, REG_GAT, HGT
 from torchmetrics import F1Score, ConfusionMatrix, Accuracy
 
 import sup_funcs as sf
@@ -44,11 +44,10 @@ class Modelling:
     """
     def het_train(self, model, train_loader, optimizer, criterion, device):
         model.train()
-
         total_examples = total_loss = 0
         for batch in train_loader:
-            optimizer.zero_grad()
             batch = batch.to(device)
+            optimizer.zero_grad()
             batch_size = len(batch[self.viewpoint_object].batch)
             out = model(batch.x_dict, batch.edge_index_dict)
             loss = criterion(out[:batch_size], batch[self.viewpoint_object].y[:batch_size])
@@ -64,11 +63,11 @@ class Modelling:
         model.eval()
 
         total_examples = total_loss = 0
-        for data in loader:
-            data = data.to(device)
-            out = model(data.x_dict, data.edge_index_dict)
-            batch_size = len(data[self.viewpoint_object].batch)
-            loss = criterion(out[:batch_size], data[self.viewpoint_object].y[:batch_size])
+        for batch in loader:
+            batch = batch.to(device)
+            out = model(batch.x_dict, batch.edge_index_dict)
+            batch_size = len(batch[self.viewpoint_object].batch)
+            loss = criterion(out[:batch_size], batch[self.viewpoint_object].y[:batch_size])
             total_examples += batch_size
             total_loss += float(loss) * batch_size
         return total_loss / total_examples
@@ -127,18 +126,10 @@ class Modelling:
         """
         viewpoint_object = self.viewpoint_object
 
-        # Standardize the Y value for ease of use in the GNN architecture
-        ys = torch.cat([d[viewpoint_object].y for d in training_data])
-        mean, std = ys.mean(), ys.std()
-
-        training_data = [self.normalize_het(d, mean, std) for d in training_data]
-        val_data =      [self.normalize_het(d, mean, std) for d in val_data]
-        test_data =     [self.normalize_het(d, mean, std) for d in test_data]
-
         # Create the loaders for training and validation
-        train_loader = DataLoader(training_data, batch_size=128, shuffle=True)
-        val_loader = DataLoader(val_data, batch_size=64)
-        test_loader = DataLoader(test_data, batch_size=64)
+        train_loader = DataLoader(training_data, batch_size=16, shuffle=True)
+        val_loader = DataLoader(val_data, batch_size=16)
+        test_loader = DataLoader(test_data, batch_size=16)
 
         # Define save path for the models
         model_path = self.path_dict['model_path']
@@ -147,60 +138,83 @@ class Modelling:
 
         if not os.path.exists(f"{model_path}/Hetero"):
             os.makedirs(f"{model_path}/Hetero")
-        model_path = f"{model_path}/Hetero/{test_kpi}"
+        model_path = f"{model_path}/Hetero/{test_kpi}.pth"
 
         # Model values
+        data = training_data[0]
+        model = HGT.HGT(hidden_channels=24, out_channels=1, num_layers=2,
+                        num_heads=2, data=data, viewpoint=viewpoint_object)
         device = torch.device("cpu")
-        num_layers = 5
-        width_layers = 8
-        num_heads = 3
-        hidden_channels = [width_layers] * num_layers
+        model = model.to(device)
+        data = data.to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
         criterion = torch.nn.L1Loss()
 
-        learning_rates = [0.01] * 1 + [0.0075] * 1 + [0.005] * 1 + [0.0025] * 11 + [0.001] * 10 + [0.0005] * 26
-        patience = 5
-        epochs_sg = 10
+        with torch.no_grad():  # Initialize lazy modules.
+            out = model(data.x_dict, data.edge_index_dict)
 
-        """
-            Heterogeneous model training loop:
-            Trains 5 different instances of the model with decreasing learning rates in each epoch.
-        """
-        to_train = [i for i in range(1, 6)]
-        flag = True
-        while flag:
-            for i in to_train:
-                model = HET_GNN.HeteroGNN(hidden_channels=hidden_channels, out_channels=1, num_layers=num_layers,
-                                          num_heads=num_heads, data=training_data[0], viewpoint=viewpoint_object)
-                model = model.to(device)
-                best_val = 10e7
-                counter = 0
-                for epoch, lr in enumerate(learning_rates):
-                    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-                    loss = self.het_train(model, train_loader, optimizer, criterion, device)
-                    val_loss = self.het_loss_test(val_loader, model, criterion, device)
-                    print(f"{i} - Epoch: {epoch:03d}, LR: {lr}, Loss: {loss:.4f}, Val Loss: {val_loss}")
-                    if val_loss < best_val:
-                        print('New Best')
-                        best_val = val_loss
-                        torch.save(model.state_dict(),
-                                   f"{model_path}_{i}.pth")
-                        counter = 0
-                    else:
-                        counter += 1
+        best_val = 10e7
 
-                    if counter > patience:
-                        print('---')
-                        break
-                if epoch + 1 >= epochs_sg:
-                    to_train.remove(i)
-            if len(to_train) == 0:
-                flag = False
+        pbar = tqdm(range(1, 30))
+        for epoch in pbar:
+            loss = self.het_train(model, train_loader, optimizer, criterion, device)
+            val_mse = self.het_loss_test(val_loader, model, criterion, device)  # Should use a separate validation set loader
+            print(f'Epoch: {epoch:03d}, Loss: {loss:.4f}, Val MSE: {val_mse:.4f}')
+            if val_mse < best_val:
+                print("New best!")
+                torch.save(model.state_dict(), model_path)
+        pbar.close()
+
+        # num_layers = 5
+        # width_layers = 8
+        # num_heads = 3
+        # hidden_channels = [width_layers] * num_layers
+        # criterion = torch.nn.L1Loss()
+        # learning_rates = [0.01] * 1 + [0.0075] * 1 + [0.005] * 1 + [0.0025] * 11 + [0.001] * 10 + [0.0005] * 26
+        # patience = 5
+        # epochs_sg = 10
+        # """
+        #     Heterogeneous model training loop:
+        #     Trains 5 different instances of the model with decreasing learning rates in each epoch.
+        # """
+        # to_train = [i for i in range(1, 6)]
+        # flag = True
+        # while flag:
+        #     for i in to_train:
+        #         model = HET_GNN.HeteroGNN(hidden_channels=hidden_channels, out_channels=1, num_layers=num_layers,
+        #                                   num_heads=num_heads, data=training_data[0], viewpoint=viewpoint_object)
+        #         model = model.to(device)
+        #         best_val = 10e7
+        #         counter = 0
+        #         for epoch, lr in enumerate(learning_rates):
+        #             optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        #             loss = self.het_train(model, train_loader, optimizer, criterion, device)
+        #             val_loss = self.het_loss_test(val_loader, model, criterion, device)
+        #             print(f"{i} - Epoch: {epoch:03d}, LR: {lr}, Loss: {loss:.4f}, Val Loss: {val_loss}")
+        #             if val_loss < best_val:
+        #                 print('New Best')
+        #                 best_val = val_loss
+        #                 torch.save(model.state_dict(),
+        #                            f"{model_path}_{i}.pth")
+        #                 counter = 0
+        #                 model_name = f"{test_kpi}_{i}.pth"
+        #             else:
+        #                 counter += 1
+        #
+        #             if counter > patience:
+        #                 print('---')
+        #                 break
+        #         if epoch + 1 >= epochs_sg:
+        #             to_train.remove(i)
+        #     if len(to_train) == 0:
+        #         flag = False
 
         test_loss = self.het_loss_test(test_loader, model, criterion, device)
-        print(f'Final MAE: {test_loss} \nMean: {mean.item()}\nSTD: {std.item()}')
+        print(f'Final MAE: {test_loss}')
 
-        # Save the results in a result file
-        self.SaveResults('Heterogeneous', test_kpi, test_loss, mean, std)
+        #
+        # # Save the results in a result file
+        # self.SaveResults('Heterogeneous', test_kpi, test_loss, mean, std, model_name)
 
     def RegressionModelling(self, train_data, val_data, test_data):
         """
@@ -357,6 +371,11 @@ class Modelling:
         device = torch.device("cpu")
         num_node_features = 11 if self.database == 'order_management' else 14
 
+        num_layers = 5
+        width_layers = 8
+        num_heads = 3
+        hidden_channels = [width_layers] * num_layers
+
         # Prepare test data
         # Load homogeneous data sets
         file_path = self.path_dict['pytorch_path']
@@ -368,6 +387,16 @@ class Modelling:
         test_data = [self.normalize_target(d, mean, std) for d in hom_test_data]
         test_loader = DataLoader(test_data, batch_size=64)
 
+        # Load heterogeneous data sets
+        file_path = self.path_dict['pytorch_path']
+        het_train_data = torch.load(f"{file_path}/train_graphs_sg.pt", weights_only=False)
+        het_test_data = torch.load(f"{file_path}/test_graphs_sg.pt", weights_only=False)
+
+        ys = torch.cat([d[self.viewpoint_object].y for d in het_train_data])
+        mean, std = ys.mean(), ys.std()
+        het_test_data = [self.normalize_het(d, mean, std) for d in het_test_data]
+        het_test_loader = DataLoader(het_test_data, batch_size=64)
+
         if kpi_type == 0:
             kpi = f"TimeFrom_{self.viewpoint_object}_to_{kpi_event}"
         else:
@@ -376,6 +405,7 @@ class Modelling:
         hom_models_path = f"{model_path}Homo"
         het_models_path = f"{model_path}Hetero"
 
+        # Update homogeneous models
         directory = os.fsencode(hom_models_path)
         for file in os.listdir(directory):
             filename = os.fsdecode(file)
@@ -386,6 +416,20 @@ class Modelling:
 
                 test_mae = self.loss_test(test_loader, model, criterion, device)
                 self.SaveResults('Homogeneous', kpi, test_mae, mean, std, filename)
+                print(f'Final MAE: {test_mae}')
+
+        # Update heterogeneous models
+        directory = os.fsencode(het_models_path)
+        for file in os.listdir(directory):
+            filename = os.fsdecode(file)
+            if filename.__contains__(kpi):
+                model = HET_GNN.HeteroGNN(hidden_channels=hidden_channels, out_channels=1, num_layers=num_layers,
+                                          num_heads=num_heads, data=het_train_data[0], viewpoint=self.viewpoint_object)
+                model.load_state_dict(torch.load(f"{het_models_path}/{filename}", weights_only=False))
+                criterion = torch.nn.L1Loss()
+
+                test_mae = self.het_loss_test(het_test_loader, model, criterion, device)
+                self.SaveResults('Heterogeneous', kpi, test_mae, mean, std, filename)
                 print(f'Final MAE: {test_mae}')
 
     def Modelling(self):
@@ -406,8 +450,7 @@ class Modelling:
 
         kpi_type = self.path_dict['kpi_type']
         if kpi_type == 0: # Regression
-            std, mean = self.RegressionModelling(hom_train_data, hom_val_data, hom_test_data)
-            # self.Het_Reg_Modelling(het_train_data, het_val_data, het_test_data)
-            return std, mean
-        elif kpi_type == 1: #Binary Classification
-            self.BinaryModelling(hom_train_data, hom_val_data, hom_test_data)
+            # std, mean = self.RegressionModelling(hom_train_data, hom_val_data, hom_test_data)
+            self.Het_Reg_Modelling(het_train_data, het_val_data, het_test_data)
+        # elif kpi_type == 1: #Binary Classification
+        #     self.BinaryModelling(hom_train_data, hom_val_data, hom_test_data)
