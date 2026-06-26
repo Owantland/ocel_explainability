@@ -2,9 +2,10 @@ import torch
 from torch_geometric.nn import HGTConv, Linear
 
 class HGT(torch.nn.Module):
-    def __init__(self, data, hidden_channels, out_channels, num_heads, num_layers):
+    def __init__(self, hidden_channels, out_channels, num_layers, num_heads, data, viewpoint):
         super().__init__()
 
+        self.viewpoint = viewpoint
         self.lin_dict = torch.nn.ModuleDict()
         for node_type in data.node_types:
             self.lin_dict[node_type] = Linear(-1, hidden_channels)
@@ -17,7 +18,7 @@ class HGT(torch.nn.Module):
 
         self.lin = Linear(hidden_channels, out_channels)
 
-    def forward(self, x_dict, edge_index_dict, vwpnt):
+    def forward(self, x_dict, edge_index_dict):
         x_dict = {
             node_type: self.lin_dict[node_type](x).relu_()
             for node_type, x in x_dict.items()
@@ -26,4 +27,4 @@ class HGT(torch.nn.Module):
         for conv in self.convs:
             x_dict = conv(x_dict, edge_index_dict)
 
-        return self.lin(x_dict[vwpnt])
+        return self.lin(x_dict[self.viewpoint])
