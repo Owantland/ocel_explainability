@@ -27,6 +27,30 @@ class Modelling:
         self.viewpoint_object = self.path_dict['kpi_viewpoint']
         self.device = torch.device('cpu')
 
+        # Load relevant datasets
+        self.train_data = torch.load(f"{self.path_dict['pytorch_path']}/train_graphs_sg.pt", weights_only=False)
+        self.val_data = torch.load(f"{self.path_dict['pytorch_path']}/val_graphs_sg.pt", weights_only=False)
+        self.test_data = torch.load(f"{self.path_dict['pytorch_path']}/test_graphs_sg.pt", weights_only=False)
+
+        kpi_type = self.path_dict['kpi_type']
+        if kpi_type == 0:  # Regression
+            self.model = HGT.HGT(hidden_channels=24, out_channels=1, num_layers=2,
+                                 num_heads=2, data=self.train_data[0], viewpoint=self.viewpoint_object)
+            test_kpi = f"TimeFrom_{self.viewpoint_object}_to_{self.path_dict['kpi_event']}"
+        elif kpi_type == 1:
+            self.model = HGT_CLASS.HGT_CLASS(hidden_channels=64, out_channels=2, num_heads=2,
+                                             num_layers=2, data=self.train_data[0],
+                                             viewpoint=self.viewpoint_object)
+            test_kpi = f"Classifier_{self.path_dict['kpi_event']}"
+        self.model = self.model.to(self.device)
+
+        # Define save path for the models
+        model_path = self.path_dict['model_path']
+
+        if not os.path.exists(f"{model_path}/Hetero"):
+            os.makedirs(f"{model_path}/Hetero")
+        self.model_path = f"{model_path}/Hetero/{test_kpi}.pth"
+
     def normalize_target(self, data, mean, std):
         data.y = (data.y - mean) / std
         return data
@@ -79,15 +103,15 @@ class Modelling:
     """
         Hetero Classifier training and validation functions
     """
-    def class_train(self, model, train_loader, optimizer, criterion, device):
-        model.train()
+    def class_train(self, train_loader, optimizer, criterion):
+        self.model.train()
 
         total_loss = total_examples = 0
         for batch in train_loader:
-            batch = batch.to(device)
+            batch = batch.to(self.device)
             optimizer.zero_grad()
             batch_size = len(batch[self.viewpoint_object].batch)
-            out = model(batch.x_dict, batch.edge_index_dict)
+            out = self.model(batch.x_dict, batch.edge_index_dict)
             seed_out = out[:batch_size]
             seed_y = batch[self.viewpoint_object].y[:batch_size]
 
@@ -100,13 +124,13 @@ class Modelling:
         return total_loss / total_examples
 
     @torch.no_grad()
-    def class_eval(self, loader, model, device):
-        model.eval()
+    def class_eval(self, loader):
+        self.model.eval()
         total_correct = total_examples = 0
         f1 = F1Score("binary")
         for batch in loader:
-            batch = batch.to(device)
-            out = model(batch.x_dict, batch.edge_index_dict)
+            batch = batch.to(self.device)
+            out = self.model(batch.x_dict, batch.edge_index_dict)
             batch_size = len(batch[self.viewpoint_object].batch)
             seed_out = out[:batch_size].argmax(dim=-1)
             seed_y = batch[self.viewpoint_object].y[:batch_size]
@@ -117,6 +141,7 @@ class Modelling:
 
         return total_correct / total_examples, f1.compute().item()
 
+    # Update the regression model
     def Het_Reg_Modelling(self, training_data, val_data, test_data):
         """
         :param het_train_data:
@@ -228,46 +253,34 @@ class Modelling:
         val_loader = DataLoader(val_data, batch_size=16)
         test_loader = DataLoader(test_data, batch_size=16)
 
-        # Define save path for the models
-        model_path = self.path_dict['model_path']
-        kpi_event = self.path_dict['kpi_event']
-        test_kpi = f"Classifier_{kpi_event}"
-
-        if not os.path.exists(f"{model_path}/Hetero"):
-            os.makedirs(f"{model_path}/Hetero")
-        model_path = f"{model_path}/Hetero/{test_kpi}.pth"
-
-        # Create model
-        data = training_data[0]
-        model = HGT_CLASS.HGT_CLASS(hidden_channels=64, out_channels=2, num_heads=2,
-                                    num_layers=2, data=data, viewpoint=viewpoint_object)
-        device = torch.device("cpu")
-        model = model.to(device)
-        data = data.to(device)
+        # Choose criterion
         criterion = F.cross_entropy
 
         # Materialize HGTConv's lazy linear layers with one real forward pass
         # before constructing the optimizer (same reason as the regression example).
         with torch.no_grad():
             batch = next(iter(train_loader))
-            model(batch.x_dict, batch.edge_index_dict)
+            self.model(batch.x_dict, batch.edge_index_dict)
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)#, weight_decay=1e-5)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)#, weight_decay=1e-5)
 
         # Run training loop
         best_val = 0.0
         pbar = tqdm(range(1, 51))
 
         for epoch in pbar:
-            train_loss = self.class_train(model, train_loader, optimizer, criterion, device)
-            val_acc, val_f1 = self.class_eval(val_loader, model, device)
+            train_loss = self.class_train(train_loader, optimizer, criterion)
+            val_acc, val_f1 = self.class_eval(val_loader)
 
             print(f'Epoch: {epoch:03d}, Loss: {train_loss:.4f}, Val ACC: {val_acc:.4f} | Val F1: {val_f1:.4f}')
             if val_f1 > best_val:
                 best_val = val_acc
                 print("New best!")
-                torch.save(model.state_dict(), model_path)
+                torch.save(self.model.state_dict(), self.model_path)
 
+    """
+        Model saving functions
+    """
     def SaveResults(self, type, kpi, value, mean, std, model):
         # Open the results file
         results = pd.read_csv(self.path_dict['results_path'])
@@ -367,6 +380,9 @@ class Modelling:
             #     self.SaveResults('Heterogeneous', kpi, test_mae, mean, std, filename)
             #     print(f'Final MAE: {test_mae}')
 
+    """
+        Explanation Function
+    """
     @torch.no_grad()
     def _predict_proba(self, batch, model):
         batch = batch.to(self.device)
@@ -633,15 +649,8 @@ class Modelling:
             Main function, obtains the relevant files and selects the appropriate training and validation functions to
             run for the chosen KPI
         """
-        # Load homogeneous data sets
-        file_path = self.path_dict['pytorch_path']
-        # Load heterogeneous data sets
-        het_train_data = torch.load(f"{file_path}/train_graphs_sg.pt", weights_only=False)
-        het_val_data = torch.load(f"{file_path}/val_graphs_sg.pt", weights_only=False)
-        het_test_data = torch.load(f"{file_path}/test_graphs_sg.pt", weights_only=False)
-
         kpi_type = self.path_dict['kpi_type']
         if kpi_type == 0: # Regression
-            self.Het_Reg_Modelling(het_train_data, het_val_data, het_test_data)
+            self.Het_Reg_Modelling(self.train_data, self.val_data, self.test_data)
         elif kpi_type == 1: #Binary Classification
-            self.BinaryModelling(het_train_data, het_val_data, het_test_data)
+            self.BinaryModelling(self.train_data, self.val_data, self.test_data)
