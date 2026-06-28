@@ -297,9 +297,10 @@ class ProcessGeneration:
                 ev_log = ev_df[['ocel_id', 'type', 'timestamp']]
                 ev_log['vwpnt_id'] = id_col
                 ev_log['ob_id'] = ob_id
-                log_frames.append(ev_log)
+                log_frames = pd.concat([log_frames, ev_log])
 
-                evs = ev_df[ev_df['type'] == kpi_event]
+                # Checks if there's more than one CreatePackage event
+                evs = ev_df[ev_df['type'] == "CreatePackage"]
                 trace_evs = len(evs.values)
                 mult_pckgs = [1 if trace_evs > 1 else 0]
                 kpi_val = [mult_pckgs[0] for _ in range(len(ev_df.index))]
@@ -313,17 +314,18 @@ class ProcessGeneration:
                 kpi['kpi_event'] = kpi_event
                 kpi['ob_id'] = ob_id
                 kpi['ob_idx'] = ob_idx
-                all_kpis.append(kpi)
+                all_kpis = pd.concat([all_kpis, kpi])
 
-        # Standardize the KPI values for the dataset
-        ys = all_kpis['kpi_val'].to_numpy()
-        mean, std = ys.mean(), ys.std()
-        all_kpis['kpi_val'] = all_kpis['kpi_val'].apply(lambda x: (x-mean)/std)
+        # Standardize the KPI values for the dataset if we're performing a regression
+        if self.path_dict['kpi_type'] == 0:
+            ys = all_kpis['kpi_val'].to_numpy()
+            mean, std = ys.mean(), ys.std()
+            all_kpis['kpi_val'] = all_kpis['kpi_val'].apply(lambda x: (x-mean)/std)
+
+            # To do, add the value to the result file
+            print(f"For {self.path_dict['kpi_viewpoint']}_to_{self.path_dict['kpi_event']}:")
+            print(f"Mean (hours): {round(mean/3600)}, STD (hours): {round(std/3600)}")
+
+        # Save the kpis and the event log
         all_kpis.to_csv(f"{self.path_dict['graph_output_path']}all_kpis.csv", index=False)
-
-        # To do, add the value to the result file
-        print(f"For {self.path_dict['kpi_viewpoint']}_to_{self.path_dict['kpi_event']}:")
-        print(f"Mean (hours): {round(mean/3600)}, STD (hours): {round(std/3600)}")
-
-        # Save the event log
         log_frames.to_csv(f"{self.path_dict['ev_log_path']}", index=False)
