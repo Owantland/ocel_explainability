@@ -81,8 +81,10 @@ class HeteroGraphsGenerator:
 
         for process in sample:
             # Go row for row obtaining the relevant values
+            start_time = self.ev_log[self.ev_log['vwpnt_id'] == process]['timestamp'].values[0]
             end_time = self.ev_log[self.ev_log['vwpnt_id'] == process]['timestamp'].values[-1]
             active_df = self.ocel_df[self.ocel_df['vwpnt_id'] == process]
+            active_df = active_df[active_df['timestamp'] >= start_time]
             active_df = active_df[active_df['timestamp'] <= end_time]
             edges = self.edges[self.edges['vwpnt_id'] == process]
             edges = edges[edges['timestamp'] <= end_time]
@@ -118,6 +120,7 @@ class HeteroGraphsGenerator:
                     edge = active_edges[col].values[0]
                     edge = ast.literal_eval(edge)
                     active_graph[col] = edge
+
                 y_val = ys[cnt]
                 cnt += 1
 
