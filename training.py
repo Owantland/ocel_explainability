@@ -14,6 +14,9 @@ import pandas as pd
 from tqdm import tqdm
 import os
 
+import matplotlib.pyplot as plt
+import networkx as nx
+
 class Modelling:
     def __init__(self, database, cant):
         self.database = database
@@ -22,6 +25,7 @@ class Modelling:
         self.path_dict = self.funcs.get_paths()
         self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
         self.viewpoint_object = self.path_dict['kpi_viewpoint']
+        self.device = torch.device('cpu')
 
     def normalize_target(self, data, mean, std):
         data.y = (data.y - mean) / std
@@ -40,7 +44,7 @@ class Modelling:
         return timestamp
 
     """
-        Heterogeneous training and validation functions
+        Heterogeneous Regression training and validation functions
     """
     def het_train(self, model, train_loader, optimizer, criterion, device):
         model.train()
@@ -113,7 +117,7 @@ class Modelling:
 
         return total_correct / total_examples, f1.compute().item()
 
-    def  Het_Reg_Modelling(self, training_data, val_data, test_data):
+    def Het_Reg_Modelling(self, training_data, val_data, test_data):
         """
         :param het_train_data:
         :param het_val_data:
@@ -362,6 +366,267 @@ class Modelling:
             #     test_mae = self.het_loss_test(het_test_loader, model, criterion, device)
             #     self.SaveResults('Heterogeneous', kpi, test_mae, mean, std, filename)
             #     print(f'Final MAE: {test_mae}')
+
+    @torch.no_grad()
+    def _predict_proba(self, batch, model):
+        batch = batch.to(self.device)
+        out = model(batch.x_dict, batch.edge_index_dict)
+        seed_out = out[:1]
+        return F.softmax(seed_out, dim=-1)[0]
+
+    def feature_importance_for_node(self, batch, model, node_type, node_idx, baseline_confidence,
+                                    predicted_class, top_k=10):
+        """
+        Leave-one-out at the FEATURE level: for one specific node, zero out
+        each feature dimension individually and measure the resulting drop in
+        confidence for the original predicted class. This refines the
+        node-level analysis above -- "paper[12] matters a lot" becomes
+        "...specifically because of features 3, 7, and 19" (e.g. particular
+        words in a bag-of-words representation).
+        """
+        x = batch[node_type].x[node_idx]
+        num_features = x.size(0)
+        feature_importances = []  # (feature_idx, confidence_drop, flips_prediction)
+
+        for f in range(num_features):
+            if x[f].item() == 0.0:
+                continue  # already zero -- nothing to remove, skip for speed
+            perturbed = batch.clone()
+            perturbed[node_type].x[node_idx, f] = 0.0
+            proba = self._predict_proba(perturbed, model)
+            confidence_drop = baseline_confidence - proba[predicted_class].item()
+            flips = proba.argmax().item() != predicted_class
+            feature_importances.append((f, confidence_drop, flips))
+
+        feature_importances.sort(key=lambda t: t[1], reverse=True)
+        return feature_importances[:top_k]
+
+    def build_explanation_subgraph(self, batch, node_importances, edge_importances,
+                                   node_top_k=10, edge_top_k=15):
+        """
+        Turn the counterfactual node/edge importance scores into an actual
+        NetworkX subgraph -- the "explanation subgraph": the seed author plus
+        only the most important surrounding nodes and edges, rather than the
+        entire (much larger) sampled neighborhood. Conceptually the same idea
+        as GNNExplainer's `get_explanation_subgraph()`, just built from our
+        leave-one-out scores instead of learned soft masks.
+        """
+        import networkx as nx
+
+        G = nx.MultiDiGraph()
+
+        # Always include the seed author node.
+        G.add_node((self.viewpoint_object, 0), node_type=self.viewpoint_object, importance=1.0, is_seed=True, flips=False)
+
+        # Keep only the top-k most important neighbor NODES (by confidence drop).
+        top_nodes = node_importances[:node_top_k]
+        for nt, i, drop, flips in top_nodes:
+            G.add_node((nt, i), node_type=nt, importance=drop, is_seed=False, flips=flips)
+
+        # Keep only the top-k most important EDGES, adding their endpoints if
+        # not already present -- an edge can matter even if one endpoint
+        # individually didn't make the node top-k cut.
+        top_edges = edge_importances[:edge_top_k]
+        for edge_type, e, drop, flips in top_edges:
+            src_type, _, dst_type = edge_type
+            edge_index = batch[edge_type].edge_index
+            src, dst = edge_index[:, e].tolist()
+            src_key, dst_key = (src_type, src), (dst_type, dst)
+
+            for key, ntype in [(src_key, src_type), (dst_key, dst_type)]:
+                if key not in G.nodes:
+                    is_seed = (ntype == self.viewpoint_object and key[1] == 0)
+                    G.add_node(key, node_type=ntype, importance=0.0, is_seed=is_seed, flips=False)
+
+            G.add_edge(src_key, dst_key, edge_type=edge_type[1], importance=drop, flips=flips)
+
+        return G
+
+    def visualize_explanation_subgraph(self, G, save_path="explanation_subgraph.png"):
+        """Draw the explanation subgraph: node color = type, node size =
+        importance, red edges/outlines = "removing this flips the prediction"."""
+        import matplotlib.pyplot as plt
+        import networkx as nx
+
+        type_colors = {"author": "#4C72B0", "paper": "#DD8452", "term": "#55A868", "conference": "#C44E52"}
+
+        pos = nx.spring_layout(G, seed=42, k=0.9)
+
+        node_colors, node_sizes, edge_colors_outline = [], [], []
+        for node, attrs in G.nodes(data=True):
+            node_colors.append(type_colors.get(attrs["node_type"], "gray"))
+            base_size = 900 if attrs.get("is_seed") else 250
+            node_sizes.append(base_size + max(attrs.get("importance", 0), 0) * 2500)
+            edge_colors_outline.append("red" if attrs.get("flips") else "black")
+
+        edge_colors, edge_widths = [], []
+        for _, _, attrs in G.edges(data=True):
+            edge_colors.append("red" if attrs.get("flips") else "gray")
+            edge_widths.append(1 + max(attrs.get("importance", 0), 0) * 12)
+
+        plt.figure(figsize=(10, 8))
+        nx.draw_networkx_nodes(
+            G, pos, node_color=node_colors, node_size=node_sizes,
+            edgecolors=edge_colors_outline, linewidths=1.5, alpha=0.9,
+        )
+        nx.draw_networkx_edges(
+            G, pos, edge_color=edge_colors, width=edge_widths,
+            arrows=True, connectionstyle="arc3,rad=0.1", alpha=0.7,
+        )
+        labels = {node: f"{node[0]}[{node[1]}]" for node in G.nodes}
+        nx.draw_networkx_labels(G, pos, labels=labels, font_size=7)
+
+        legend_handles = [
+            plt.Line2D([0], [0], marker="o", color="w", label=nt,
+                       markerfacecolor=color, markersize=10)
+            for nt, color in type_colors.items()
+        ]
+        legend_handles.append(plt.Line2D([0], [0], color="red", lw=2, label="flips prediction"))
+        plt.legend(handles=legend_handles, loc="best", fontsize=8)
+
+        plt.title("Counterfactual Explanation Subgraph")
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150)
+        plt.close()
+        print(f"Saved explanation subgraph visualization to {save_path}")
+
+    def cf_explanation(self):
+        object_idx = 1442
+        top_k = 5
+
+        # Load data sets
+        file_path = self.path_dict['pytorch_path']
+        # Load heterogeneous data sets
+        het_train_data = torch.load(f"{file_path}/train_graphs_sg.pt", weights_only=False)
+        het_val_data = torch.load(f"{file_path}/val_graphs_sg.pt", weights_only=False)
+        het_test_data = torch.load(f"{file_path}/test_graphs_sg.pt", weights_only=False)
+
+        # Define save path for the model and import the weights
+        model_path = self.path_dict['model_path']
+        kpi_event = self.path_dict['kpi_event']
+        test_kpi = f"Classifier_{kpi_event}"
+
+        if not os.path.exists(f"{model_path}/Hetero"):
+            os.makedirs(f"{model_path}/Hetero")
+        model_path = f"{model_path}/Hetero/{test_kpi}.pth"
+
+        data = het_train_data[0]
+        model = HGT_CLASS.HGT_CLASS(hidden_channels=64, out_channels=2, num_heads=2,
+                                    num_layers=2, data=data, viewpoint=self.viewpoint_object)
+        model.load_state_dict(torch.load(model_path, weights_only=False))
+
+        # Select a subgraph to explain
+        for x in het_train_data:
+            if x['Orders']['last_event'] == True:
+                if x['Orders']['id'] == object_idx:
+                    explain_subgraph = x
+                    break
+
+        baseline_proba = self._predict_proba(explain_subgraph, model)
+        predicted_class = baseline_proba.argmax().item()
+        baseline_confidence = baseline_proba[predicted_class].item()
+
+        print(f"\nExplaining {self.viewpoint_object} node #{object_idx}")
+        print(f"  Predicted class: {predicted_class} (confidence {baseline_confidence:.4f})")
+        print(f"  Sampled neighborhood: " +
+              ", ".join(f"{nt}={explain_subgraph[nt].num_nodes}" for nt in explain_subgraph.node_types))
+
+        # --- leave-one-out over every NODE in the sampled neighborhood ---
+        node_importances = []  # (node_type, local_idx, confidence_drop, flips_prediction)
+        for node_type in explain_subgraph.node_types:
+            n = explain_subgraph[node_type].x.size(0)
+            # Skip the seed author itself (always index 0 for 'author') -- we
+            # want to know what its prediction depends ON, not what removing
+            # the node being predicted does (that's trivially destructive).
+            start = 1 if node_type == self.viewpoint_object else 0
+            for i in range(start, n):
+                perturbed = explain_subgraph.clone()
+                perturbed[node_type].x[i] = 0.0  # "remove" this node's signal
+                proba = self._predict_proba(perturbed, model)
+                confidence_drop = baseline_confidence - proba[predicted_class].item()
+                flips = proba.argmax().item() != predicted_class
+                node_importances.append((node_type, i, confidence_drop, flips))
+
+        # --- leave-one-out over every EDGE in the sampled neighborhood ---
+        edge_importances = []  # (edge_type, position, confidence_drop, flips_prediction)
+        for edge_type in explain_subgraph.edge_types:
+            edge_index = explain_subgraph[edge_type].edge_index
+            num_edges = edge_index.size(1)
+            for e in range(num_edges):
+                perturbed = explain_subgraph.clone()
+                keep = torch.ones(num_edges, dtype=torch.bool, device=self.device)
+                keep[e] = False
+                perturbed[edge_type].edge_index = edge_index[:, keep]
+                proba = self._predict_proba(perturbed, model)
+                confidence_drop = baseline_confidence - proba[predicted_class].item()
+                flips = proba.argmax().item() != predicted_class
+                edge_importances.append((edge_type, e, confidence_drop, flips))
+
+        node_importances.sort(key=lambda t: t[2], reverse=True)
+        edge_importances.sort(key=lambda t: t[2], reverse=True)
+
+        # --- feature-level counterfactual on the SEED author's own input ---
+        seed_feature_importances = self.feature_importance_for_node(
+            explain_subgraph, model, self.viewpoint_object, 0, baseline_confidence, predicted_class, top_k=top_k
+        )
+
+        # --- feature-level counterfactual on the single most influential
+        #     NEIGHBOR node, since "this node matters" is coarser than
+        #     "these specific features of this node matter" ---
+        if node_importances:
+            top_node_type, top_node_idx, _, _ = node_importances[0]
+            top_node_feature_importances = self.feature_importance_for_node(
+                explain_subgraph, model, top_node_type, top_node_idx, baseline_confidence, predicted_class, top_k=top_k
+            )
+        else:
+            top_node_type, top_node_idx = None, None
+            top_node_feature_importances = []
+        print(f"\n  Top {top_k} most important NODES (confidence drop if removed):")
+        for node_type, i, drop, flips in node_importances[:top_k]:
+            flag = "  <-- FLIPS PREDICTION" if flips else ""
+            print(f"    {node_type}[{i}]: confidence drop = {drop:+.4f}{flag}")
+
+        print(f"\n  Top {top_k} most important EDGES (confidence drop if removed):")
+        for edge_type, e, drop, flips in edge_importances[:top_k]:
+            src, dst = explain_subgraph[edge_type].edge_index[:, e].tolist()
+            flag = "  <-- FLIPS PREDICTION" if flips else ""
+            print(f"    {edge_type} edge ({src} -> {dst}): confidence drop = {drop:+.4f}{flag}")
+
+        print(f"\n  Top {top_k} most important FEATURES on the seed {self.viewpoint_object} itself:")
+        for f, drop, flips in seed_feature_importances:
+            flag = "  <-- FLIPS PREDICTION" if flips else ""
+            print(f"    {self.viewpoint_object}[0].x[{f}]: confidence drop = {drop:+.4f}{flag}")
+
+        if top_node_type is not None:
+            print(f"\n  Top {top_k} most important FEATURES on the most influential neighbor "
+                  f"({top_node_type}[{top_node_idx}]):")
+            for f, drop, flips in top_node_feature_importances:
+                flag = "  <-- FLIPS PREDICTION" if flips else ""
+                print(f"    {top_node_type}[{top_node_idx}].x[{f}]: confidence drop = {drop:+.4f}{flag}")
+
+        any_flips = (
+                any(f for *_, f in node_importances)
+                or any(f for *_, f in edge_importances)
+                or any(f for *_, f in seed_feature_importances)
+                or any(f for *_, f in top_node_feature_importances)
+        )
+        if any_flips:
+            print("\n  >>> A genuine counterfactual exists above: removing that single")
+            print("      node, edge, or feature changes the model's predicted class entirely.")
+        else:
+            print("\n  >>> No single node/edge/feature removal flips the prediction -- the")
+            print("      model's decision here is robust to any one removal (it relies on")
+            print("      combined, redundant evidence rather than one critical piece).")
+
+
+        """
+            Build the explanation subgraph
+        """
+        explanation_graph = self.build_explanation_subgraph(
+            explain_subgraph, node_importances, edge_importances, node_top_k=10, edge_top_k=15
+        )
+        self.visualize_explanation_subgraph(explanation_graph, save_path="explanation_subgraph.png")
 
     def Modelling(self):
         """
