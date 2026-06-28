@@ -16,6 +16,7 @@ import os
 
 import matplotlib.pyplot as plt
 import networkx as nx
+import copy
 
 class Modelling:
     def __init__(self, database, cant):
@@ -187,69 +188,52 @@ class Modelling:
 
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
 
-        best_val = 10e7
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=10
+        )
 
-        pbar = tqdm(range(1, 30))
+        max_epochs = 200
+        early_stop_patience = 20
+
+        best_val_mae = float("inf")
+        best_state = None
+        epochs_without_improvement = 0
+
+        pbar = tqdm(range(1, max_epochs + 1))
+
         for epoch in pbar:
-            loss = self.het_train(model, train_loader, optimizer, criterion, device)
-            val_mse = self.het_loss_test(val_loader, model, criterion, device)  # Should use a separate validation set loader
-            print(f'Epoch: {epoch:03d}, Loss: {loss:.4f}, Val MSE: {val_mse:.4f}')
-            if val_mse < best_val:
-                best_val = val_mse
-                print("New best!")
-                torch.save(model.state_dict(), model_path)
+            train_loss = self.het_train(model, train_loader, optimizer, criterion, device)
+            val_mae = self.het_loss_test(val_loader, model, criterion, device)  # Should use a separate validation set loader
+            scheduler.step(val_mae)
+
+            if val_mae < best_val_mae:
+                print("New Best!")
+                best_val_mae = val_mae
+                best_state = copy.deepcopy(model.state_dict())
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+
+            if epoch % 10 == 0 or epoch == 1:
+                current_lr = optimizer.param_groups[0]["lr"]
+                print(
+                    f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | "
+                    f"Val MAE: {val_mae:.4f} | LR: {current_lr:.2e}"
+                )
+
+            if epochs_without_improvement >= early_stop_patience:
+                print(f"\nEarly stopping at epoch {epoch} "
+                      f"(no val improvement for {early_stop_patience} epochs)")
+                break
         pbar.close()
 
-        # num_layers = 5
-        # width_layers = 8
-        # num_heads = 3
-        # hidden_channels = [width_layers] * num_layers
-        # criterion = torch.nn.L1Loss()
-        # learning_rates = [0.01] * 1 + [0.0075] * 1 + [0.005] * 1 + [0.0025] * 11 + [0.001] * 10 + [0.0005] * 26
-        # patience = 5
-        # epochs_sg = 10
-        # """
-        #     Heterogeneous model training loop:
-        #     Trains 5 different instances of the model with decreasing learning rates in each epoch.
-        # """
-        # to_train = [i for i in range(1, 6)]
-        # flag = True
-        # while flag:
-        #     for i in to_train:
-        #         model = HET_GNN.HeteroGNN(hidden_channels=hidden_channels, out_channels=1, num_layers=num_layers,
-        #                                   num_heads=num_heads, data=training_data[0], viewpoint=viewpoint_object)
-        #         model = model.to(device)
-        #         best_val = 10e7
-        #         counter = 0
-        #         for epoch, lr in enumerate(learning_rates):
-        #             optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        #             loss = self.het_train(model, train_loader, optimizer, criterion, device)
-        #             val_loss = self.het_loss_test(val_loader, model, criterion, device)
-        #             print(f"{i} - Epoch: {epoch:03d}, LR: {lr}, Loss: {loss:.4f}, Val Loss: {val_loss}")
-        #             if val_loss < best_val:
-        #                 print('New Best')
-        #                 best_val = val_loss
-        #                 torch.save(model.state_dict(),
-        #                            f"{model_path}_{i}.pth")
-        #                 counter = 0
-        #                 model_name = f"{test_kpi}_{i}.pth"
-        #             else:
-        #                 counter += 1
-        #
-        #             if counter > patience:
-        #                 print('---')
-        #                 break
-        #         if epoch + 1 >= epochs_sg:
-        #             to_train.remove(i)
-        #     if len(to_train) == 0:
-        #         flag = False
-
+        if best_state is not None:
+            model.load_state_dict(best_state)
         test_loss = self.het_loss_test(test_loader, model, criterion, device)
         print(f'Final MAE: {test_loss}')
 
-        #
-        # # Save the results in a result file
-        # self.SaveResults('Heterogeneous', test_kpi, test_loss, mean, std, model_name)
+        # Save best model
+        torch.save(self.model.state_dict(), self.model_path)
 
     def BinaryModelling(self, training_data, val_data, test_data):
         viewpoint_object = self.viewpoint_object
