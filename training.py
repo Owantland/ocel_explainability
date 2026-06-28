@@ -92,24 +92,26 @@ class Modelling:
             optimizer.step()
 
             total_loss += loss.item() * batch_size
+            total_examples += batch_size
         return total_loss / total_examples
 
     @torch.no_grad()
     def class_eval(self, loader, model, device):
         model.eval()
         total_correct = total_examples = 0
-
+        f1 = F1Score("binary")
         for batch in loader:
             batch = batch.to(device)
             out = model(batch.x_dict, batch.edge_index_dict)
             batch_size = len(batch[self.viewpoint_object].batch)
-            seed_out = out[:batch_size]
+            seed_out = out[:batch_size].argmax(dim=-1)
             seed_y = batch[self.viewpoint_object].y[:batch_size]
 
-            total_correct += (seed_out.argmax(dim=-1) == seed_y).sum().item()
+            total_correct += (seed_out == seed_y).sum().item()
+            f1(seed_out, seed_y)
             total_examples += batch_size
 
-        return total_correct / total_examples
+        return total_correct / total_examples, f1.compute().item()
 
     def  Het_Reg_Modelling(self, training_data, val_data, test_data):
         """
@@ -246,7 +248,7 @@ class Modelling:
             batch = next(iter(train_loader))
             model(batch.x_dict, batch.edge_index_dict)
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=5e-3, weight_decay=1e-5)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)#, weight_decay=1e-5)
 
         # Run training loop
         best_val = 0.0
@@ -254,16 +256,13 @@ class Modelling:
 
         for epoch in pbar:
             train_loss = self.class_train(model, train_loader, optimizer, criterion, device)
-            val_acc = self.class_eval(val_loader, model, device)
+            val_acc, val_f1 = self.class_eval(val_loader, model, device)
 
-            if val_acc > best_val:
-                print("New best!")
+            print(f'Epoch: {epoch:03d}, Loss: {train_loss:.4f}, Val ACC: {val_acc:.4f} | Val F1: {val_f1:.4f}')
+            if val_f1 > best_val:
                 best_val = val_acc
+                print("New best!")
                 torch.save(model.state_dict(), model_path)
-            if epoch % 5 == 0 or epoch == 1:
-                print(
-                    f"Epoch {epoch:02d} | Train Loss: {train_loss:.4f} | Val Acc: {val_acc:.4f}"
-                )
 
     def SaveResults(self, type, kpi, value, mean, std, model):
         # Open the results file

@@ -151,8 +151,8 @@ class HeteroGraphsGenerator:
                     data[kpi_ob].y = torch.tensor(y_val, dtype=torch.float32).reshape(-1, 1)
                     data[kpi_ob].mask = torch.tensor(True, dtype=torch.bool).reshape(-1, 1)
                 else:
-                    data[kpi_ob].y = torch.tensor(y_val, dtype=torch.long)
-                    data[kpi_ob].mask = torch.tensor(True, dtype=torch.bool)
+                    data[kpi_ob].y = torch.tensor([y_val], dtype=torch.long)
+                    data[kpi_ob].mask = torch.tensor([True], dtype=torch.bool)
 
                 # Add return indexes to all edges
                 data = T.ToUndirected()(data)

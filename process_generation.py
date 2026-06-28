@@ -252,8 +252,6 @@ class ProcessGeneration:
                     ob_idx = row['index']
 
                     if ob_type == kpi_ob:
-                        if vwpnt_object == 12:
-                            print(ob_id, ob_type, ob_idx)
                         first_event = evs_by_ob[0]
                         # Identify the end event for the trace
                         try:
@@ -275,6 +273,7 @@ class ProcessGeneration:
                         ev_log['ob_id'] = trace_id
                         log_frames = pd.concat([log_frames, ev_log])
 
+                        # Calculate the KPI value
                         event_log['kpi_val'] = pd.to_datetime(end_time) - pd.to_datetime(event_log['timestamp'])
                         event_log['kpi_val'] = event_log['kpi_val'].apply(lambda x: x.total_seconds())
 
