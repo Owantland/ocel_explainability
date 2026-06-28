@@ -51,13 +51,16 @@ class Modelling:
             os.makedirs(f"{model_path}/Hetero")
         self.model_path = f"{model_path}/Hetero/{test_kpi}.pth"
 
-    def normalize_target(self, data, mean, std):
-        data.y = (data.y - mean) / std
-        return data
-
-    def normalize_het(self, data, mean, std):
-        data[self.viewpoint_object].y = (data[self.viewpoint_object].y - mean) / std
-        return data
+        # Normalize using train-graph statistics only, gathered across ALL of
+        # their viewpoint object nodes (the multi-graph analogue of the train_mask slice
+        # used in the single-large-graph version).
+        train_y_all = torch.cat([g[self.viewpoint_object].y for g in self.train_data])
+        target_mean, target_std = train_y_all.mean(), train_y_all.std()
+        for m in [self.train_data, self.val_data, self.test_data]:
+            for g in m:
+                g[self.viewpoint_object].y = (g[self.viewpoint_object].y - target_mean) / target_std
+        print(f"Mean (hours): {round(target_mean.item() / 3600)}, STD (hours): {round(target_std.item() / 3600)}")
+        self.target_mean, self.target_std = target_mean.to(self.device), target_std.to(self.device)
 
     def decode_epoch(self, epoch_val):
         timestamp = pd.Timestamp(epoch_val, unit='s')
@@ -72,16 +75,17 @@ class Modelling:
     """
     def het_train(self, model, train_loader, optimizer, criterion, device):
         model.train()
-        total_examples = total_loss = 0
+        total_loss, total_examples = 0.0, 0
         for batch in train_loader:
             batch = batch.to(device)
             optimizer.zero_grad()
-            batch_size = len(batch[self.viewpoint_object].batch)
             out = model(batch.x_dict, batch.edge_index_dict)
-            loss = criterion(out[:batch_size], batch[self.viewpoint_object].y[:batch_size])
+            y = batch[self.viewpoint_object].y
+            loss = criterion(out, y)
             loss.backward()
             optimizer.step()
 
+            batch_size = len(batch[self.viewpoint_object].batch)
             total_examples += batch_size
             total_loss += float(loss) * batch_size
         return total_loss / total_examples
@@ -90,12 +94,14 @@ class Modelling:
     def het_loss_test(self, loader, model, criterion, device):
         model.eval()
 
-        total_examples = total_loss = 0
+        total_loss, total_examples = 0.0, 0
         for batch in loader:
             batch = batch.to(device)
             out = model(batch.x_dict, batch.edge_index_dict)
+            y = batch[self.viewpoint_object].y
+            loss = criterion(out, y)
+
             batch_size = len(batch[self.viewpoint_object].batch)
-            loss = criterion(out[:batch_size], batch[self.viewpoint_object].y[:batch_size])
             total_examples += batch_size
             total_loss += float(loss) * batch_size
         return total_loss / total_examples
@@ -384,13 +390,13 @@ class Modelling:
         Explanation Function
     """
     @torch.no_grad()
-    def _predict_proba(self, batch, model):
+    def _predict_proba(self, batch):
         batch = batch.to(self.device)
-        out = model(batch.x_dict, batch.edge_index_dict)
+        out = self.model(batch.x_dict, batch.edge_index_dict)
         seed_out = out[:1]
         return F.softmax(seed_out, dim=-1)[0]
 
-    def feature_importance_for_node(self, batch, model, node_type, node_idx, baseline_confidence,
+    def feature_importance_for_node(self, batch, node_type, node_idx, baseline_confidence,
                                     predicted_class, top_k=10):
         """
         Leave-one-out at the FEATURE level: for one specific node, zero out
@@ -409,7 +415,7 @@ class Modelling:
                 continue  # already zero -- nothing to remove, skip for speed
             perturbed = batch.clone()
             perturbed[node_type].x[node_idx, f] = 0.0
-            proba = self._predict_proba(perturbed, model)
+            proba = self._predict_proba(perturbed)
             confidence_drop = baseline_confidence - proba[predicted_class].item()
             flips = proba.argmax().item() != predicted_class
             feature_importances.append((f, confidence_drop, flips))
@@ -507,39 +513,8 @@ class Modelling:
         plt.close()
         print(f"Saved explanation subgraph visualization to {save_path}")
 
-    def cf_explanation(self):
-        object_idx = 1442
-        top_k = 5
-
-        # Load data sets
-        file_path = self.path_dict['pytorch_path']
-        # Load heterogeneous data sets
-        het_train_data = torch.load(f"{file_path}/train_graphs_sg.pt", weights_only=False)
-        het_val_data = torch.load(f"{file_path}/val_graphs_sg.pt", weights_only=False)
-        het_test_data = torch.load(f"{file_path}/test_graphs_sg.pt", weights_only=False)
-
-        # Define save path for the model and import the weights
-        model_path = self.path_dict['model_path']
-        kpi_event = self.path_dict['kpi_event']
-        test_kpi = f"Classifier_{kpi_event}"
-
-        if not os.path.exists(f"{model_path}/Hetero"):
-            os.makedirs(f"{model_path}/Hetero")
-        model_path = f"{model_path}/Hetero/{test_kpi}.pth"
-
-        data = het_train_data[0]
-        model = HGT_CLASS.HGT_CLASS(hidden_channels=64, out_channels=2, num_heads=2,
-                                    num_layers=2, data=data, viewpoint=self.viewpoint_object)
-        model.load_state_dict(torch.load(model_path, weights_only=False))
-
-        # Select a subgraph to explain
-        for x in het_train_data:
-            if x['Orders']['last_event'] == True:
-                if x['Orders']['id'] == object_idx:
-                    explain_subgraph = x
-                    break
-
-        baseline_proba = self._predict_proba(explain_subgraph, model)
+    def class_explanation(self, explain_subgraph, object_idx, top_k):
+        baseline_proba = self._predict_proba(explain_subgraph)
         predicted_class = baseline_proba.argmax().item()
         baseline_confidence = baseline_proba[predicted_class].item()
 
@@ -559,7 +534,7 @@ class Modelling:
             for i in range(start, n):
                 perturbed = explain_subgraph.clone()
                 perturbed[node_type].x[i] = 0.0  # "remove" this node's signal
-                proba = self._predict_proba(perturbed, model)
+                proba = self._predict_proba(perturbed)
                 confidence_drop = baseline_confidence - proba[predicted_class].item()
                 flips = proba.argmax().item() != predicted_class
                 node_importances.append((node_type, i, confidence_drop, flips))
@@ -574,7 +549,7 @@ class Modelling:
                 keep = torch.ones(num_edges, dtype=torch.bool, device=self.device)
                 keep[e] = False
                 perturbed[edge_type].edge_index = edge_index[:, keep]
-                proba = self._predict_proba(perturbed, model)
+                proba = self._predict_proba(perturbed)
                 confidence_drop = baseline_confidence - proba[predicted_class].item()
                 flips = proba.argmax().item() != predicted_class
                 edge_importances.append((edge_type, e, confidence_drop, flips))
@@ -584,7 +559,7 @@ class Modelling:
 
         # --- feature-level counterfactual on the SEED author's own input ---
         seed_feature_importances = self.feature_importance_for_node(
-            explain_subgraph, model, self.viewpoint_object, 0, baseline_confidence, predicted_class, top_k=top_k
+            explain_subgraph, self.viewpoint_object, 0, baseline_confidence, predicted_class, top_k=top_k
         )
 
         # --- feature-level counterfactual on the single most influential
@@ -593,7 +568,7 @@ class Modelling:
         if node_importances:
             top_node_type, top_node_idx, _, _ = node_importances[0]
             top_node_feature_importances = self.feature_importance_for_node(
-                explain_subgraph, model, top_node_type, top_node_idx, baseline_confidence, predicted_class, top_k=top_k
+                explain_subgraph, top_node_type, top_node_idx, baseline_confidence, predicted_class, top_k=top_k
             )
         else:
             top_node_type, top_node_idx = None, None
@@ -643,6 +618,144 @@ class Modelling:
             explain_subgraph, node_importances, edge_importances, node_top_k=10, edge_top_k=15
         )
         self.visualize_explanation_subgraph(explanation_graph, save_path="explanation_subgraph.png")
+
+    @torch.no_grad()
+    def _predict_value_for_graph(self, graph, object_idx, perturbed_graph=None):
+        """Run the model on (a possibly perturbed copy of) ONE small graph
+        and return the de-normalized prediction for one paper in it."""
+        g = perturbed_graph if perturbed_graph is not None else graph
+        out = self.model(g.x_dict, g.edge_index_dict)
+        denorm = out * self.target_std + self.target_mean
+        return denorm[object_idx].item()
+
+    def reg_feature_importance_for_node_in_graph(self, graph, node_type, node_idx, baseline_value,
+                                                 target_object_idx, top_k=10):
+        """Leave-one-out at the FEATURE level, same idea as the single-
+        large-graph version, just scoped to one small graph's tensors."""
+        x = graph[node_type].x[node_idx]
+        num_features = x.size(0)
+        feature_importances = []
+        for f in range(num_features):
+            if x[f].item() == 0.0:
+                continue
+            perturbed = graph.clone()
+            perturbed[node_type].x[node_idx, f] = 0.0
+            pred = self._predict_value_for_graph(graph, target_object_idx, perturbed_graph=perturbed)
+            shift = abs(baseline_value - pred)
+            large_shift = shift > self.target_std.item()
+            feature_importances.append((f, shift, large_shift))
+        feature_importances.sort(key=lambda t: t[1], reverse=True)
+        return feature_importances[:top_k]
+
+    def reg_explanation(self, explain_subgraph, object_idx, top_k):
+        baseline_value = self._predict_value_for_graph(explain_subgraph, object_idx)
+        print(f"\nExplaining {self.viewpoint_object} #{0} in graph #{object_idx}")
+        print(f"  Predicted impact score: {baseline_value:.4f}")
+        print("  Graph size: " +
+              ", ".join(f"{nt}={explain_subgraph[nt].num_nodes}" for nt in explain_subgraph.node_types))
+
+        # --- leave-one-out over every NODE in this graph ---
+        node_importances = []  # (node_type, idx, value_shift, large_shift)
+        for node_type in explain_subgraph.node_types:
+            n = explain_subgraph[node_type].x.size(0)
+            for idx in range(n):
+                if node_type == "paper" and idx == object_idx:
+                    continue  # skip the target itself, same reasoning as before
+                perturbed = explain_subgraph.clone()
+                perturbed[node_type].x[idx] = 0.0
+                pred = self._predict_value_for_graph(explain_subgraph, object_idx, perturbed_graph=perturbed)
+                shift = abs(baseline_value - pred)
+                large_shift = shift > self.target_std.item()
+                node_importances.append((node_type, idx, shift, large_shift))
+
+            # --- leave-one-out over every EDGE in this graph ---
+            edge_importances = []  # (edge_type, position, value_shift, large_shift)
+            for edge_type in explain_subgraph.edge_types:
+                edge_index = explain_subgraph[edge_type].edge_index
+                num_edges = edge_index.size(1)
+                for e in range(num_edges):
+                    perturbed = explain_subgraph.clone()
+                    keep = torch.ones(num_edges, dtype=torch.bool, device=self.device)
+                    keep[e] = False
+                    perturbed[edge_type].edge_index = edge_index[:, keep]
+                    pred = self._predict_value_for_graph(explain_subgraph, object_idx, perturbed_graph=perturbed)
+                    shift = abs(baseline_value - pred)
+                    large_shift = shift > self.target_std.item()
+                    edge_importances.append((edge_type, e, shift, large_shift))
+
+            node_importances.sort(key=lambda t: t[2], reverse=True)
+            edge_importances.sort(key=lambda t: t[2], reverse=True)
+
+            seed_feature_importances = self.reg_feature_importance_for_node_in_graph(
+                explain_subgraph, self.viewpoint_object, object_idx, baseline_value, object_idx, top_k=top_k
+            )
+
+            if node_importances:
+                top_node_type, top_node_idx, _, _ = node_importances[0]
+                top_node_feature_importances = self.reg_feature_importance_for_node_in_graph(
+                    explain_subgraph, top_node_type, top_node_idx, baseline_value, object_idx, top_k=top_k
+                )
+            else:
+                top_node_type, top_node_idx = None, None
+                top_node_feature_importances = []
+
+            print(f"\n  Top {top_k} most important NODES (predicted value shift if removed):")
+            for node_type, i, shift, large in node_importances[:top_k]:
+                flag = "  <-- LARGE SHIFT (>1 std)" if large else ""
+                print(f"    {node_type}[{i}]: value shift = {shift:.4f}{flag}")
+
+            print(f"\n  Top {top_k} most important EDGES (predicted value shift if removed):")
+            for edge_type, e, shift, large in edge_importances[:top_k]:
+                src, dst = explain_subgraph[edge_type].edge_index[:, e].tolist()
+                flag = "  <-- LARGE SHIFT (>1 std)" if large else ""
+                print(f"    {edge_type} edge ({src} -> {dst}): value shift = {shift:.4f}{flag}")
+
+            print(f"\n  Top {top_k} most important FEATURES on the seed paper itself:")
+            for f, shift, large in seed_feature_importances:
+                flag = "  <-- LARGE SHIFT (>1 std)" if large else ""
+                print(f"    paper[{object_idx}].x[{f}]: value shift = {shift:.4f}{flag}")
+
+            if top_node_type is not None:
+                print(f"\n  Top {top_k} most important FEATURES on the most influential neighbor "
+                      f"({top_node_type}[{top_node_idx}]):")
+                for f, shift, large in top_node_feature_importances:
+                    flag = "  <-- LARGE SHIFT (>1 std)" if large else ""
+                    print(f"    {top_node_type}[{top_node_idx}].x[{f}]: value shift = {shift:.4f}{flag}")
+
+            any_large = (
+                    any(l for *_, l in node_importances)
+                    or any(l for *_, l in edge_importances)
+                    or any(l for *_, l in seed_feature_importances)
+                    or any(l for *_, l in top_node_feature_importances)
+            )
+            if any_large:
+                print("\n  >>> At least one single node, edge, or feature removal above shifts the")
+                print("      prediction by more than one target standard deviation.")
+            else:
+                print("\n  >>> No single removal shifts the prediction by more than one target")
+                print("      standard deviation -- this prediction is robust to any one removal.")
+
+            return node_importances, edge_importances, seed_feature_importances, top_node_feature_importances
+
+    def cf_explanation(self):
+        object_idx = 1971 #1971 1964 1945 1798 1755 1989
+        top_k = 5
+
+        # Load saved model for explanation
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+
+        # Select a subgraph to explain
+        for x in self.test_data:
+            if x['Orders']['last_event'] == True:
+                # print(x['Orders'])
+                if x['Orders']['id'] == object_idx:
+                    explain_subgraph = x
+                    break
+
+        if self.path_dict['kpi_type'] == 0:
+            self.reg_explanation(explain_subgraph, 0, top_k)
+        elif self.path_dict['kpi_type'] == 1:
+            self.class_explanation(explain_subgraph, object_idx, top_k)
 
     def Modelling(self):
         """
