@@ -1,357 +1,403 @@
+# Claude explanation Features
+
 """
-Heterogeneous Graph Node Classification with PyTorch Geometric
-==============================================================
+Heterogeneous Node Classification on DBLP with PyTorch Geometric (PyG)
+========================================================================
 
-Dataset : DBLP (built-in PyG dataset)
-  - Node types  : 'author' (target), 'paper', 'term', 'conference'
-  - Edge types  : author–paper, paper–term, paper–conference (+ reverses)
-  - Task        : Classify authors into one of 4 research areas
+This example uses PyG's bundled `DBLP` dataset -- a real heterogeneous
+academic graph (NOT synthetic, unlike the earlier examples in this series)
+-- together with a mini-batch `NeighborLoader` that avoids depending on
+`torch-sparse`.
 
-Model   : HGT  (Heterogeneous Graph Transformer)
+IMPORTANT SCOPE NOTE: DBLP ships only classification labels (4-class
+research-area labels for `author` nodes), not a continuous regression
+target. So this example is *node classification*, not regression -- the
+model/training code is otherwise structurally identical to the node
+regression example (same per-relation message passing, same train/val/test
+mask pattern), just with a softmax head and cross-entropy loss instead of
+a scalar head and MSE/L1 loss.
 
-Explainability — two complementary methods:
-  1. GNNExplainer  (feature-mask only — avoids the edge-gradient issue on
-                    heterogeneous graphs with discrete edge indices)
-  2. HGT Attention Weights  (reads the alpha scores stored by HGTConv during
-                    the forward pass — gives per-edge, per-relation importance
-                    without any gradient requirement)
+Dataset structure (loaded automatically by PyG):
+    - Node types : 'author', 'paper', 'term', 'conference'
+    - Edge types : ('author','to','paper') + reverse
+                   ('paper','to','term') + reverse
+                   ('paper','to','conference') + reverse
+    - Labels     : 'author' nodes only, 4 classes, with train/val/test
+                   masks already provided by the dataset.
+    - Caveat     : 'conference' nodes have no raw features in the original
+                   data. We add a constant placeholder feature via
+                   `T.Constant` so every node type has *something* to
+                   project into the model's hidden space.
+
+ON THE LOADER (the actual point of this example):
+    PyG's `NeighborLoader` samples a fixed-size neighborhood around a batch
+    of "seed" nodes, for mini-batch training on graphs too large (or, for
+    practice, just inconvenient) to run full-batch. Historically this
+    required `torch-sparse`'s compiled sampling routines. As of recent PyG
+    versions, `NeighborLoader` instead prefers `pyg-lib`'s sampler when
+    it's installed, and `pyg-lib` has NO dependency on `torch-sparse` at
+    all. So: install `pyg-lib`, and this loader works without ever
+    touching `torch-sparse`.
+
+Install requirements:
+    pip install torch torch_geometric pyg-lib --break-system-packages
+    (pyg-lib wheels are version-matched to your torch/CUDA build --
+    see https://data.pyg.org/whl/ if the plain pip install doesn't find one)
 """
 
 import torch
 import torch.nn.functional as F
-from torch import Tensor
-from collections import defaultdict
-
+from torch.nn import Linear
 import torch_geometric.transforms as T
 from torch_geometric.datasets import DBLP
-from torch_geometric.nn import HGTConv, Linear
-from torch_geometric.explain import Explainer, GNNExplainer
+from torch_geometric.loader import NeighborLoader
+from torch_geometric.nn import HGTConv
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # 1. Load the DBLP dataset
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# `T.Constant(node_types='conference')` gives 'conference' nodes a constant
+# placeholder feature (a single column of 1s), since the raw dataset has no
+# features for that node type at all.
+dataset = DBLP(root="data/DBLP", transform=T.Constant(node_types="conference"))
+data = dataset[0]  # DBLP is a single heterogeneous graph, not a list of graphs
+data = data.to(device)
 
-def load_dblp(root: str = '/tmp/DBLP'):
-    """
-    Downloads and preprocesses the DBLP dataset.
-
-    DBLP schema
-    ───────────
-      author      (4 057 nodes, 334-dim bag-of-words)   ← classification target
-      paper       (14 328 nodes, 4 231-dim BoW)
-      term        (7 723 nodes, 50-dim  word-embedding)
-      conference  (20 nodes,    no features → ones after Constant transform)
-
-    Relations (undirected after ToUndirected):
-      (author, to, paper), (paper, to, term), (paper, to, conference)
-
-    Labels: 4 research areas  (0=DB, 1=DM, 2=IR, 3=ML)
-    """
-    transform = T.Compose([
-        T.Constant(node_types=['conference']),
-        T.ToUndirected(),
-    ])
-    dataset = DBLP(root=root, transform=transform)
-    data    = dataset[0]
-
-    print("DBLP graph loaded:")
-    print(f"  Node types : {data.node_types}")
-    print(f"  Edge types : {[str(e) for e in data.edge_types]}")
-    for nt in data.node_types:
-        n     = data[nt].num_nodes
-        has_y = hasattr(data[nt], 'y') and data[nt].y is not None
-        print(f"    {nt:12s}  nodes={n}"
-              + (f"  classes={data[nt].y.max().item()+1}" if has_y else ""))
-    print()
-    return data
+metadata = data.metadata()
+num_classes = int(data["author"].y.max().item()) + 1
 
 
-# ─────────────────────────────────────────────
-# 2. HGT model  (attention-storing variant)
-# ─────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# 2. Mini-batch loaders via NeighborLoader (no torch-sparse dependency)
+#
+# `input_nodes=('author', data['author'].train_mask)` tells the loader
+# which nodes are the actual prediction targets for this split -- it then
+# samples a neighborhood AROUND each batch of authors, pulling in whatever
+# papers/terms/conferences are needed to compute their embeddings.
+# `num_neighbors=[10, 10]` caps the fan-out at 10 neighbors per hop, for 2
+# hops (matching the 2-layer model below).
+# ---------------------------------------------------------------------------
+train_loader = NeighborLoader(
+    data,
+    num_neighbors=[10, 10],
+    batch_size=128,
+    input_nodes=("author", data["author"].train_mask),
+    shuffle=True,
+)
 
-class HGT(torch.nn.Module):
-    """
-    Heterogeneous Graph Transformer.
+val_loader = NeighborLoader(
+    data,
+    num_neighbors=[10, 10],
+    batch_size=128,
+    input_nodes=("author", data["author"].val_mask),
+    shuffle=False,
+)
 
-    Key addition for explainability:
-      Each HGTConv layer is created with `return_attention_weights` support.
-      After every forward pass `self.attention_weights` holds a list of dicts:
-        { edge_type_str : (edge_index, alpha) }
-      where alpha has shape [num_edges, num_heads].
-    """
+test_loader = NeighborLoader(
+    data,
+    num_neighbors=[10, 10],
+    batch_size=128,
+    input_nodes=("author", data["author"].test_mask),
+    shuffle=False,
+)
 
-    def __init__(self, metadata, hidden_channels: int, out_channels: int,
-                 num_heads: int = 4, num_layers: int = 2,
-                 target_type: str = 'author'):
+
+# ---------------------------------------------------------------------------
+# 3. Define the GNN (same HGTConv-based design as the earlier node
+#    regression example, swapped to a classification head)
+# ---------------------------------------------------------------------------
+class HeteroNodeClassifier(torch.nn.Module):
+    def __init__(self, metadata, hidden_channels=64, num_layers=2,
+                 heads=4, num_classes=4, target_node_type="author"):
         super().__init__()
-        self.target_type      = target_type
-        self.num_heads        = num_heads
-        self.attention_weights: list[dict] = []   # populated in forward()
+        self.target_node_type = target_node_type
 
-        node_types, _ = metadata
-        self.lin_dict  = torch.nn.ModuleDict({
-            nt: Linear(-1, hidden_channels) for nt in node_types
-        })
-        self.convs = torch.nn.ModuleList([
-            HGTConv(hidden_channels, hidden_channels,
-                    metadata=metadata, heads=num_heads)
-            for _ in range(num_layers)
-        ])
-        self.classifier = Linear(hidden_channels, out_channels)
+        # Lazy per-type input projection, same as the HGTConv regression
+        # model -- handles 'author'/'paper'/'term' real features and
+        # 'conference' nodes' constant placeholder feature uniformly.
+        self.convs = torch.nn.ModuleList(
+            [
+                HGTConv(-1, hidden_channels, metadata, heads=heads)
+                for _ in range(num_layers)
+            ]
+        )
 
-    def forward(self, x_dict: dict[str, Tensor],
-                edge_index_dict: dict,
-                return_attention: bool = False) -> Tensor:
+        self.out_lin = Linear(hidden_channels, num_classes)
 
-        h = {nt: F.gelu(lin(x_dict[nt]))
-             for nt, lin in self.lin_dict.items()}
-
-        self.attention_weights = []
+    def forward(self, x_dict, edge_index_dict):
         for conv in self.convs:
-            if return_attention:
-                # return_attention_weights=True makes HGTConv return
-                # (out_dict, {edge_type: (edge_index, alpha)})
-                h, attn = conv(h, edge_index_dict,
-                               return_attention_weights=True)
-                self.attention_weights.append(attn)
-            else:
-                h = conv(h, edge_index_dict)
-            h = {k: F.gelu(v) for k, v in h.items()}
-
-        return self.classifier(h[self.target_type])
+            x_dict = {nt: x.relu() for nt, x in conv(x_dict, edge_index_dict).items()}
+        return self.out_lin(x_dict[self.target_node_type])  # raw logits
 
 
-# ─────────────────────────────────────────────
-# 3. Training & evaluation
-# ─────────────────────────────────────────────
+model = HeteroNodeClassifier(
+    metadata, hidden_channels=64, num_layers=2, heads=4,
+    num_classes=num_classes, target_node_type="author",
+).to(device)
 
-def train_step(model, data, optimizer, target: str = 'author'):
+# Materialize HGTConv's lazy linear layers with one real forward pass
+# before constructing the optimizer (same reason as the regression example).
+with torch.no_grad():
+    batch = next(iter(train_loader))
+    model(batch.x_dict, batch.edge_index_dict)
+
+optimizer = torch.optim.Adam(model.parameters(), lr=5e-3, weight_decay=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# 4. Train / evaluate
+#
+# Each `batch` from NeighborLoader is its own small HeteroData object: a
+# sampled subgraph containing the seed authors plus their neighborhood.
+# `batch['author'].batch_size` tells you how many of `batch['author'].x`'s
+# rows are the actual seed nodes for this step -- NeighborLoader always
+# places them FIRST, with sampled neighbor nodes appended after. So we
+# only compute loss/accuracy on `out[:batch_size]`, not the whole subgraph.
+# ---------------------------------------------------------------------------
+def train_one_epoch():
     model.train()
-    optimizer.zero_grad()
-    out  = model(data.x_dict, data.edge_index_dict)
-    mask = data[target].train_mask
-    loss = F.cross_entropy(out[mask], data[target].y[mask])
-    loss.backward()
-    optimizer.step()
-    return loss.item()
+    total_loss = total_correct = total_examples = 0
+
+    for batch in train_loader:
+        batch = batch.to(device)
+        optimizer.zero_grad()
+
+        out = model(batch.x_dict, batch.edge_index_dict)
+        batch_size = batch["author"].batch_size
+        seed_out = out[:batch_size]
+        seed_y = batch["author"].y[:batch_size]
+
+        loss = F.cross_entropy(seed_out, seed_y)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item() * batch_size
+        total_correct += (seed_out.argmax(dim=-1) == seed_y).sum().item()
+        total_examples += batch_size
+
+    return total_loss / total_examples, total_correct / total_examples
 
 
 @torch.no_grad()
-def evaluate(model, data, target: str = 'author'):
+def evaluate(loader):
     model.eval()
-    out  = model(data.x_dict, data.edge_index_dict)
-    pred = out.argmax(dim=-1)
-    results = {}
-    for split in ['train', 'val', 'test']:
-        mask    = data[target][f'{split}_mask']
-        correct = (pred[mask] == data[target].y[mask]).sum().item()
-        results[split] = correct / mask.sum().item()
-    return results
+    total_correct = total_examples = 0
+
+    for batch in loader:
+        batch = batch.to(device)
+        out = model(batch.x_dict, batch.edge_index_dict)
+        batch_size = batch["author"].batch_size
+        seed_out = out[:batch_size]
+        seed_y = batch["author"].y[:batch_size]
+
+        total_correct += (seed_out.argmax(dim=-1) == seed_y).sum().item()
+        total_examples += batch_size
+
+    return total_correct / total_examples
 
 
-# ─────────────────────────────────────────────
-# 4a. Explainer — GNNExplainer (feature masks)
-# ─────────────────────────────────────────────
+def get_single_node_subgraph(author_idx, num_neighbors=[10, 10]):
+    """Sample a fresh neighborhood subgraph around exactly ONE author node,
+    for fine-grained counterfactual analysis (separate from the training
+    loaders, which batch many seed nodes together)."""
+    loader = NeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        batch_size=1,
+        input_nodes=("author", torch.tensor([author_idx], dtype=torch.long, device=data["author"].x.device)),
+        shuffle=False,
+    )
+    return next(iter(loader))
 
-def build_gnn_explainer(model) -> Explainer:
+
+@torch.no_grad()
+def _predict_proba(batch):
+    batch = batch.to(device)
+    out = model(batch.x_dict, batch.edge_index_dict)
+    seed_out = out[: batch["author"].batch_size]
+    return F.softmax(seed_out, dim=-1)[0]
+
+
+def feature_importance_for_node(batch, node_type, node_idx, baseline_confidence,
+                                 predicted_class, top_k=10):
     """
-    Uses GNNExplainer with ONLY feature (node attribute) masks.
-
-    Why not edge masks?
-    ───────────────────
-    PyG's GNNExplainer computes edge importance by injecting a learnable
-    scalar into the aggregation path. For homogeneous graphs this is done
-    by multiplying edge_index values — but for heterogeneous graphs the
-    edge indices are stored in a Python dict and PyG cannot propagate
-    gradients through the dict look-up. This raises:
-
-        ValueError: Could not compute gradients for edge masks of type ...
-
-    The correct workaround is to set edge_mask_type=None and instead read
-    the HGT attention weights directly (see explain_attention_weights below),
-    which gives richer per-edge, per-head importance without any gradient issue.
+    Leave-one-out at the FEATURE level: for one specific node, zero out
+    each feature dimension individually and measure the resulting drop in
+    confidence for the original predicted class. This refines the
+    node-level analysis above -- "paper[12] matters a lot" becomes
+    "...specifically because of features 3, 7, and 19" (e.g. particular
+    words in a bag-of-words representation).
     """
-    return Explainer(
-        model=model,
-        algorithm=GNNExplainer(epochs=200, lr=0.01),
-        explanation_type='model',
-        node_mask_type='attributes',   # feature-importance mask ✓
-        edge_mask_type=None,           # disabled — use attention weights instead
-        model_config=dict(
-            mode='multiclass_classification',
-            task_level='node',
-            return_type='raw',
-        ),
+    x = batch[node_type].x[node_idx]
+    num_features = x.size(0)
+    feature_importances = []  # (feature_idx, confidence_drop, flips_prediction)
+
+    for f in range(num_features):
+        if x[f].item() == 0.0:
+            continue  # already zero -- nothing to remove, skip for speed
+        perturbed = batch.clone()
+        perturbed[node_type].x[node_idx, f] = 0.0
+        proba = _predict_proba(perturbed)
+        confidence_drop = baseline_confidence - proba[predicted_class].item()
+        flips = proba.argmax().item() != predicted_class
+        feature_importances.append((f, confidence_drop, flips))
+
+    feature_importances.sort(key=lambda t: t[1], reverse=True)
+    return feature_importances[:top_k]
+
+
+def counterfactual_explain_author(author_idx, top_k=5, num_neighbors=[10, 10]):
+    """
+    Counterfactual ("what if this weren't here?") explanation for ONE
+    author's prediction. We remove each neighboring node (zero its
+    features) or each edge (drop it from edge_index) one at a time, and
+    measure how much the model's confidence in its ORIGINAL predicted
+    class shifts as a result. We then drill one level deeper and do the
+    same leave-one-out idea on individual FEATURES of the most relevant
+    nodes -- "which node" refined into "which specific input signal".
+
+    - Big confidence drop when removed  -> the model's decision counter-
+      factually depends heavily on that node/edge/feature.
+    - If removing a single node/edge/feature actually flips the predicted
+      class, that's a genuine counterfactual: the smallest possible change
+      that changes the model's decision.
+
+    This is a leave-one-out occlusion method, not gradient-based, so it
+    works identically regardless of model architecture or task type --
+    useful here since PyG's `Explainer`/`GNNExplainer` heterogeneous-graph
+    support is less mature than its homogeneous-graph support.
+    """
+    batch = get_single_node_subgraph(author_idx, num_neighbors).to(device)
+
+    baseline_proba = _predict_proba(batch)
+    predicted_class = baseline_proba.argmax().item()
+    baseline_confidence = baseline_proba[predicted_class].item()
+
+    print(f"\nExplaining author node #{author_idx}")
+    print(f"  Predicted class: {predicted_class} (confidence {baseline_confidence:.4f})")
+    print(f"  Sampled neighborhood: " +
+          ", ".join(f"{nt}={batch[nt].num_nodes}" for nt in batch.node_types))
+
+    # --- leave-one-out over every NODE in the sampled neighborhood ---
+    node_importances = []  # (node_type, local_idx, confidence_drop, flips_prediction)
+    for node_type in batch.node_types:
+        n = batch[node_type].x.size(0)
+        # Skip the seed author itself (always index 0 for 'author') -- we
+        # want to know what its prediction depends ON, not what removing
+        # the node being predicted does (that's trivially destructive).
+        start = 1 if node_type == "author" else 0
+        for i in range(start, n):
+            perturbed = batch.clone()
+            perturbed[node_type].x[i] = 0.0  # "remove" this node's signal
+            proba = _predict_proba(perturbed)
+            confidence_drop = baseline_confidence - proba[predicted_class].item()
+            flips = proba.argmax().item() != predicted_class
+            node_importances.append((node_type, i, confidence_drop, flips))
+
+    # --- leave-one-out over every EDGE in the sampled neighborhood ---
+    edge_importances = []  # (edge_type, position, confidence_drop, flips_prediction)
+    for edge_type in batch.edge_types:
+        edge_index = batch[edge_type].edge_index
+        num_edges = edge_index.size(1)
+        for e in range(num_edges):
+            perturbed = batch.clone()
+            keep = torch.ones(num_edges, dtype=torch.bool, device=device)
+            keep[e] = False
+            perturbed[edge_type].edge_index = edge_index[:, keep]
+            proba = _predict_proba(perturbed)
+            confidence_drop = baseline_confidence - proba[predicted_class].item()
+            flips = proba.argmax().item() != predicted_class
+            edge_importances.append((edge_type, e, confidence_drop, flips))
+
+    node_importances.sort(key=lambda t: t[2], reverse=True)
+    edge_importances.sort(key=lambda t: t[2], reverse=True)
+
+    # --- feature-level counterfactual on the SEED author's own input ---
+    seed_feature_importances = feature_importance_for_node(
+        batch, "author", 0, baseline_confidence, predicted_class, top_k=top_k
     )
 
+    # --- feature-level counterfactual on the single most influential
+    #     NEIGHBOR node, since "this node matters" is coarser than
+    #     "these specific features of this node matter" ---
+    if node_importances:
+        top_node_type, top_node_idx, _, _ = node_importances[0]
+        top_node_feature_importances = feature_importance_for_node(
+            batch, top_node_type, top_node_idx, baseline_confidence, predicted_class, top_k=top_k
+        )
+    else:
+        top_node_type, top_node_idx = None, None
+        top_node_feature_importances = []
 
-# ─────────────────────────────────────────────
-# 4b. Explainer — HGT attention weights
-# ─────────────────────────────────────────────
+    print(f"\n  Top {top_k} most important NODES (confidence drop if removed):")
+    for node_type, i, drop, flips in node_importances[:top_k]:
+        flag = "  <-- FLIPS PREDICTION" if flips else ""
+        print(f"    {node_type}[{i}]: confidence drop = {drop:+.4f}{flag}")
 
-@torch.no_grad()
-def explain_attention_weights(model, data, node_idx: int,
-                               target: str = 'author'):
-    """
-    Extracts attention-based edge importance for a single target node.
+    print(f"\n  Top {top_k} most important EDGES (confidence drop if removed):")
+    for edge_type, e, drop, flips in edge_importances[:top_k]:
+        src, dst = batch[edge_type].edge_index[:, e].tolist()
+        flag = "  <-- FLIPS PREDICTION" if flips else ""
+        print(f"    {edge_type} edge ({src} -> {dst}): confidence drop = {drop:+.4f}{flag}")
 
-    HGTConv computes a multi-head attention score alpha ∈ [0,1] for every
-    edge. We:
-      1. Run a forward pass with return_attention=True to populate
-         model.attention_weights (one dict per layer).
-      2. For each layer and each edge type, find all edges whose
-         *destination* is `node_idx` (relevant for the target node).
-      3. Average alpha across heads → one scalar per incoming edge.
-      4. Report the top-k most attended neighbours per relation type.
+    print(f"\n  Top {top_k} most important FEATURES on the seed author itself:")
+    for f, drop, flips in seed_feature_importances:
+        flag = "  <-- FLIPS PREDICTION" if flips else ""
+        print(f"    author[0].x[{f}]: confidence drop = {drop:+.4f}{flag}")
 
-    This is gradient-free and works correctly for heterogeneous graphs.
-    """
-    model.eval()
-    _ = model(data.x_dict, data.edge_index_dict, return_attention=True)
+    if top_node_type is not None:
+        print(f"\n  Top {top_k} most important FEATURES on the most influential neighbor "
+              f"({top_node_type}[{top_node_idx}]):")
+        for f, drop, flips in top_node_feature_importances:
+            flag = "  <-- FLIPS PREDICTION" if flips else ""
+            print(f"    {top_node_type}[{top_node_idx}].x[{f}]: confidence drop = {drop:+.4f}{flag}")
 
-    # edge types that point TO the target node type
-    incoming_etypes = [et for et in data.edge_types if et[2] == target]
+    any_flips = (
+        any(f for *_, f in node_importances)
+        or any(f for *_, f in edge_importances)
+        or any(f for *_, f in seed_feature_importances)
+        or any(f for *_, f in top_node_feature_importances)
+    )
+    if any_flips:
+        print("\n  >>> A genuine counterfactual exists above: removing that single")
+        print("      node, edge, or feature changes the model's predicted class entirely.")
+    else:
+        print("\n  >>> No single node/edge/feature removal flips the prediction -- the")
+        print("      model's decision here is robust to any one removal (it relies on")
+        print("      combined, redundant evidence rather than one critical piece).")
 
-    results = defaultdict(list)   # edge_type_str → [(src_id, mean_alpha), ...]
-
-    for layer_idx, attn_dict in enumerate(model.attention_weights):
-        for etype, (edge_index, alpha) in attn_dict.items():
-            if etype[2] != target:
-                continue
-
-            src_nodes = edge_index[0]   # source node ids
-            dst_nodes = edge_index[1]   # destination node ids
-
-            # Keep only edges arriving at our node of interest
-            mask        = (dst_nodes == node_idx)
-            src_focused = src_nodes[mask]
-            alpha_mean  = alpha[mask].mean(dim=-1)   # average over heads
-
-            for src, a in zip(src_focused.tolist(), alpha_mean.tolist()):
-                results[f"L{layer_idx+1} {etype}"].append((src, a))
-
-    return results
+    return node_importances, edge_importances, seed_feature_importances, top_node_feature_importances
 
 
-# ─────────────────────────────────────────────
-# 4c. Combined explain routine
-# ─────────────────────────────────────────────
 
-def explain_nodes(model, data, node_indices: list[int],
-                  target: str = 'author'):
-    """
-    For each node prints:
-      A) Top-5 most important input features  (GNNExplainer feature mask)
-      B) Top-5 most attended neighbours       (HGT attention weights, per layer
-                                               and per incoming relation type)
-    """
-    CLASS_NAMES = {0: 'DB', 1: 'DM', 2: 'IR', 3: 'ML'}
-    explainer   = build_gnn_explainer(model)
-    model.eval()
+if __name__ == "__main__":
+    n_epochs = 50
+    best_val_acc = 0.0
 
-    print("=" * 65)
-    print("EXPLAINABILITY")
-    print("  Method A — GNNExplainer  : per-feature importance (gradient)")
-    print("  Method B — Attention     : per-edge importance (attention α)")
-    print("=" * 65)
+    for epoch in range(1, n_epochs + 1):
+        train_loss, train_acc = train_one_epoch()
+        val_acc = evaluate(val_loader)
 
-    # Cache logits once — reused as the 'target' tensor for the explainer
-    with torch.no_grad():
-        logits = model(data.x_dict, data.edge_index_dict)
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
 
-    for node_idx in node_indices:
-        pred = logits[node_idx].argmax().item()
-        true = data[target].y[node_idx].item()
-
-        print(f"\n{'─'*65}")
-        print(f"Author node {node_idx:4d}  |  "
-              f"true={CLASS_NAMES[true]}  "
-              f"pred={CLASS_NAMES[pred]}  "
-              f"{'✓' if pred == true else '✗'}")
-
-        # ── A: GNNExplainer feature mask ─────────────────────────────────────
-        print("\n  [A] Feature importance (GNNExplainer, author BoW dims):")
-        try:
-            explanation = explainer(
-                x=data.x_dict,
-                edge_index=data.edge_index_dict,
-                index=node_idx,
-                target=logits,
+        if epoch % 5 == 0 or epoch == 1:
+            print(
+                f"Epoch {epoch:02d} | Train Loss: {train_loss:.4f} | "
+                f"Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}"
             )
 
-            # node_mask shape: [N_author, F]  or stored as node_feat_mask
-            feat_mask = (explanation.node_mask[node_idx]
-                         if explanation.node_mask is not None
-                         else explanation.node_feat_mask)
+    test_acc = evaluate(test_loader)
+    print(f"\nFinal Test Accuracy: {test_acc:.4f} (best Val Accuracy: {best_val_acc:.4f})")
 
-            top_vals, top_idx = feat_mask.topk(5)
-            for rank, (fi, fv) in enumerate(
-                    zip(top_idx.tolist(), top_vals.tolist()), 1):
-                print(f"    {rank}. dim={fi:4d}  score={fv:.4f}")
-
-        except Exception as exc:
-            print(f"    (GNNExplainer error: {exc})")
-
-        # ── B: Attention weights ──────────────────────────────────────────────
-        print("\n  [B] Most attended neighbours (HGT attention α):")
-        attn_results = explain_attention_weights(model, data, node_idx, target)
-
-        if not attn_results:
-            print("    (no incoming attention edges found)")
-        else:
-            for rel_label, pairs in attn_results.items():
-                if not pairs:
-                    continue
-                # Sort by attention score descending, keep top 5
-                top = sorted(pairs, key=lambda x: x[1], reverse=True)[:5]
-                print(f"\n    Relation: {rel_label}")
-                for rank, (src, a) in enumerate(top, 1):
-                    print(f"      {rank}. neighbour_id={src:5d}  α={a:.4f}")
-
-    print(f"\n{'='*65}\n")
-
-
-# ─────────────────────────────────────────────
-# 5. Main
-# ─────────────────────────────────────────────
-
-def main():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device}\n")
-
-    data        = load_dblp().to(device)
-    TARGET      = 'author'
-    NUM_CLASSES = int(data[TARGET].y.max().item()) + 1   # 4
-
-    model = HGT(
-        metadata=data.metadata(),
-        hidden_channels=64,
-        out_channels=NUM_CLASSES,
-        num_heads=4,
-        num_layers=2,
-        target_type=TARGET,
-    ).to(device)
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3, weight_decay=1e-4)
-
-    # ── Train ──────────────────────────────────────────────────────────────────
-    print(f"{'Epoch':>6}  {'Loss':>8}  {'Train':>7}  {'Val':>7}  {'Test':>7}")
-    print("─" * 47)
-    for epoch in range(1, 101):
-        loss = train_step(model, data, optimizer, TARGET)
-        acc  = evaluate(model, data, TARGET)
-        if epoch % 10 == 0:
-            print(f"{epoch:>6}  {loss:>8.4f}  "
-                  f"{acc['train']:>7.2%}  {acc['val']:>7.2%}  {acc['test']:>7.2%}")
-
-    # ── Explain ────────────────────────────────────────────────────────────────
-    test_mask  = data[TARGET].test_mask.cpu()
-    test_nodes = test_mask.nonzero(as_tuple=True)[0][:3].tolist()  # first 3
-    print(f"\nRunning explainability on {len(test_nodes)} test-set authors …\n")
-    explain_nodes(model, data, node_indices=test_nodes, target=TARGET)
-
-
-if __name__ == '__main__':
-    main()
+    # -----------------------------------------------------------------------
+    # 5. Counterfactual evaluation: which nodes/edges matter most, and is
+    #    the model's decision fragile (a single removal flips it) or robust?
+    # -----------------------------------------------------------------------
+    example_author_idx = data["author"].test_mask.nonzero(as_tuple=True)[0][0].item()
+    node_imp, edge_imp, seed_feat_imp, top_node_feat_imp = counterfactual_explain_author(
+        example_author_idx, top_k=5
+    )
