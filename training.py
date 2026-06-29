@@ -603,6 +603,9 @@ class Modelling:
         )
         self.visualize_explanation_subgraph(explanation_graph, save_path="explanation_subgraph.png")
 
+    """
+        Regression explanations
+    """
     @torch.no_grad()
     def _predict_value_for_graph(self, graph, object_idx, perturbed_graph=None):
         """Run the model on (a possibly perturbed copy of) ONE small graph
@@ -631,10 +634,252 @@ class Modelling:
         feature_importances.sort(key=lambda t: t[1], reverse=True)
         return feature_importances[:top_k]
 
-    def reg_explanation(self, explain_subgraph, object_idx, top_k):
+    def reg_explanation_subgraph(self, graph, seed_paper_idx, node_importances,
+                                 edge_importances,node_top_k=10):
+        """
+        Turn the counterfactual node/edge importance scores into an actual
+        NetworkX subgraph.
+        """
+        import networkx as nx
+
+        seed_key = (self.viewpoint_object, seed_paper_idx)
+        G = nx.MultiDiGraph()
+        G.add_node(seed_key, node_type=self.viewpoint_object, importance=1.0,
+                   is_seed=True, large_shift=False, is_connector=False)
+
+        included = {seed_key}
+        for nt, i, shift, large in node_importances[:node_top_k]:
+            key = (nt, i)
+            G.add_node(key, node_type=nt, importance=shift, is_seed=False,
+                       large_shift=large, is_connector=False)
+            included.add(key)
+
+        # Flatten every real edge in this small graph for path-finding /
+        # induced-subgraph lookups below.
+        all_edges = []  # (edge_type, src_key, dst_key)
+        for edge_type in graph.edge_types:
+            src_type, _, dst_type = edge_type
+            edge_index = graph[edge_type].edge_index
+            for e in range(edge_index.size(1)):
+                src, dst = edge_index[:, e].tolist()
+                all_edges.append((edge_type, (src_type, src), (dst_type, dst)))
+
+        edge_importance_lookup = {}
+        for edge_type, e, shift, large in edge_importances:
+            edge_index = graph[edge_type].edge_index
+            src, dst = edge_index[:, e].tolist()
+            edge_importance_lookup[(edge_type, src, dst)] = (shift, large)
+
+        def add_real_edge(edge_type, src_key, dst_key):
+            shift, large = edge_importance_lookup.get(
+                (edge_type, src_key[1], dst_key[1]), (0.0, False)
+            )
+            G.add_edge(src_key, dst_key, edge_type=edge_type[1], importance=shift, large_shift=large)
+
+        # --- Pass 1: the real induced subgraph on the selected nodes ---
+        for edge_type, src_key, dst_key in all_edges:
+            if src_key in included and dst_key in included:
+                add_real_edge(edge_type, src_key, dst_key)
+
+        # --- Pass 2: repair any node that's STILL isolated (the 2-hop
+        #     case) by pulling in the shortest real path to the seed ---
+        full_nx = nx.Graph()  # undirected, for path-finding only
+        for edge_type, src_key, dst_key in all_edges:
+            full_nx.add_edge(src_key, dst_key, edge_type=edge_type)
+
+        isolated = [n for n in included if G.degree(n) == 0]
+        for node_key in isolated:
+            try:
+                path = nx.shortest_path(full_nx, source=node_key, target=seed_key)
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                continue  # truly unreachable in this small graph -- leave isolated
+
+            for n in path:
+                if n not in G.nodes:
+                    # Mark as a connector: structurally necessary to show
+                    # the real path, but not independently ranked important.
+                    G.add_node(n, node_type=n[0], importance=0.0, is_seed=False,
+                               large_shift=False, is_connector=True)
+
+            for a, b in zip(path[:-1], path[1:]):
+                if G.has_edge(a, b) or G.has_edge(b, a):
+                    continue
+                edge_type = full_nx[a][b]["edge_type"]
+                shift, large = edge_importance_lookup.get(
+                    (edge_type, a[1], b[1]),
+                    edge_importance_lookup.get((edge_type, b[1], a[1]), (0.0, False)),
+                )
+                G.add_edge(a, b, edge_type=edge_type[1], importance=shift, large_shift=large)
+
+        return G
+
+    def reg_visualize_explanation_subgraph(self, G, save_path="explanation_subgraph_regression.png"):
+        """Draw the explanation subgraph: node color = type, node size =
+        importance (value shift), red edges/outlines = "removing this
+        shifts the prediction by more than one target standard deviation".
+        Connector nodes (pulled in only to show a real 2-hop path, not
+        independently ranked important) are drawn smaller and faded."""
+        import matplotlib.pyplot as plt
+        import networkx as nx
+
+        type_colors = {"author": "#4C72B0", "paper": "#DD8452", "venue": "#55A868"}
+
+        # Now that the graph is properly connected (see build_explanation_
+        # subgraph above), kamada_kawai tends to give a clearer layout for
+        # small graphs than spring_layout; fall back if anything's amiss.
+        try:
+            pos = nx.kamada_kawai_layout(G)
+        except Exception:
+            pos = nx.spring_layout(G, seed=42, k=0.9)
+
+        node_colors, node_sizes, edge_colors_outline, alphas = [], [], [], []
+        for node, attrs in G.nodes(data=True):
+            node_colors.append(type_colors.get(attrs["node_type"], "gray"))
+            if attrs.get("is_seed"):
+                node_sizes.append(900)
+            elif attrs.get("is_connector"):
+                node_sizes.append(150)  # smaller -- structural, not independently ranked
+            else:
+                node_sizes.append(250 + max(attrs.get("importance", 0), 0) * 1500)
+            edge_colors_outline.append("red" if attrs.get("large_shift") else "black")
+            alphas.append(0.4 if attrs.get("is_connector") else 0.9)
+
+        edge_colors, edge_widths = [], []
+        for _, _, attrs in G.edges(data=True):
+            edge_colors.append("red" if attrs.get("large_shift") else "gray")
+            edge_widths.append(1 + max(attrs.get("importance", 0), 0) * 8)
+
+        plt.figure(figsize=(10, 8))
+        nx.draw_networkx_nodes(
+            G, pos, node_color=node_colors, node_size=node_sizes,
+            edgecolors=edge_colors_outline, linewidths=1.5, alpha=alphas,
+        )
+        nx.draw_networkx_edges(
+            G, pos, edge_color=edge_colors, width=edge_widths,
+            arrows=True, connectionstyle="arc3,rad=0.1", alpha=0.7,
+        )
+        labels = {node: f"{node[0]}[{node[1]}]" for node in G.nodes if not G.nodes[node].get("is_connector")}
+        nx.draw_networkx_labels(G, pos, labels=labels, font_size=7)
+
+        legend_handles = [
+            plt.Line2D([0], [0], marker="o", color="w", label=nt,
+                       markerfacecolor=color, markersize=10)
+            for nt, color in type_colors.items()
+        ]
+        legend_handles.append(plt.Line2D([0], [0], color="red", lw=2, label="large shift (>1 std)"))
+        legend_handles.append(plt.Line2D([0], [0], marker="o", color="w", label="connector (faded)",
+                                         markerfacecolor="gray", alpha=0.4, markersize=8))
+        plt.legend(handles=legend_handles, loc="best", fontsize=8)
+
+        plt.title("Counterfactual Explanation Subgraph (Regression)")
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150)
+        plt.close()
+        print(f"Saved explanation subgraph visualization to {save_path}")
+
+    def evaluate_explanation_quality(self, graph, paper_idx, node_importances, edge_importances,
+                                     node_top_k=10, edge_top_k=15, verbose=True):
+        """
+        Quantify how good the counterfactual explanation subgraph actually
+        is for a REGRESSION prediction -- the same fidelity / characterization
+        / sparsity ideas used for the DBLP classification model, adapted to
+        value shifts instead of confidence drops.
+
+          - Fidelity+ (higher = better): REMOVE the explanation (zero its
+            nodes, drop its edges), keep everything else. The prediction
+            should shift a lot if the explanation correctly identified
+            what the model relies on.
+          - Fidelity- (closer to 0 = better): KEEP ONLY the explanation,
+            zero/drop everything else. The prediction should stay close to
+            the original if the explanation is self-sufficient.
+          - Characterization score: fidelity+ / (fidelity+ + fidelity-),
+            bounded in [0, 1].
+          - Node/edge sparsity: share of the FULL small graph excluded
+            from the explanation -- how compact it is.
+        """
+        baseline_value = self._predict_value_for_graph(graph, paper_idx)
+
+        explanation_nodes_by_type = {}
+        for nt, i, _shift, _large in node_importances[:node_top_k]:
+            explanation_nodes_by_type.setdefault(nt, set()).add(i)
+        explanation_nodes_by_type.setdefault(self.viewpoint_object, set()).add(paper_idx)
+
+        explanation_edges_by_type = {}
+        for et, e, _shift, _large in edge_importances[:edge_top_k]:
+            explanation_edges_by_type.setdefault(et, set()).add(e)
+
+        # --- Fidelity+: remove the explanation, keep everything else ---
+        complement = graph.clone()
+        for nt, idx_set in explanation_nodes_by_type.items():
+            for i in idx_set:
+                complement[nt].x[i] = 0.0
+        for et, pos_set in explanation_edges_by_type.items():
+            edge_index = complement[et].edge_index
+            num_edges = edge_index.size(1)
+            keep = torch.tensor(
+                [pos not in pos_set for pos in range(num_edges)],
+                dtype=torch.bool, device=self.device,
+            )
+            complement[et].edge_index = edge_index[:, keep]
+        pred_complement = self._predict_value_for_graph(graph, paper_idx, perturbed_graph=complement)
+        fidelity_plus = abs(baseline_value - pred_complement)
+
+        # --- Fidelity-: keep ONLY the explanation ---
+        subgraph = graph.clone()
+        for nt in subgraph.node_types:
+            keep_idx = explanation_nodes_by_type.get(nt, set())
+            n = subgraph[nt].x.size(0)
+            for i in range(n):
+                if i not in keep_idx:
+                    subgraph[nt].x[i] = 0.0
+        for et in subgraph.edge_types:
+            edge_index = subgraph[et].edge_index
+            num_edges = edge_index.size(1)
+            keep_pos = explanation_edges_by_type.get(et, set())
+            keep = torch.tensor(
+                [pos in keep_pos for pos in range(num_edges)],
+                dtype=torch.bool, device=self.device,
+            )
+            subgraph[et].edge_index = edge_index[:, keep]
+        pred_subgraph = self._predict_value_for_graph(graph, paper_idx, perturbed_graph=subgraph)
+        fidelity_minus = abs(baseline_value - pred_subgraph)
+
+        denom = fidelity_plus + fidelity_minus
+        characterization_score = fidelity_plus / denom if denom > 1e-8 else 0.0
+
+        total_nodes = sum(graph[nt].x.size(0) for nt in graph.node_types)
+        explanation_node_count = sum(len(s) for s in explanation_nodes_by_type.values())
+        node_sparsity = 1 - (explanation_node_count / total_nodes)
+
+        total_edges = sum(graph[et].edge_index.size(1) for et in graph.edge_types)
+        explanation_edge_count = sum(len(s) for s in explanation_edges_by_type.values())
+        edge_sparsity = 1 - (explanation_edge_count / total_edges) if total_edges > 0 else float("nan")
+
+        metrics = {
+            "fidelity_plus": fidelity_plus,
+            "fidelity_minus": fidelity_minus,
+            "characterization_score": characterization_score,
+            "node_sparsity": node_sparsity,
+            "edge_sparsity": edge_sparsity,
+        }
+
+        if verbose:
+            print("\n--- Explanation subgraph quality metrics ---")
+            print(f"  Fidelity+        : {fidelity_plus:.4f}  "
+                  f"(higher is better -- removing the explanation should shift the prediction)")
+            print(f"  Fidelity-        : {fidelity_minus:.4f}  "
+                  f"(closer to 0 is better -- the explanation alone should reproduce the prediction)")
+            print(f"  Characterization : {characterization_score:.4f}  (higher is better, in [0, 1])")
+            print(f"  Node sparsity    : {node_sparsity:.2%}  (share of the graph excluded from the explanation)")
+            print(f"  Edge sparsity    : {edge_sparsity:.2%}  (share of edges excluded from the explanation)")
+
+        return metrics
+
+    def reg_explanation(self, explain_subgraph, object_idx, graph_id, top_k):
         baseline_value = self._predict_value_for_graph(explain_subgraph, object_idx)
-        print(f"\nExplaining {self.viewpoint_object} #{0} in graph #{object_idx}")
-        print(f"  Predicted impact score: {baseline_value:.4f}")
+        print(f"\nExplaining {self.viewpoint_object} #{0} in graph #{graph_id}")
+        print(f"  Predicted value: {round(baseline_value/3600)} hours")
         print("  Graph size: " +
               ", ".join(f"{nt}={explain_subgraph[nt].num_nodes}" for nt in explain_subgraph.node_types))
 
@@ -643,7 +888,7 @@ class Modelling:
         for node_type in explain_subgraph.node_types:
             n = explain_subgraph[node_type].x.size(0)
             for idx in range(n):
-                if node_type == "paper" and idx == object_idx:
+                if node_type == self.viewpoint_object and idx == object_idx:
                     continue  # skip the target itself, same reasoning as before
                 perturbed = explain_subgraph.clone()
                 perturbed[node_type].x[idx] = 0.0
@@ -686,25 +931,25 @@ class Modelling:
             print(f"\n  Top {top_k} most important NODES (predicted value shift if removed):")
             for node_type, i, shift, large in node_importances[:top_k]:
                 flag = "  <-- LARGE SHIFT (>1 std)" if large else ""
-                print(f"    {node_type}[{i}]: value shift = {shift:.4f}{flag}")
+                print(f"    {node_type}[{i}]: value shift = {shift/3600:+.4f} hours{flag}")
 
             print(f"\n  Top {top_k} most important EDGES (predicted value shift if removed):")
             for edge_type, e, shift, large in edge_importances[:top_k]:
                 src, dst = explain_subgraph[edge_type].edge_index[:, e].tolist()
                 flag = "  <-- LARGE SHIFT (>1 std)" if large else ""
-                print(f"    {edge_type} edge ({src} -> {dst}): value shift = {shift:.4f}{flag}")
+                print(f"    {edge_type} edge ({src} -> {dst}): value shift = {shift/3600:+.4f} hours{flag}")
 
-            print(f"\n  Top {top_k} most important FEATURES on the seed paper itself:")
+            print(f"\n  Top {top_k} most important FEATURES on the seed {self.viewpoint_object} itself:")
             for f, shift, large in seed_feature_importances:
                 flag = "  <-- LARGE SHIFT (>1 std)" if large else ""
-                print(f"    paper[{object_idx}].x[{f}]: value shift = {shift:.4f}{flag}")
+                print(f"    {self.viewpoint_object}[{object_idx}].x[{f}]: value shift = {shift/3600:+.4f} hours{flag}")
 
             if top_node_type is not None:
                 print(f"\n  Top {top_k} most important FEATURES on the most influential neighbor "
                       f"({top_node_type}[{top_node_idx}]):")
                 for f, shift, large in top_node_feature_importances:
                     flag = "  <-- LARGE SHIFT (>1 std)" if large else ""
-                    print(f"    {top_node_type}[{top_node_idx}].x[{f}]: value shift = {shift:.4f}{flag}")
+                    print(f"    {top_node_type}[{top_node_idx}].x[{f}]: value shift = {shift/3600:+.4f} hours{flag}")
 
             any_large = (
                     any(l for *_, l in node_importances)
@@ -718,6 +963,15 @@ class Modelling:
             else:
                 print("\n  >>> No single removal shifts the prediction by more than one target")
                 print("      standard deviation -- this prediction is robust to any one removal.")
+
+            explanation_graph = self.reg_explanation_subgraph(
+                explain_subgraph, 0, node_importances, edge_importances,
+                node_top_k=2)
+
+            self.reg_visualize_explanation_subgraph(explanation_graph, save_path="explanation_subgraph_regression.png")
+
+            self.evaluate_explanation_quality(explain_subgraph, 0, node_importances, edge_importances,
+                                         node_top_k=10, edge_top_k=15, verbose=True)
 
             return node_importances, edge_importances, seed_feature_importances, top_node_feature_importances
 
@@ -737,7 +991,7 @@ class Modelling:
                     break
 
         if self.path_dict['kpi_type'] == 0:
-            self.reg_explanation(explain_subgraph, 0, top_k)
+            self.reg_explanation(explain_subgraph, 0, object_idx, top_k)
         elif self.path_dict['kpi_type'] == 1:
             self.class_explanation(explain_subgraph, object_idx, top_k)
 
