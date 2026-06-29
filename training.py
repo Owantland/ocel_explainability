@@ -38,6 +38,16 @@ class Modelling:
             self.model = HGT.HGT(hidden_channels=24, out_channels=1, num_layers=2,
                                  num_heads=2, data=self.train_data[0], viewpoint=self.viewpoint_object)
             test_kpi = f"TimeFrom_{self.viewpoint_object}_to_{self.path_dict['kpi_event']}"
+
+            # Standardize the output values
+            train_y_all = torch.cat([g[self.viewpoint_object].y for g in self.train_data])
+            target_mean, target_std = train_y_all.mean(), train_y_all.std()
+            for m in [self.train_data, self.val_data, self.test_data]:
+                for g in m:
+                    g[self.viewpoint_object].y = (g[self.viewpoint_object].y - target_mean) / target_std
+            print(f"Mean (hours): {round(target_mean.item() / 3600)}, STD (hours): {round(target_std.item() / 3600)}")
+            self.target_mean, self.target_std = target_mean.to(self.device), target_std.to(self.device)
+
         elif kpi_type == 1:
             self.model = HGT_CLASS.HGT_CLASS(hidden_channels=64, out_channels=2, num_heads=2,
                                              num_layers=2, data=self.train_data[0],
@@ -51,17 +61,6 @@ class Modelling:
         if not os.path.exists(f"{model_path}/Hetero"):
             os.makedirs(f"{model_path}/Hetero")
         self.model_path = f"{model_path}/Hetero/{test_kpi}.pth"
-
-        # Normalize using train-graph statistics only, gathered across ALL of
-        # their viewpoint object nodes (the multi-graph analogue of the train_mask slice
-        # used in the single-large-graph version).
-        train_y_all = torch.cat([g[self.viewpoint_object].y for g in self.train_data])
-        target_mean, target_std = train_y_all.mean(), train_y_all.std()
-        for m in [self.train_data, self.val_data, self.test_data]:
-            for g in m:
-                g[self.viewpoint_object].y = (g[self.viewpoint_object].y - target_mean) / target_std
-        print(f"Mean (hours): {round(target_mean.item() / 3600)}, STD (hours): {round(target_std.item() / 3600)}")
-        self.target_mean, self.target_std = target_mean.to(self.device), target_std.to(self.device)
 
     def decode_epoch(self, epoch_val):
         timestamp = pd.Timestamp(epoch_val, unit='s')
@@ -243,30 +242,30 @@ class Modelling:
         val_loader = DataLoader(val_data, batch_size=16)
         test_loader = DataLoader(test_data, batch_size=16)
 
-        # Choose criterion
-        criterion = F.cross_entropy
-
-        # Materialize HGTConv's lazy linear layers with one real forward pass
-        # before constructing the optimizer (same reason as the regression example).
-        with torch.no_grad():
-            batch = next(iter(train_loader))
-            self.model(batch.x_dict, batch.edge_index_dict)
-
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)#, weight_decay=1e-5)
-
-        # Run training loop
-        best_val = 0.0
-        pbar = tqdm(range(1, 51))
-
-        for epoch in pbar:
-            train_loss = self.class_train(train_loader, optimizer, criterion)
-            val_acc, val_f1 = self.class_eval(val_loader)
-
-            print(f'Epoch: {epoch:03d}, Loss: {train_loss:.4f}, Val ACC: {val_acc:.4f} | Val F1: {val_f1:.4f}')
-            if val_f1 > best_val:
-                best_val = val_acc
-                print("New best!")
-                torch.save(self.model.state_dict(), self.model_path)
+        # # Choose criterion
+        # criterion = F.cross_entropy
+        #
+        # # Materialize HGTConv's lazy linear layers with one real forward pass
+        # # before constructing the optimizer (same reason as the regression example).
+        # with torch.no_grad():
+        #     batch = next(iter(train_loader))
+        #     self.model(batch.x_dict, batch.edge_index_dict)
+        #
+        # optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)#, weight_decay=1e-5)
+        #
+        # # Run training loop
+        # best_val = 0.0
+        # pbar = tqdm(range(1, 51))
+        #
+        # for epoch in pbar:
+        #     train_loss = self.class_train(train_loader, optimizer, criterion)
+        #     val_acc, val_f1 = self.class_eval(val_loader)
+        #
+        #     print(f'Epoch: {epoch:03d}, Loss: {train_loss:.4f}, Val ACC: {val_acc:.4f} | Val F1: {val_f1:.4f}')
+        #     if val_f1 > best_val:
+        #         best_val = val_acc
+        #         print("New best!")
+        #         torch.save(self.model.state_dict(), self.model_path)
 
     """
         Model saving functions
@@ -497,6 +496,118 @@ class Modelling:
         plt.close()
         print(f"Saved explanation subgraph visualization to {save_path}")
 
+    def class_evaluate_explanation(self, batch, node_importances, edge_importances,
+                                   node_top_k=10, edge_top_k=15, verbose=True):
+        """
+        Quantify how good the counterfactual explanation subgraph actually is --
+        the same fidelity / characterization / sparsity ideas used earlier for
+        the homogeneous regression model, adapted here to HARD node/edge
+        inclusion (this explanation is a discrete top-k selection, not a
+        continuous learned mask) and to classification confidence instead of a
+        continuous regression value.
+
+          - Fidelity+ (higher = better): REMOVE the explanation (zero its
+            nodes' features, drop its edges) and keep everything else. If the
+            explanation correctly identified what the model relies on,
+            confidence in the original predicted class should drop a lot.
+          - Fidelity- (closer to 0 = better): KEEP ONLY the explanation, zero
+            or drop everything else. If the explanation is self-sufficient,
+            confidence should stay close to the original (in either direction
+            -- a big swing either way means the explanation alone doesn't
+            reproduce the original decision).
+          - Characterization score: fidelity+ / (fidelity+ + |fidelity-|),
+            bounded in [0, 1]. Same combined-score idea as the regression
+            example, adapted since these are raw confidence deltas rather than
+            the bounded probabilities PyG's built-in formula assumes.
+          - Node/edge sparsity: what fraction of the FULL sampled neighborhood
+            was excluded from the explanation -- i.e. how compact it is. A
+            good explanation is both faithful (high fidelity+, low fidelity-)
+            AND sparse; flagging the entire neighborhood as "important" would
+            trivially nail fidelity but tell you nothing.
+        """
+        baseline_proba = self._predict_proba(batch)
+        predicted_class = baseline_proba.argmax().item()
+        baseline_confidence = baseline_proba[predicted_class].item()
+
+        # Explanation membership, grouped by type (same top-k selection used to
+        # build/draw the explanation subgraph above).
+        explanation_nodes_by_type = {}
+        for nt, i, _drop, _flips in node_importances[:node_top_k]:
+            explanation_nodes_by_type.setdefault(nt, set()).add(i)
+        explanation_nodes_by_type.setdefault(self.viewpoint_object, set()).add(0)  # seed always included
+
+        explanation_edges_by_type = {}
+        for et, e, _drop, _flips in edge_importances[:edge_top_k]:
+            explanation_edges_by_type.setdefault(et, set()).add(e)
+
+        # --- Fidelity+: remove the explanation, keep everything else ---
+        complement = batch.clone()
+        for nt, idx_set in explanation_nodes_by_type.items():
+            for i in idx_set:
+                complement[nt].x[i] = 0.0
+        for et, pos_set in explanation_edges_by_type.items():
+            edge_index = complement[et].edge_index
+            num_edges = edge_index.size(1)
+            keep = torch.tensor(
+                [pos not in pos_set for pos in range(num_edges)],
+                dtype=torch.bool, device=self.device,
+            )
+            complement[et].edge_index = edge_index[:, keep]
+        proba_complement = self._predict_proba(complement)
+        fidelity_plus = baseline_confidence - proba_complement[predicted_class].item()
+
+        # --- Fidelity-: keep ONLY the explanation, zero/drop everything else ---
+        subgraph = batch.clone()
+        for nt in subgraph.node_types:
+            keep_idx = explanation_nodes_by_type.get(nt, set())
+            n = subgraph[nt].x.size(0)
+            for i in range(n):
+                if i not in keep_idx:
+                    subgraph[nt].x[i] = 0.0
+        for et in subgraph.edge_types:
+            edge_index = subgraph[et].edge_index
+            num_edges = edge_index.size(1)
+            keep_pos = explanation_edges_by_type.get(et, set())
+            keep = torch.tensor(
+                [pos in keep_pos for pos in range(num_edges)],
+                dtype=torch.bool, device=self.device,
+            )
+            subgraph[et].edge_index = edge_index[:, keep]
+        proba_subgraph = self._predict_proba(subgraph)
+        fidelity_minus = baseline_confidence - proba_subgraph[predicted_class].item()
+
+        denom = fidelity_plus + abs(fidelity_minus)
+        characterization_score = fidelity_plus / denom if denom > 1e-8 else 0.0
+
+        # --- Sparsity: share of the full sampled neighborhood excluded ---
+        total_nodes = sum(batch[nt].x.size(0) for nt in batch.node_types)
+        explanation_node_count = sum(len(s) for s in explanation_nodes_by_type.values())
+        node_sparsity = 1 - (explanation_node_count / total_nodes)
+
+        total_edges = sum(batch[et].edge_index.size(1) for et in batch.edge_types)
+        explanation_edge_count = sum(len(s) for s in explanation_edges_by_type.values())
+        edge_sparsity = 1 - (explanation_edge_count / total_edges) if total_edges > 0 else float("nan")
+
+        metrics = {
+            "fidelity_plus": fidelity_plus,
+            "fidelity_minus": fidelity_minus,
+            "characterization_score": characterization_score,
+            "node_sparsity": node_sparsity,
+            "edge_sparsity": edge_sparsity,
+        }
+
+        if verbose:
+            print("\n--- Explanation subgraph quality metrics ---")
+            print(f"  Fidelity+        : {fidelity_plus:+.4f}  "
+                  f"(higher is better -- removing the explanation should hurt confidence)")
+            print(f"  Fidelity-        : {fidelity_minus:+.4f}  "
+                  f"(closer to 0 is better -- the explanation alone should reproduce the prediction)")
+            print(f"  Characterization : {characterization_score:.4f}  (higher is better, in [0, 1])")
+            print(f"  Node sparsity    : {node_sparsity:.2%}  (share of sampled nodes excluded from the explanation)")
+            print(f"  Edge sparsity    : {edge_sparsity:.2%}  (share of sampled edges excluded from the explanation)")
+
+        return metrics
+
     def class_explanation(self, explain_subgraph, object_idx, top_k):
         baseline_proba = self._predict_proba(explain_subgraph)
         predicted_class = baseline_proba.argmax().item()
@@ -602,6 +713,9 @@ class Modelling:
             explain_subgraph, node_importances, edge_importances, node_top_k=10, edge_top_k=15
         )
         self.visualize_explanation_subgraph(explanation_graph, save_path="explanation_subgraph.png")
+
+        self.class_evaluate_explanation(explain_subgraph, node_importances, edge_importances,
+                                   node_top_k=10, edge_top_k=15, verbose=True)
 
     """
         Regression explanations
