@@ -15,7 +15,7 @@ class TrainTestBuilder:
         self.pd_active_orders = self.get_active_orders()
 
         # Assigns train/test split values
-        self.index_train = round(0.7 * self.cant)
+        self.index_train = round(0.6 * self.cant)
         self.split_test_index = .5
 
     def get_active_orders(self):

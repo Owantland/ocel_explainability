@@ -37,7 +37,7 @@ class Modelling:
         if kpi_type == 0:  # Regression
             self.model = HGT.HGT(hidden_channels=24, out_channels=1, num_layers=2,
                                  num_heads=2, data=self.train_data[0], viewpoint=self.viewpoint_object)
-            test_kpi = f"TimeFrom_{self.viewpoint_object}_to_{self.path_dict['kpi_event']}"
+            self.task_id = f"TimeFrom_{self.viewpoint_object}_to_{self.path_dict['kpi_event']}"
 
             # Standardize the output values
             train_y_all = torch.cat([g[self.viewpoint_object].y for g in self.train_data])
@@ -52,7 +52,25 @@ class Modelling:
             self.model = HGT_CLASS.HGT_CLASS(hidden_channels=64, out_channels=2, num_heads=2,
                                              num_layers=2, data=self.train_data[0],
                                              viewpoint=self.viewpoint_object)
-            test_kpi = f"Classifier_{self.path_dict['kpi_event']}"
+            self.task_id = f"Classifier_{self.path_dict['kpi_event']}"
+
+        # Node feature standardization (continuous attributes only — excludes one-hot encoded types)
+        continuous_node_types = (
+            list((self.path_dict.get('attributes') or {}).keys()) +
+            list((self.path_dict.get('time_attributes') or {}).keys())
+        )
+        for node_type in continuous_node_types:
+            x_train = [g[node_type].x for g in self.train_data if g[node_type].num_nodes > 0]
+            if not x_train:
+                continue
+            x_cat = torch.cat(x_train, dim=0)
+            feat_mean = x_cat.mean(dim=0)
+            feat_std = x_cat.std(dim=0).clamp(min=1e-8)
+            for split in [self.train_data, self.val_data, self.test_data]:
+                for g in split:
+                    if g[node_type].num_nodes > 0:
+                        g[node_type].x = (g[node_type].x - feat_mean) / feat_std
+
         self.model = self.model.to(self.device)
 
         # Define save path for the models
@@ -60,7 +78,7 @@ class Modelling:
 
         if not os.path.exists(f"{model_path}/Hetero"):
             os.makedirs(f"{model_path}/Hetero")
-        self.model_path = f"{model_path}/Hetero/{test_kpi}.pth"
+        self.model_path = f"{model_path}/Hetero/{self.task_id}.pth"
 
     def decode_epoch(self, epoch_val):
         timestamp = pd.Timestamp(epoch_val, unit='s')
