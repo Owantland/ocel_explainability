@@ -17,7 +17,6 @@ class TrainTestBuilder:
         # Assigns train/test split values
         self.index_train = round(0.7 * self.cant)
         self.split_test_index = .5
-        self.step_size = round(0.1 * self.cant) #Step size is about 10% of the total data
 
     def get_active_orders(self):
         # Finds the timeframe for each order and puts them in chronological order
