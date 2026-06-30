@@ -315,8 +315,8 @@ class Modelling:
         if val_data is None:
             val_data = self.val_data
 
-        train_loader = DataLoader(training_data, batch_size=16, shuffle=True)
-        val_loader = DataLoader(val_data, batch_size=16)
+        train_loader = DataLoader(training_data, batch_size=64, shuffle=True)
+        val_loader = DataLoader(val_data, batch_size=64)
         device = self.device
 
         grid = [
@@ -377,7 +377,9 @@ class Modelling:
             print(f"  val MAE={val_mae:.4f}  |  {cfg}")
         print(f"\nBest config: {top5[0][1]}  (val MAE={top5[0][0]:.4f})")
 
-        self._plot_sweep_results(top5)
+        # Plot only the top two values
+        top2 = results[:2]
+        self._plot_sweep_results(top2)
         return top5[0][1]
 
     def _plot_sweep_results(self, top5):
@@ -453,6 +455,10 @@ class Modelling:
 
         # Model values
         data = training_data[0]
+        # # PAckageDelivered
+        # model = HGT.HGT(hidden_channels=64, num_layers=3, num_heads=4,
+        #                 out_channels=1, data=data, viewpoint=viewpoint_object)
+        # PayOrder
         model = HGT.HGT(hidden_channels=64, num_layers=3, num_heads=2,
                         out_channels=1, data=data, viewpoint=viewpoint_object)
         device = torch.device("cpu")
@@ -519,7 +525,7 @@ class Modelling:
         # Save best model + architecture config sidecar
         torch.save(model.state_dict(), self.model_path)
         import json
-        arch_cfg = {"hidden_channels": 64, "num_layers": 3, "num_heads": 4}
+        arch_cfg = {"hidden_channels": 64, "num_layers": 3, "num_heads": 2}
         with open(self.model_path.replace(".pth", "_arch.json"), "w") as f:
             json.dump(arch_cfg, f)
 
@@ -607,6 +613,328 @@ class Modelling:
         print("\n=== Training GAT Baseline ===")
         model = REG_GAT.REG_GAT(in_channels=self.hom_in_channels, hidden_channels=64, num_layers=3)
         self._hom_reg_train_loop(model, "GAT", self.train_data, self.val_data, self.test_data)
+
+    # ------------------------------------------------------------------
+    # PGExplainer for heterogeneous regression (PyG-native)
+    # ------------------------------------------------------------------
+
+    def train_pg_explainer(self, n_epochs=20, lr=0.003, edge_size=0.0005, edge_ent=0.1, save_path=None):
+        """Train PyG's PGExplainer on the heterogeneous regression model.
+
+        PGExplainer learns a small MLP that maps GNN node embeddings to
+        per-edge soft importance scores. After training it can explain any
+        graph in a single forward pass (much faster than LOO at inference time).
+
+        The trained explainer is saved to
+        ``{model_path}/Hetero/{kpi}_pgexplainer.pt``.
+        """
+        import json
+        import random
+        import torch.nn.functional as F
+        from torch_geometric.explain import Explainer, ModelConfig
+        from torch_geometric.explain.algorithm import PGExplainer
+        from torch_geometric.utils import get_embeddings_hetero
+        from model_classes.pg_explainer_utils import SeedNodeWrapper
+
+        # Load the trained HGT model
+        arch_path = self.model_path.replace(".pth", "_arch.json")
+        arch = {"hidden_channels": 64, "num_layers": 3, "num_heads": 4}
+        if os.path.exists(arch_path):
+            with open(arch_path) as f:
+                arch = json.load(f)
+        model = HGT.HGT(
+            hidden_channels=arch["hidden_channels"],
+            out_channels=1,
+            num_layers=arch["num_layers"],
+            num_heads=arch["num_heads"],
+            data=self.train_data[0],
+            viewpoint=self.viewpoint_object,
+        ).to(self.device)
+        model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        model.eval()
+
+        # Wrap so PGExplainer sees a single scalar output per graph
+        seed_model = SeedNodeWrapper(model).to(self.device)
+
+        # Warm up lazy layers with one forward pass
+        sample = self.train_data[0]
+        with torch.no_grad():
+            seed_model(sample.x_dict, sample.edge_index_dict)
+
+        pg_algo = PGExplainer(epochs=n_epochs, lr=lr)
+        pg_algo.coeffs['edge_size'] = edge_size
+        pg_algo.coeffs['edge_ent'] = edge_ent
+        explainer = Explainer(
+            model=seed_model,
+            algorithm=pg_algo,
+            explanation_type='phenomenon',
+            edge_mask_type='object',
+            model_config=ModelConfig(mode='regression', task_level='graph'),
+        )
+
+        sample_size = min(len(self.train_data), 200)
+        print(f"\n=== Training PGExplainer ({n_epochs} epochs, {sample_size} graphs/epoch) ===")
+        for epoch in range(n_epochs):
+            epoch_losses = []
+            graphs = random.sample(self.train_data, sample_size)
+            for graph in graphs:
+                vp_mask = graph[self.viewpoint_object].mask.squeeze(-1).bool()
+                if not vp_mask.any():
+                    continue
+
+                # FIX 1: skip graphs where the model produces NaN (empty edge types
+                # can cause NaN attention in HGTConv, which propagates to the MLP).
+                with torch.no_grad():
+                    target = seed_model(graph.x_dict, graph.edge_index_dict)
+                if not torch.isfinite(target).all():
+                    continue
+
+                # Capture last-layer node embeddings via forward hooks on HGTConv.
+                raw_embs = get_embeddings_hetero(
+                    seed_model,
+                    pg_algo.SUPPORTED_HETERO_MODELS,
+                    graph.x_dict,
+                    graph.edge_index_dict,
+                )
+                last_emb = {nt: embs[-1] for nt, embs in raw_embs.items() if embs}
+                if not last_emb:
+                    continue
+
+                # FIX 2: custom training step — PyG's set_hetero_masks is a no-op for
+                # HGTConv (it only targets to_hetero() ModuleDict models). We apply
+                # masks by aggregating soft edge scores to node-level scales and
+                # multiplying the input features, keeping the whole path differentiable.
+                pg_algo.optimizer.zero_grad()
+                temperature = pg_algo._get_temperature(epoch)
+
+                # Generate per-edge mask logits via the PGExplainer MLP.
+                mask_logits = {}
+                for etype, ei in graph.edge_index_dict.items():
+                    src, _, dst = etype
+                    if src not in last_emb or dst not in last_emb:
+                        continue
+                    edge_emb = torch.cat(
+                        [last_emb[src][ei[0]], last_emb[dst][ei[1]]], dim=-1
+                    )
+                    logits = pg_algo.mlp(edge_emb).view(-1)
+                    mask_logits[etype] = pg_algo._concrete_sample(logits, temperature)
+
+                if not mask_logits:
+                    continue
+
+                # Aggregate soft sigmoid mask values to a per-node mean scale.
+                node_scale = {}
+                for etype, logits in mask_logits.items():
+                    src, _, dst = etype
+                    ei = graph.edge_index_dict[etype]
+                    soft = logits.sigmoid()
+                    n_src = graph[src].x.size(0)
+                    n_dst = graph[dst].x.size(0)
+                    ones = torch.ones_like(soft)
+                    src_agg = (
+                        torch.zeros(n_src, device=self.device).scatter_add_(0, ei[0], soft)
+                        / torch.zeros(n_src, device=self.device).scatter_add_(0, ei[0], ones).clamp(min=1)
+                    )
+                    dst_agg = (
+                        torch.zeros(n_dst, device=self.device).scatter_add_(0, ei[1], soft)
+                        / torch.zeros(n_dst, device=self.device).scatter_add_(0, ei[1], ones).clamp(min=1)
+                    )
+                    node_scale[src] = node_scale.get(src, torch.zeros(n_src, device=self.device)) + src_agg
+                    node_scale[dst] = node_scale.get(dst, torch.zeros(n_dst, device=self.device)) + dst_agg
+
+                # Normalise per-node scale to [0, 1] and multiply input features.
+                masked_x_dict = {}
+                for nt in graph.node_types:
+                    x = graph[nt].x
+                    if nt in node_scale and node_scale[nt].numel() > 0:
+                        max_val = node_scale[nt].max().clamp(min=1e-8)
+                        scale = (node_scale[nt] / max_val).unsqueeze(-1)
+                        masked_x_dict[nt] = x * scale
+                    else:
+                        masked_x_dict[nt] = x
+
+                # Masked forward pass (differentiable via the scaled x_dict).
+                y_hat = seed_model(masked_x_dict, graph.edge_index_dict)
+                if not torch.isfinite(y_hat).all():
+                    continue
+
+                # Fidelity: masked prediction should match original.
+                fid_loss = F.mse_loss(y_hat, target.detach())
+
+                # Edge regularisation: size (sparsity) + entropy (binariness).
+                reg_loss = torch.tensor(0.0, device=self.device)
+                for logits in mask_logits.values():
+                    m = logits.sigmoid()
+                    reg_loss = reg_loss + m.sum() * pg_algo.coeffs['edge_size']
+                    mc = 0.99 * m + 0.005
+                    entropy = -(mc * mc.log() + (1 - mc) * (1 - mc).log())
+                    reg_loss = reg_loss + entropy.mean() * pg_algo.coeffs['edge_ent']
+
+                loss = fid_loss + reg_loss
+                if not torch.isfinite(loss):
+                    continue
+
+                loss.backward()
+                pg_algo.optimizer.step()
+                epoch_losses.append(loss.item())
+
+            if (epoch + 1) % 5 == 0 or epoch == 0:
+                mean_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else float('nan')
+                print(f"  Epoch {epoch + 1:3d}/{n_epochs} | Loss: {mean_loss:.4f} ({len(epoch_losses)} valid graphs)")
+
+        # Mark as fully trained so PGExplainer.forward() doesn't raise on inference.
+        pg_algo._curr_epoch = n_epochs - 1
+
+        # Save the trained explainer algorithm (MLP weights)
+        if save_path is None:
+            kpi = f"TimeFrom_{self.viewpoint_object}_to_{self.path_dict['kpi_event']}"
+            save_path = f"{self.path_dict['model_path']}/Hetero/{kpi}_pgexplainer.pt"
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        torch.save(pg_algo.state_dict(), save_path)
+        print(f"PGExplainer saved to {save_path}")
+        return explainer
+
+    def pg_explain_trace(self, order_id, top_k=5, save_dir=None):
+        """Generate a PGExplainer-based explanation for one order trace.
+
+        Loads the trained PGExplainer from disk, finds the last-event snapshot
+        for ``order_id`` in the test set, generates soft edge masks, then feeds
+        them into the existing evaluation and visualization pipeline.
+
+        Returns a dict with keys: node_importances, edge_importances, metrics,
+        save_dir.
+        """
+        import json
+        from torch_geometric.explain import Explainer, ModelConfig
+        from torch_geometric.explain.algorithm import PGExplainer
+        from model_classes.pg_explainer_utils import SeedNodeWrapper, hetero_explanation_to_importances
+
+        # --- Load model ---
+        arch_path = self.model_path.replace(".pth", "_arch.json")
+        arch = {"hidden_channels": 64, "num_layers": 3, "num_heads": 4}
+        if os.path.exists(arch_path):
+            with open(arch_path) as f:
+                arch = json.load(f)
+        model = HGT.HGT(
+            hidden_channels=arch["hidden_channels"],
+            out_channels=1,
+            num_layers=arch["num_layers"],
+            num_heads=arch["num_heads"],
+            data=self.train_data[0],
+            viewpoint=self.viewpoint_object,
+        ).to(self.device)
+        model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        model.eval()
+
+        seed_model = SeedNodeWrapper(model).to(self.device)
+        with torch.no_grad():
+            seed_model(self.train_data[0].x_dict, self.train_data[0].edge_index_dict)
+
+        # --- Load trained explainer ---
+        kpi = f"TimeFrom_{self.viewpoint_object}_to_{self.path_dict['kpi_event']}"
+        explainer_path = f"{self.path_dict['model_path']}/Hetero/{kpi}_pgexplainer.pt"
+        if not os.path.exists(explainer_path):
+            raise FileNotFoundError(
+                f"Trained PGExplainer not found at {explainer_path}. "
+                "Call train_pg_explainer() first."
+            )
+
+        pg_algo = PGExplainer(epochs=1, lr=0.003)
+        # connect() must be called (via Explainer.__init__) before any pg_algo method
+        # that accesses self.model_config (e.g. train, forward).
+        explainer = Explainer(
+            model=seed_model,
+            algorithm=pg_algo,
+            explanation_type='phenomenon',
+            edge_mask_type='object',
+            model_config=ModelConfig(mode='regression', task_level='graph'),
+        )
+        # Initialize the lazy Linear(-1, 64) in pg_algo.mlp so load_state_dict
+        # can match tensor shapes (input dim = 2 * hidden_channels).
+        with torch.no_grad():
+            dummy_emb = torch.zeros(1, 2 * arch['hidden_channels'], device=self.device)
+            pg_algo.mlp(dummy_emb)
+        pg_algo.load_state_dict(torch.load(explainer_path, weights_only=False))
+        pg_algo._curr_epoch = 0  # epochs=1 → epochs-1=0; satisfies "fully trained" check
+
+        # --- Find last-event graph for this order ---
+        explain_subgraph = None
+        for g in self.test_data:
+            if (g[self.viewpoint_object].last_event.item()
+                    and g[self.viewpoint_object].id.item() == order_id):
+                explain_subgraph = g
+                break
+        if explain_subgraph is None:
+            raise ValueError(f"No last-event graph found for order_id={order_id} in test set.")
+
+        # --- Generate explanation ---
+        with torch.no_grad():
+            target = explain_subgraph[self.viewpoint_object].y[0:1]
+        explanation = explainer(
+            explain_subgraph.x_dict,
+            explain_subgraph.edge_index_dict,
+            target=target,
+        )
+
+        # --- Convert to existing pipeline format ---
+        node_importances, edge_importances = hetero_explanation_to_importances(
+            explanation, explain_subgraph, threshold=0.5
+        )
+
+        # --- Save directory ---
+        if save_dir is None:
+            save_dir = f"{self.path_dict['explainer_path']}order_{order_id}_pg/"
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Baseline prediction (for summary)
+        baseline_value = self._predict_value_for_graph(explain_subgraph, 0)
+        baseline_h = (baseline_value - self.target_mean.item()) / 3600 + self.target_mean.item() / 3600
+        pred_h = baseline_value / 3600
+
+        print(f"\n=== PGExplainer: Order #{order_id} (predicted: {pred_h:.1f}h remaining) ===")
+        print(f"Top {top_k} edges by PGExplainer importance:")
+        for rank, (et, e_idx, score, large) in enumerate(edge_importances[:top_k], 1):
+            src_t, _, dst_t = et
+            ei = explain_subgraph[et].edge_index
+            src_id = ei[0, e_idx].item()
+            dst_id = ei[1, e_idx].item()
+            flag = "  [HIGH]" if large else ""
+            print(f"  {rank}. {src_t}[{src_id}]→{dst_t}[{dst_id}]  score={score:.3f}{flag}")
+
+        print(f"\nTop {top_k} nodes by aggregated edge importance:")
+        for rank, (nt, nid, score, large) in enumerate(node_importances[:top_k], 1):
+            flag = "  [HIGH]" if large else ""
+            print(f"  {rank}. {nt}[{nid}]  score={score:.3f}{flag}")
+
+        # --- Explanation quality metrics (reuse existing method) ---
+        metrics = self.evaluate_explanation_quality(
+            explain_subgraph, 0, node_importances, edge_importances,
+            node_top_k=top_k, edge_top_k=top_k * 3, verbose=True,
+        )
+
+        # --- Visualizations (reuse existing pipeline) ---
+        self.plot_node_type_summary(
+            node_importances,
+            save_path=os.path.join(save_dir, "pg_node_type_summary.png"),
+        )
+
+        explanation_G = self.reg_explanation_subgraph(
+            explain_subgraph, 0, node_importances, edge_importances, node_top_k=top_k
+        )
+        self.reg_visualize_explanation_subgraph(
+            explanation_G,
+            save_path=os.path.join(save_dir, "pg_explanation_subgraph.png"),
+        )
+
+        results = {
+            "order_id": order_id,
+            "node_importances": node_importances,
+            "edge_importances": edge_importances,
+            "metrics": metrics,
+            "save_dir": save_dir,
+        }
+        print(f"\nPGExplainer artifacts saved to {save_dir}")
+        return results
 
     def compare_models(self, save_path=None):
         """Load all three trained models, evaluate on the test set, and save a comparison chart."""
