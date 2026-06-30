@@ -85,7 +85,12 @@ class ProcessGeneration:
                 timestamp = [(t[0], ev_type, t[-1]) for t in timestamp]
                 timestamp = pd.DataFrame(timestamp, columns=['ev_id', 'ev_type', 'timestamp'])
                 ev_tables[ev_type] = timestamp
-        return o2o_table, e20_table, ev_tables
+        # Flat ev_id → timestamp dict for O(1) lookup (replaces per-event DataFrame scan)
+        ev_ts_dict = {}
+        for tbl in ev_tables.values():
+            ev_ts_dict.update(tbl.set_index('ev_id')['timestamp'].to_dict())
+
+        return o2o_table, e20_table, ev_tables, ev_ts_dict
 
     def related_nodes(self):
         print("Obtaining all related nodes and arcs")
@@ -99,7 +104,7 @@ class ProcessGeneration:
                '''
         self.cursor.execute(qry)
         vwpnt_objects = self.cursor.fetchall()
-        o2o_table, e20_table, ev_tables = self.get_data_dictionaries()
+        o2o_table, e20_table, ev_tables, ev_ts_dict = self.get_data_dictionaries()
 
         # For each viewpoint object obtain a list of related objects
         rltd_nodes = {}
@@ -137,12 +142,11 @@ class ProcessGeneration:
             rltd_events = set()
             events = e20_table[(e20_table['ob_id'].isin(ob_list))]
 
-            # Add a timestamp to each event
+            # Add a timestamp to each event (O(1) dict lookup instead of DataFrame scan per event)
             for i, row in events.iterrows():
                 ev_id = row['ev_id']
                 ev_type = row['ev_type']
-                table = ev_tables[ev_type]
-                timestamp = table[table['ev_id'] == ev_id]['timestamp'].values[0]
+                timestamp = ev_ts_dict[ev_id]
                 event = (ev_id, ev_type, timestamp)
                 rltd_events.add(event)
 
@@ -158,14 +162,14 @@ class ProcessGeneration:
             rltd_objects = set()
             events_by_objects = {}
             ev_ids = [ev[1] for ev in rltd_events]
+            ev_id_to_idx = {ev[1]: ev[0] for ev in rltd_events}  # O(1) lookup replaces list scan
             ev_obs = e20_table[e20_table['ev_id'].isin(ev_ids)]
 
             for i, row in ev_obs.iterrows():
                 ob_id = row['ob_id']
                 ob_type = row['ob_type']
                 ev_id = row['ev_id']
-                ev_idx = [e[0] for e in rltd_events if e[1] == ev_id]
-                ev_idx = int(ev_idx[0])
+                ev_idx = ev_id_to_idx[ev_id]
 
                 # Checks if the object should be added to the related object list or not
                 ob = (ob_id, ob_type)
@@ -314,16 +318,6 @@ class ProcessGeneration:
                 kpi['ob_id'] = ob_id
                 kpi['ob_idx'] = ob_idx
                 all_kpis = pd.concat([all_kpis, kpi])
-
-        # Standardize the KPI values for the dataset if we're performing a regression
-        if self.path_dict['kpi_type'] == 0:
-            ys = all_kpis['kpi_val'].to_numpy()
-            mean, std = ys.mean(), ys.std()
-            all_kpis['kpi_val'] = all_kpis['kpi_val'].apply(lambda x: (x-mean)/std)
-
-            # To do, add the value to the result file
-            print(f"For {self.path_dict['kpi_viewpoint']}_to_{self.path_dict['kpi_event']}:")
-            print(f"Mean (hours): {round(mean/3600)}, STD (hours): {round(std/3600)}")
 
         # Save the kpis and the event log
         all_kpis.to_csv(f"{self.path_dict['graph_output_path']}all_kpis.csv", index=False)
