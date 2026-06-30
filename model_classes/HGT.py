@@ -12,7 +12,8 @@ class HGT(torch.nn.Module):
 
         self.convs = torch.nn.ModuleList()
         for _ in range(num_layers):
-            conv = HGTConv(hidden_channels, hidden_channels, data.metadata(), num_heads)
+            conv = HGTConv(hidden_channels, hidden_channels, data.metadata(),
+                           num_heads)
             self.convs.append(conv)
 
         self.lin = Linear(hidden_channels, out_channels)
@@ -24,8 +25,6 @@ class HGT(torch.nn.Module):
         }
 
         for conv in self.convs:
-            new_x_dict = conv(x_dict, edge_index_dict)
-            # Residual connection: add previous embeddings before activation
-            x_dict = {nt: (new_x_dict[nt] + x_dict[nt]).relu_() for nt in new_x_dict}
+            x_dict = conv(x_dict, edge_index_dict)
 
         return self.lin(x_dict[self.viewpoint])
