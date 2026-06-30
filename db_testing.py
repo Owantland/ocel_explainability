@@ -16,12 +16,12 @@ database = 'order_management' #'order_management'
 # p = pg.ProcessGeneration(database, cant)
 # nodes = p.related_nodes()
 # p.get_ev_log(nodes)
-
-## # Generate the OCEL file with relevant attributes
-## g = og.Generator(database, cant)
-## g.generate_ocel(nodes)
-
-# # # # Apply the train test split to the set of process executions to obtain the relevant sets for learning set generation
+#
+# # ## # Generate the OCEL file with relevant attributes
+# # ## g = og.Generator(database, cant)
+# # ## g.generate_ocel(nodes)
+#
+# # # Apply the train test split to the set of process executions to obtain the relevant sets for learning set generation
 # ttb = tb.TrainTestBuilder(database, cant)
 # train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps = ttb.timestamps_generator()
 #
@@ -30,11 +30,12 @@ database = 'order_management' #'order_management'
 #                                val_sampled_timestamps, test_sampled_timestamps)
 # hgg.trace_kpi()
 
-# Model training and evaluation
+# # # Model training and evaluation
 m = t.Modelling(database, cant)
-m.Modelling()
-# m.SaveBestResult()
+# m.sweep_hyperparams()
+# m.Modelling()
+m.train_pg_explainer(n_epochs=20, edge_size=0.0005, edge_ent=0.1)
+m.pg_explain_trace(order_id=1766)
 
-# # Explainer
-# e = exp.ModelExplainer(database, cant, std, mean)
-# e.explain_model()
+# m.Baseline() # Train homogeneous models and print comparison table
+# m.cf_explanation()

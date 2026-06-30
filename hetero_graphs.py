@@ -85,7 +85,7 @@ class HeteroGraphsGenerator:
             end_time = self.ev_log[self.ev_log['vwpnt_id'] == process]['timestamp'].values[-1]
             active_df = self.ocel_df[self.ocel_df['vwpnt_id'] == process]
             active_df = active_df[active_df['timestamp'] >= start_time]
-            active_df = active_df[active_df['timestamp'] <= end_time]
+            active_df = active_df[active_df['timestamp'] < end_time]
             edges = self.edges[self.edges['vwpnt_id'] == process]
             edges = edges[edges['timestamp'] <= end_time]
             y_df = self.all_kpis[self.all_kpis['viewpoint_id'] == process]
@@ -96,6 +96,7 @@ class HeteroGraphsGenerator:
             active_graph = {}
             cnt = 0
             for i, row in active_df.iterrows():
+                last_event = True if cnt == len(active_df) - 1 else False
                 # Add Events
                 ev_type = ast.literal_eval(row['ev_type'])
                 ev_id = row['ev_id']
@@ -150,9 +151,13 @@ class HeteroGraphsGenerator:
                 if self.path_dict['kpi_type'] == 0:
                     data[kpi_ob].y = torch.tensor(y_val, dtype=torch.float32).reshape(-1, 1)
                     data[kpi_ob].mask = torch.tensor(True, dtype=torch.bool).reshape(-1, 1)
+
                 else:
                     data[kpi_ob].y = torch.tensor([y_val], dtype=torch.long)
                     data[kpi_ob].mask = torch.tensor([True], dtype=torch.bool)
+
+                data[kpi_ob].id = torch.tensor(process, dtype=torch.float32).reshape(-1, 1)
+                data[kpi_ob].last_event = torch.tensor(last_event, dtype=torch.bool).reshape(-1, 1)
 
                 # Add return indexes to all edges
                 data = T.ToUndirected()(data)

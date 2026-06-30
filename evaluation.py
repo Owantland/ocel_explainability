@@ -1,6 +1,6 @@
 import torch
 from torch_geometric.loader import DataLoader
-from model_class import OrderPredictionHeteroGNN_2
+from explainer_tests.model_class import OrderPredictionHeteroGNN_2
 import pandas as pd
 import warnings
 import json

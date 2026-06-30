@@ -7,8 +7,8 @@ order_management:
   viewpoint: "Orders"
   added_depth: 0
   unique_ids: ['Orders', 'Items', 'Packages']
-  kpi_type: 1
-  kpi_event: "CreatePackage" #"CreatePackage" "PackageDelivered" "PayOrder"
+  kpi_type: 0
+  kpi_event: "PayOrder" #"CreatePackage" "PackageDelivered" "PayOrder"
   kpi_viewpoint: "Orders"
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:

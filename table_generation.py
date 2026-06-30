@@ -444,7 +444,6 @@ class GenerateTables:
                                     tmp_graph[edge_name][1].append(tg_index)
                 all_graphs.append(tmp_graph)
 
-            all_kpis.extend(self.get_kpis(ev_df, ev_by_ob, vwpnt_cnt))
 
         # Export the generated files for future use
         with open(f"{self.path_dict['graph_output_path']}tensor_dict.json", "w") as f:

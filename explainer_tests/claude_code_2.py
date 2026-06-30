@@ -1,4 +1,4 @@
-# Claude explanation Features
+# Claude Explanation with Subgraph
 
 """
 Heterogeneous Node Classification on DBLP with PyTorch Geometric (PyG)
@@ -217,7 +217,9 @@ def get_single_node_subgraph(author_idx, num_neighbors=[10, 10]):
 def _predict_proba(batch):
     batch = batch.to(device)
     out = model(batch.x_dict, batch.edge_index_dict)
-    seed_out = out[: batch["author"].batch_size]
+    # Correct way is to instantiate the loader and then obtain the length in case
+    # we want to use a larger length example
+    seed_out = out[: 1]
     return F.softmax(seed_out, dim=-1)[0]
 
 
@@ -271,7 +273,6 @@ def counterfactual_explain_author(author_idx, top_k=5, num_neighbors=[10, 10]):
     support is less mature than its homogeneous-graph support.
     """
     batch = get_single_node_subgraph(author_idx, num_neighbors).to(device)
-
     baseline_proba = _predict_proba(batch)
     predicted_class = baseline_proba.argmax().item()
     baseline_confidence = baseline_proba[predicted_class].item()
@@ -369,35 +370,141 @@ def counterfactual_explain_author(author_idx, top_k=5, num_neighbors=[10, 10]):
         print("      model's decision here is robust to any one removal (it relies on")
         print("      combined, redundant evidence rather than one critical piece).")
 
-    return node_importances, edge_importances, seed_feature_importances, top_node_feature_importances
+    return batch, node_importances, edge_importances, seed_feature_importances, top_node_feature_importances
+
+
+def build_explanation_subgraph(batch, node_importances, edge_importances,
+                                node_top_k=10, edge_top_k=15):
+    """
+    Turn the counterfactual node/edge importance scores into an actual
+    NetworkX subgraph -- the "explanation subgraph": the seed author plus
+    only the most important surrounding nodes and edges, rather than the
+    entire (much larger) sampled neighborhood. Conceptually the same idea
+    as GNNExplainer's `get_explanation_subgraph()`, just built from our
+    leave-one-out scores instead of learned soft masks.
+    """
+    import networkx as nx
+
+    G = nx.MultiDiGraph()
+
+    # Always include the seed author node.
+    G.add_node(("author", 0), node_type="author", importance=1.0, is_seed=True, flips=False)
+
+    # Keep only the top-k most important neighbor NODES (by confidence drop).
+    top_nodes = node_importances[:node_top_k]
+    for nt, i, drop, flips in top_nodes:
+        G.add_node((nt, i), node_type=nt, importance=drop, is_seed=False, flips=flips)
+
+    # Keep only the top-k most important EDGES, adding their endpoints if
+    # not already present -- an edge can matter even if one endpoint
+    # individually didn't make the node top-k cut.
+    top_edges = edge_importances[:edge_top_k]
+    for edge_type, e, drop, flips in top_edges:
+        src_type, _, dst_type = edge_type
+        edge_index = batch[edge_type].edge_index
+        src, dst = edge_index[:, e].tolist()
+        src_key, dst_key = (src_type, src), (dst_type, dst)
+
+        for key, ntype in [(src_key, src_type), (dst_key, dst_type)]:
+            if key not in G.nodes:
+                is_seed = (ntype == "author" and key[1] == 0)
+                G.add_node(key, node_type=ntype, importance=0.0, is_seed=is_seed, flips=False)
+
+        G.add_edge(src_key, dst_key, edge_type=edge_type[1], importance=drop, flips=flips)
+
+    return G
+
+
+def visualize_explanation_subgraph(G, save_path="explanation_subgraph.png"):
+    """Draw the explanation subgraph: node color = type, node size =
+    importance, red edges/outlines = "removing this flips the prediction"."""
+    import matplotlib.pyplot as plt
+    import networkx as nx
+
+    type_colors = {"author": "#4C72B0", "paper": "#DD8452", "term": "#55A868", "conference": "#C44E52"}
+
+    pos = nx.spring_layout(G, seed=42, k=0.9)
+
+    node_colors, node_sizes, edge_colors_outline = [], [], []
+    for node, attrs in G.nodes(data=True):
+        node_colors.append(type_colors.get(attrs["node_type"], "gray"))
+        base_size = 900 if attrs.get("is_seed") else 250
+        node_sizes.append(base_size + max(attrs.get("importance", 0), 0) * 2500)
+        edge_colors_outline.append("red" if attrs.get("flips") else "black")
+
+    edge_colors, edge_widths = [], []
+    for _, _, attrs in G.edges(data=True):
+        edge_colors.append("red" if attrs.get("flips") else "gray")
+        edge_widths.append(1 + max(attrs.get("importance", 0), 0) * 12)
+
+    plt.figure(figsize=(10, 8))
+    nx.draw_networkx_nodes(
+        G, pos, node_color=node_colors, node_size=node_sizes,
+        edgecolors=edge_colors_outline, linewidths=1.5, alpha=0.9,
+    )
+    nx.draw_networkx_edges(
+        G, pos, edge_color=edge_colors, width=edge_widths,
+        arrows=True, connectionstyle="arc3,rad=0.1", alpha=0.7,
+    )
+    labels = {node: f"{node[0]}[{node[1]}]" for node in G.nodes}
+    nx.draw_networkx_labels(G, pos, labels=labels, font_size=7)
+
+    legend_handles = [
+        plt.Line2D([0], [0], marker="o", color="w", label=nt,
+                   markerfacecolor=color, markersize=10)
+        for nt, color in type_colors.items()
+    ]
+    legend_handles.append(plt.Line2D([0], [0], color="red", lw=2, label="flips prediction"))
+    plt.legend(handles=legend_handles, loc="best", fontsize=8)
+
+    plt.title("Counterfactual Explanation Subgraph")
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"Saved explanation subgraph visualization to {save_path}")
 
 
 
 if __name__ == "__main__":
-    n_epochs = 50
-    best_val_acc = 0.0
-
-    for epoch in range(1, n_epochs + 1):
-        train_loss, train_acc = train_one_epoch()
-        val_acc = evaluate(val_loader)
-
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-
-        if epoch % 5 == 0 or epoch == 1:
-            print(
-                f"Epoch {epoch:02d} | Train Loss: {train_loss:.4f} | "
-                f"Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}"
-            )
-
-    test_acc = evaluate(test_loader)
-    print(f"\nFinal Test Accuracy: {test_acc:.4f} (best Val Accuracy: {best_val_acc:.4f})")
+#     n_epochs = 50
+#     best_val_acc = 0.0
+#
+#     for epoch in range(1, n_epochs + 1):
+#         train_loss, train_acc = train_one_epoch()
+#         val_acc = evaluate(val_loader)
+#
+#         if val_acc > best_val_acc:
+#             best_val_acc = val_acc
+#
+#         if epoch % 5 == 0 or epoch == 1:
+#             print(
+#                 f"Epoch {epoch:02d} | Train Loss: {train_loss:.4f} | "
+#                 f"Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}"
+#             )
+#
+#     test_acc = evaluate(test_loader)
+#     print(f"\nFinal Test Accuracy: {test_acc:.4f} (best Val Accuracy: {best_val_acc:.4f})")
+#     torch.save(model.state_dict(), f"dblap_test.pth")
 
     # -----------------------------------------------------------------------
     # 5. Counterfactual evaluation: which nodes/edges matter most, and is
     #    the model's decision fragile (a single removal flips it) or robust?
     # -----------------------------------------------------------------------
-    example_author_idx = data["author"].test_mask.nonzero(as_tuple=True)[0][0].item()
-    node_imp, edge_imp, seed_feat_imp, top_node_feat_imp = counterfactual_explain_author(
-        example_author_idx, top_k=5
+    # example_author_idx = data["author"].test_mask.nonzero(as_tuple=True)[0][100].item()
+
+    model.load_state_dict(torch.load('dblap_test.pth', weights_only=False))
+
+    example_author_idx = 111
+
+    explained_batch, node_imp, edge_imp, seed_feat_imp, top_node_feat_imp = (
+        counterfactual_explain_author(example_author_idx, top_k=5)
     )
+    #
+    # # -----------------------------------------------------------------------
+    # # 6. Draw the explanation subgraph from the counterfactual scores above
+    # # -----------------------------------------------------------------------
+    # explanation_graph = build_explanation_subgraph(
+    #     explained_batch, node_imp, edge_imp, node_top_k=10, edge_top_k=15
+    # )
+    # visualize_explanation_subgraph(explanation_graph, save_path="explanation_subgraph.png")

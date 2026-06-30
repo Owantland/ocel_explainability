@@ -23,11 +23,14 @@ class Generator:
         self.cursor = conn.cursor()
         self.tabl_nms = self.table_names()
         self.o2o_relations = self.get_o2o_relations()
-        self.o2o_df =  self.get_o2o_df()
+        self.o2o_df = self.get_o2o_df()
+        self.o2o_lookup = self._build_o2o_lookup()  # pre-indexed for O(1) edge resolution
         self.encodings = self.get_encodings()
+        self.ev_type_encodings = self._build_ev_encodings()  # replaces per-event SQL queries
 
         # Creates dictionary of selected attributes for chosen object types
         self.ob_attributes = self.get_attributes()
+        self.time_attr_cache = self._preload_time_attributes()  # pre-fetched time-sensitive attrs
 
         # Dictionary of object sizes for future tensor creation
         self.tensor_dict = {}
@@ -70,6 +73,58 @@ class Generator:
         o2o_df = pd.DataFrame(o2o_df, columns=['src_id', 'trgt_id', 'trgt_type'])
         return o2o_df
 
+    def _build_o2o_lookup(self):
+        """Pre-index o2o_df as {src_id: {trgt_type: [trgt_ids]}} for O(1) edge resolution."""
+        lookup = defaultdict(lambda: defaultdict(list))
+        for _, row in self.o2o_df.iterrows():
+            lookup[row['src_id']][row['trgt_type']].append(row['trgt_id'])
+        return lookup
+
+    def _build_ev_encodings(self):
+        """Pre-compute one-hot encodings for all event types — replaces per-event SQL query."""
+        self.cursor.execute("SELECT DISTINCT OCEL_TYPE_MAP FROM EVENT_MAP_TYPE ORDER BY 1")
+        types = [row[0] for row in self.cursor.fetchall()]
+        result = {}
+        for i, t in enumerate(types):
+            vec = [0] * len(types)
+            vec[i] = 1
+            result[t] = vec
+        return result
+
+    def _preload_time_attributes(self):
+        """Pre-fetch all time-sensitive attribute tables so per-event SQL queries can be avoided."""
+        cache = {}
+        for att_type, attr_cols in self.path_dict.get('time_attributes', {}).items():
+            fixed_attr = attr_cols[0]
+            time_attr = attr_cols[1]
+
+            table = f'object_{att_type}'
+            cols = self.col_names(table)
+            if not cols:
+                table = f'event_{att_type}'
+                cols = self.col_names(table)
+
+            id_col = cols[0]
+            ts_col = cols[1]
+
+            self.cursor.execute(f"SELECT {id_col}, {ts_col}, {fixed_attr}, {time_attr} FROM {table}")
+            df = pd.DataFrame(self.cursor.fetchall(), columns=['ob_id', 'ts', 'fixed_val', 'time_val'])
+            df['ts'] = pd.to_datetime(df['ts'])
+
+            # Resolve COALESCE: fill nulls in fixed_val from any non-null row per ob_id
+            fixed_per_ob = (
+                df.dropna(subset=['fixed_val'])
+                .groupby('ob_id')['fixed_val']
+                .first()
+                .to_dict()
+            )
+            df['fixed_val'] = df['ob_id'].map(fixed_per_ob)
+
+            df = df.sort_values(['ob_id', 'ts']).reset_index(drop=True)
+            # Group by ob_id for fast sub-selection
+            cache[att_type] = df.groupby('ob_id', sort=False)
+        return cache
+
     # Generate a local dictionary of the desired attributes for the chosen object types
     def get_attributes(self):
         ob_attributes = {}
@@ -98,7 +153,7 @@ class Generator:
             attrs = self.cursor.fetchall()
             cols = ['ob_id']
             cols.extend(self.path_dict['attributes'][att_type])
-            attrs = pd.DataFrame(attrs, columns=cols)
+            attrs = pd.DataFrame(attrs, columns=cols).set_index('ob_id')
             ob_attributes[att_type] = attrs
         return ob_attributes
 
@@ -262,6 +317,21 @@ class Generator:
             rltd_events = nodes[vwpnt_object]['related_events']
             ev_df = pd.DataFrame(rltd_events, columns=['index', 'ocel_id', 'type', 'timestamp'])
 
+            # Convert ev_by_ob to fast-access structures (avoids iterrows + linear scans per event)
+            ev_by_ob_records = ev_by_ob.to_dict('records')
+            ev_by_ob_index = {r['ob_id']: r for r in ev_by_ob_records}
+
+            # Pre-compute all consecutive event pairs across objects; sort by target for incremental growth
+            _all_pairs_set = set()
+            for r in ev_by_ob_records:
+                evs = sorted(r['events'])
+                for a, b in zip(evs, evs[1:]):
+                    _all_pairs_set.add((a, b))
+            _sorted_pairs = sorted(_all_pairs_set, key=lambda p: p[1])
+            _pair_ptr = 0
+            _active_src: list = []
+            _active_dst: list = []
+
             # Create a new row for every event in the process
             for i, row in ev_df.iterrows():
                 ocel_row = []
@@ -274,7 +344,7 @@ class Generator:
                 timestamp = row['timestamp']
                 objects_in_event = []
 
-                encode = self.get_ev_encoding(ev_type)
+                encode = self.ev_type_encodings[ev_type]
                 self.tensor_dict['Events'] = len(encode)
 
                 # Add values for the numpy lists used for filtering
@@ -296,7 +366,12 @@ class Generator:
                 edges.append(ev_id)
                 edges.append(timestamp)
                 edges.append(vwpnt_cnt)
-                edges.append(self.generate_adjacency_list_with_k(ev_by_ob, ev_idx))
+                # Incrementally extend the adjacency list — only append pairs whose target <= ev_idx
+                while _pair_ptr < len(_sorted_pairs) and _sorted_pairs[_pair_ptr][1] <= ev_idx:
+                    _active_src.append(_sorted_pairs[_pair_ptr][0])
+                    _active_dst.append(_sorted_pairs[_pair_ptr][1])
+                    _pair_ptr += 1
+                edges.append([list(_active_src), list(_active_dst)])
                 edges_cols.append('ev_id')
                 edges_cols.append('timestamp')
                 edges_cols.append('vwpnt_id')
@@ -309,47 +384,51 @@ class Generator:
 
                 ob_attrs = {}
                 edge_attrs = {}
-                for i, row in ev_by_ob.iterrows():
+                past_events_set = set(past_events)  # O(1) membership test
+                for row in ev_by_ob_records:
                     ob_id = row['ob_id']
                     evs_by_ob = row['events']
                     ob_type = row['ob_type']
                     ob_idx = row['index']
                     edge_type = f"{ob_type}_to_Events"
-                    ob_attrs[ob_type] = [] if ob_type not in ob_attrs.keys() else ob_attrs[ob_type]
-                    edge_attrs[edge_type] = [[], []] if edge_type not in edge_attrs.keys() else edge_attrs[edge_type]
+                    ob_attrs.setdefault(ob_type, [])
+                    edge_attrs.setdefault(edge_type, [[], []])
                     # Identify if the object needs to be added to the graph
+                    contained = False
                     for event_by_object in evs_by_ob:
-                        if event_by_object in past_events:
+                        if event_by_object in past_events_set:
                             contained = True
                             objects_in_event.append(ob_id)
                             ob_types.add(ob_type)
                             break
-                        else:
-                            contained = False
 
                     # Collect the relevant attributes and values for each event and add them to the row
-                    if ob_type in self.path_dict['attributes'].keys():
+                    if ob_type in self.path_dict['attributes']:
                         attr_df = self.ob_attributes[ob_type]
-                        attributes = list(attr_df[attr_df['ob_id'] == ob_id].values[0])
-                        self.tensor_dict[ob_type] = len(attributes) - 1
-                        attr_ob = attributes[0]
+                        attributes_vals = attr_df.loc[ob_id].tolist()  # O(1) indexed lookup
+                        self.tensor_dict[ob_type] = len(attributes_vals)
                         if contained:
-                            ob_attrs[ob_type].append([attr_ob, attributes[1:], ob_idx])
-                    elif ob_type in self.path_dict['time_attributes'].keys():
-                        attr = self.path_dict['time_attributes'][ob_type]
-                        self.tensor_dict[ob_type] = len(attr)
-                        time_attr = attr[1]
-                        fixed_attrs = attr[0]
-                        attributes = self.get_time_attributes(ob_id, ob_type, fixed_attrs, time_attr, timestamp)
-                        attr_ob = attributes[0]
+                            ob_attrs[ob_type].append([ob_id, attributes_vals, ob_idx])
+                    elif ob_type in self.path_dict['time_attributes']:
+                        self.tensor_dict[ob_type] = len(self.path_dict['time_attributes'][ob_type])
+                        # In-memory nearest-timestamp lookup instead of per-call SQL query
+                        grp = self.time_attr_cache[ob_type]
+                        try:
+                            sub = grp.get_group(ob_id).reset_index(drop=True)
+                            ts = pd.Timestamp(timestamp)
+                            pos = max(0, sub['ts'].searchsorted(ts, side='right') - 1)
+                            r = sub.iloc[pos]
+                            attributes = [ob_id, r['fixed_val'], r['time_val']]
+                        except KeyError:
+                            attributes = [ob_id, None, None]
                         if contained:
-                            ob_attrs[ob_type].append([attr_ob, attributes[1:], ob_idx])
+                            ob_attrs[ob_type].append([ob_id, attributes[1:], ob_idx])
                     else:
                         if ob_type in self.path_dict['encoding']:
-                            ob_id = [ob_id, self.encodings[ob_type][ob_id], ob_idx]
-                            self.tensor_dict[ob_type] = len(ob_id[1])
+                            enc = self.encodings[ob_type][ob_id]
+                            self.tensor_dict[ob_type] = len(enc)
                             if contained:
-                                ob_attrs[ob_type].append([ob_id[0], ob_id[1], ob_idx])
+                                ob_attrs[ob_type].append([ob_id, enc, ob_idx])
 
                 # Reorganize the index relative to how many items are active at the moment
                 rel_indx = {}
@@ -363,10 +442,11 @@ class Generator:
 
                 # Add the object to event edges
                 for ob_id in objects_in_event:
-                    evs_by_ob = list(ev_by_ob[ev_by_ob['ob_id'] == ob_id]['events'].values[0])
-                    ob_events = [ev for ev in evs_by_ob if ev in past_events]
+                    ob_row = ev_by_ob_index[ob_id]       # O(1) dict lookup
+                    evs_by_ob = ob_row['events']
+                    ob_events = [ev for ev in evs_by_ob if ev in past_events_set]
                     ob_idx = rel_indx[ob_id]
-                    ob_type = ev_by_ob[ev_by_ob['ob_id'] == ob_id]['ob_type'].values[0]
+                    ob_type = ob_row['ob_type']
                     edge_type = f"{ob_type}_to_Events"
                     self.tensor_dict[edge_type] = 1
 
@@ -386,15 +466,14 @@ class Generator:
                     edge_attrs[edge_name] = [[], []] if edge_name not in edge_attrs.keys() else edge_attrs[edge_name]
                     self.tensor_dict[edge_name] = 1
                     if len(sources) > 0 and len(targets) > 0:
+                        target_ids_active = set(targets['ocel_id'])
                         for i, row in sources.iterrows():
                             src_id = row['ocel_id']
                             src_index = rel_indx[src_id]
-                            trgt_ids = self.o2o_df[self.o2o_df['src_id'] == src_id]
-                            trgt_ids = trgt_ids[trgt_ids['trgt_type'] == ob_target]['trgt_id'].tolist()
+                            trgt_ids = self.o2o_lookup[src_id][ob_target]  # O(1) dict lookup
 
                             for trgt_id in trgt_ids:
-                                tg_info = targets[targets['ocel_id'] == trgt_id].values
-                                if len(tg_info) > 0:
+                                if trgt_id in target_ids_active:
                                     tg_index = rel_indx[trgt_id]
                                     edge_attrs[edge_name][0].append(src_index)
                                     edge_attrs[edge_name][1].append(tg_index)
