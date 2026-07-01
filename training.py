@@ -58,10 +58,13 @@ class Modelling:
             self.params = self._load_params() or _DEFAULTS[1]
             self.model = self._build_model(self.params)
 
-        # Node feature standardization (continuous attributes only — excludes one-hot encoded types)
+        # Node feature standardization — covers continuous attributes and Events
+        # (Events contains a mix of one-hot type flags and continuous temporal features;
+        # z-normalising all dims is valid and the model adapts via its linear projections)
         continuous_node_types = (
             list((self.path_dict.get('attributes') or {}).keys()) +
-            list((self.path_dict.get('time_attributes') or {}).keys())
+            list((self.path_dict.get('time_attributes') or {}).keys()) +
+            ['Events']
         )
         for node_type in continuous_node_types:
             x_train = [g[node_type].x for g in self.train_data if g[node_type].num_nodes > 0]
@@ -81,6 +84,21 @@ class Modelling:
             **{nt: names for nt, names in (self.path_dict.get('attributes') or {}).items()},
             **{nt: names for nt, names in (self.path_dict.get('time_attributes') or {}).items()},
         }
+
+        # Extend feature names for enriched node types based on actual graph feature counts
+        _temporal_names = ['elapsed_h', 'waiting_h', 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos']
+        _order_extra = ['n_items', 'total_weight', 'n_products']
+        if self.train_data and self.train_data[0]['Events'].num_nodes > 0:
+            n_ev = self.train_data[0]['Events'].x.shape[1]
+            n_types = max(0, n_ev - len(_temporal_names))
+            self.feature_names['Events'] = (
+                [f'type_{i}' for i in range(n_types)] + _temporal_names
+            )[:n_ev]
+        if self.train_data and self.train_data[0][self.viewpoint_object].num_nodes > 0:
+            vp = self.viewpoint_object
+            n_vp = self.train_data[0][vp].x.shape[1]
+            base_names = list((self.path_dict.get('attributes') or {}).get(vp, []))
+            self.feature_names[vp] = (base_names + _order_extra)[:n_vp]
 
         # Define save path for the models
         model_path = self.path_dict['model_path']

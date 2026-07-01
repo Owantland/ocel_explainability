@@ -14,22 +14,24 @@ class SupportFunctions:
     def get_paths(self):
         with open('files/config.yml', 'r') as file:
             db_configs = yaml.safe_load(file)
-        path_dict = {'ocel_path': db_configs[self.database]['ocel_path'],
-                     'graph_output_path': db_configs[self.database]['graph_output_path'],
-                     'pytorch_path': db_configs[self.database]['pytorch_path'],
-                     'model_path': db_configs[self.database]['model_output_path'],
-                     'explainer_path': db_configs[self.database]['explainer_output_path'],
+        db_cfg = db_configs[self.database]
+        path_dict = {'ocel_path': db_cfg['ocel_path'],
+                     'graph_output_path': db_cfg['graph_output_path'],
+                     'pytorch_path': db_cfg['pytorch_path'],
+                     'model_path': db_cfg['model_output_path'],
+                     'explainer_path': db_cfg['explainer_output_path'],
                      'results_path': f"files/results.csv",
-                     'viewpoint': db_configs[self.database]['viewpoint'],
-                     'depth': db_configs[self.database]['added_depth'],
-                     'unique_ids': db_configs[self.database]['unique_ids'],
-                     'kpi_event': db_configs[self.database]['kpi_event'],
-                     'kpi_viewpoint': db_configs[self.database]['kpi_viewpoint'],
-                     'filtered_tables': db_configs[self.database]['filtered_tables'],
-                     'attributes': db_configs[self.database]['attributes'],
-                     'time_attributes': db_configs[self.database]['time_attributes'],
-                     'encoding': db_configs[self.database]['encoding'],
-                     'kpi_type': db_configs[self.database]['kpi_type'],}
+                     'viewpoint': db_cfg['viewpoint'],
+                     'depth': db_cfg['added_depth'],
+                     'unique_ids': db_cfg['unique_ids'],
+                     'kpi_event': db_cfg['kpi_event'],
+                     'kpi_viewpoint': db_cfg['kpi_viewpoint'],
+                     'filtered_tables': db_cfg['filtered_tables'],
+                     'attributes': db_cfg['attributes'],
+                     'time_attributes': db_cfg['time_attributes'],
+                     'encoding': db_cfg['encoding'],
+                     'kpi_type': db_cfg['kpi_type'],
+                     'role_encoding': db_cfg.get('role_encoding') or {},}
 
         # Generate the appropriate path for saving the process execution log
         path_dict['graph_output_path'] = f"{path_dict['graph_output_path']}{self.cant}/"

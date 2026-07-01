@@ -4,6 +4,7 @@ from dataclasses import replace
 import pandas as pd
 import numpy as np
 import copy
+import math
 from torch_geometric.data import HeteroData, Data
 import torch
 from torch_geometric.loader import DataLoader
@@ -50,6 +51,12 @@ class HeteroGraphsGenerator:
         with open(f'{self.path_dict["graph_output_path"]}tensor_dict.json') as json_file:
             self.tensor_dict = json.load(json_file)
 
+        # Extend in-memory dims for enriched node types (not written back to JSON;
+        # hetero_graphs.py always applies these increments at init time).
+        self.tensor_dict['Events'] += 6        # +6 temporal features → 17D
+        if 'Orders' in self.tensor_dict:
+            self.tensor_dict['Orders'] += 3    # +3 aggregate features → 4D
+
         # Creates a variety of dictionaries of relationships between objects
         self.pd_active_orders, self.active_orders_dict = self.preprocessing_steps()
 
@@ -95,10 +102,23 @@ class HeteroGraphsGenerator:
             active_events = []
             active_graph = {}
             cnt = 0
+            start_ts = pd.to_datetime(start_time)
+            prev_ts = None
             for i, row in active_df.iterrows():
                 last_event = True if cnt == len(active_df) - 1 else False
-                # Add Events
+                # Add Events with 6 temporal features appended to the one-hot type encoding
                 ev_type = ast.literal_eval(row['ev_type'])
+                current_ts = pd.to_datetime(row['timestamp'])
+                elapsed_h = (current_ts - start_ts).total_seconds() / 3600.0
+                waiting_h = 0.0 if prev_ts is None else (current_ts - prev_ts).total_seconds() / 3600.0
+                prev_ts = current_ts
+                h_frac = current_ts.hour + current_ts.minute / 60.0
+                dow = current_ts.dayofweek
+                ev_type = ev_type + [
+                    elapsed_h, waiting_h,
+                    math.sin(2 * math.pi * h_frac / 24.0), math.cos(2 * math.pi * h_frac / 24.0),
+                    math.sin(2 * math.pi * dow / 7.0),     math.cos(2 * math.pi * dow / 7.0),
+                ]
                 ev_id = row['ev_id']
                 active_events.append(ev_type)
                 active_graph['Events'] = active_events
@@ -121,6 +141,18 @@ class HeteroGraphsGenerator:
                     edge = active_edges[col].values[0]
                     edge = ast.literal_eval(edge)
                     active_graph[col] = edge
+
+                # Order aggregate features: n_items, total_weight, n_distinct_products
+                # Appended to each Orders node's feature vector whenever Orders is in the prefix.
+                if 'Orders' in active_graph:
+                    items_feats = active_graph.get('Items', [])  # list of [weight, price] per item
+                    n_items = float(len(items_feats))
+                    total_weight = float(sum(f[0] for f in items_feats)) if items_feats else 0.0
+                    n_products = float(len(active_graph.get('Products', [])))
+                    active_graph['Orders'] = [
+                        order_feats + [n_items, total_weight, n_products]
+                        for order_feats in active_graph['Orders']
+                    ]
 
                 y_val = ys[cnt]
                 cnt += 1

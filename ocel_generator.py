@@ -31,6 +31,9 @@ class Generator:
             self.o2o_by_src[src_id] = list(zip(grp['trgt_id'], grp['trgt_type']))
 
         self.encodings = self.get_encodings()
+        # Role-based encodings for types listed in role_encoding config
+        # (e.g. Employees: 'role' → 3D one-hot over distinct roles instead of 18D ID one-hot)
+        self.role_encodings = self._build_role_encodings()
 
         # Fix 8: safe access for time_attributes (handles absent key or None value)
         self._time_attrs = self.path_dict.get('time_attributes') or {}
@@ -166,7 +169,15 @@ class Generator:
             fallback = sub.loc[sub[entry['fixed_attr']].notna(), entry['fixed_attr']]
             if not fallback.empty:
                 row[entry['fixed_attr']] = fallback.iloc[0]
-        return [row[entry['id_col']], row[entry['fixed_attr']], row[entry['time_attr']]]
+        def _py(x):
+            """Convert numpy scalar → plain Python float/None so ast.literal_eval works."""
+            if pd.isna(x):
+                return None
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                return x
+        return [row[entry['id_col']], _py(row[entry['fixed_attr']]), _py(row[entry['time_attr']])]
 
     def get_time_attributes(self, node_id, att_type, fixed_attr, time_attr, timestamp):
         """Original SQL-based time attribute lookup (kept for external callers)."""
@@ -244,6 +255,38 @@ class Generator:
                 a[idx] = 1
                 oh_dict[types[idx]] = a
         return oh_dict
+
+    def _build_role_encodings(self):
+        """Build {ob_id: role_one_hot} dicts for types listed in role_encoding config.
+
+        For order_management Employees: maps each employee ID to a 3D one-hot over
+        (Sales, Shipment, Warehousing) instead of the default 18D ID one-hot.
+        """
+        role_enc = {}
+        for ob_type, role_col in (self.path_dict.get('role_encoding') or {}).items():
+            table = f'object_{ob_type}'
+            cols = self.col_names(table)
+            if not cols:
+                table = f'event_{ob_type}'
+                cols = self.col_names(table)
+            # Distinct roles in alphabetical order (deterministic)
+            self.cursor.execute(
+                f"SELECT DISTINCT {role_col} FROM {table} WHERE {role_col} IS NOT NULL ORDER BY 1"
+            )
+            roles = [r[0] for r in self.cursor.fetchall()]
+            role_to_vec = {role: [int(j == i) for j in range(len(roles))]
+                           for i, role in enumerate(roles)}
+            # Map each employee ID to its role vector
+            self.cursor.execute(
+                f"SELECT DISTINCT ocel_id, MAX({role_col}) FROM {table} GROUP BY ocel_id"
+            )
+            id_role_map = {row[0]: row[1] for row in self.cursor.fetchall()}
+            zero_vec = [0] * len(roles)
+            role_enc[ob_type] = {
+                ob_id: role_to_vec.get(role, zero_vec)
+                for ob_id, role in id_role_map.items()
+            }
+        return role_enc
 
     def get_ev_encoding(self, ev_type):
         """Return the one-hot encoding for ev_type (now delegates to cached dict)."""
@@ -412,6 +455,13 @@ class Generator:
                         attributes = self._lookup_time_attrs(ob_id, ob_type, timestamp)
                         if contained:
                             ob_attrs[ob_type].append([attributes[0], attributes[1:], ob_idx])
+                    elif ob_type in self.role_encodings:
+                        # Role-based encoding (e.g. Employees → 3D role one-hot)
+                        zero_vec = [0] * len(next(iter(self.role_encodings[ob_type].values())))
+                        enc = self.role_encodings[ob_type].get(ob_id, zero_vec)
+                        self.tensor_dict[ob_type] = len(enc)
+                        if contained:
+                            ob_attrs[ob_type].append([ob_id, enc, ob_idx])
                     else:
                         if ob_type in self.path_dict['encoding']:
                             enc = self.encodings[ob_type][ob_id]
@@ -502,6 +552,8 @@ class Generator:
         edges = pd.DataFrame(all_edges, columns=edges_cols)
         ocel.to_csv(f"files/graph_structures/{self.database}/{self.cant}/ocel.csv", index=False)
         edges.to_csv(f"files/graph_structures/{self.database}/{self.cant}/edges.csv", index=False)
+        with open(f"files/graph_structures/{self.database}/{self.cant}/tensor_dict.json", "w") as f:
+            json.dump(self.tensor_dict, f)
         print('Done')
 
     def encode_events(self):
