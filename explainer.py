@@ -8,327 +8,6 @@ from training import Modelling
 
 class Explainer(Modelling):
     # ------------------------------------------------------------------
-    # PGExplainer for heterogeneous regression (PyG-native)
-    # ------------------------------------------------------------------
-
-    def train_pg_explainer(self, n_epochs=20, lr=0.003, edge_size=0.0005, edge_ent=0.1, save_path=None):
-        """Train PyG's PGExplainer on the heterogeneous regression model.
-
-        PGExplainer learns a small MLP that maps GNN node embeddings to
-        per-edge soft importance scores. After training it can explain any
-        graph in a single forward pass (much faster than LOO at inference time).
-
-        The trained explainer is saved to
-        ``{model_path}/Hetero/{kpi}_pgexplainer.pt``.
-        """
-        import json
-        import random
-        import torch.nn.functional as F
-        from torch_geometric.explain import Explainer as PyGExplainer, ModelConfig
-        from torch_geometric.explain.algorithm import PGExplainer
-        from torch_geometric.utils import get_embeddings_hetero
-        from model_classes.pg_explainer_utils import SeedNodeWrapper
-
-        # Load the trained HGT model
-        arch_path = self.model_path.replace(".pth", "_arch.json")
-        arch = {"hidden_channels": 64, "num_layers": 3, "num_heads": 4}
-        if os.path.exists(arch_path):
-            with open(arch_path) as f:
-                arch = json.load(f)
-        model = HGT.HGT(
-            hidden_channels=arch["hidden_channels"],
-            out_channels=1,
-            num_layers=arch["num_layers"],
-            num_heads=arch["num_heads"],
-            data=self.train_data[0],
-            viewpoint=self.viewpoint_object,
-        ).to(self.device)
-        model.load_state_dict(torch.load(self.model_path, weights_only=False))
-        model.eval()
-
-        # Wrap so PGExplainer sees a single scalar output per graph
-        seed_model = SeedNodeWrapper(model).to(self.device)
-
-        # Warm up lazy layers with one forward pass
-        sample = self.train_data[0]
-        with torch.no_grad():
-            seed_model(sample.x_dict, sample.edge_index_dict)
-
-        pg_algo = PGExplainer(epochs=n_epochs, lr=lr)
-        pg_algo.coeffs['edge_size'] = edge_size
-        pg_algo.coeffs['edge_ent'] = edge_ent
-        explainer = PyGExplainer(
-            model=seed_model,
-            algorithm=pg_algo,
-            explanation_type='phenomenon',
-            edge_mask_type='object',
-            model_config=ModelConfig(mode='regression', task_level='graph'),
-        )
-
-        sample_size = min(len(self.train_data), 200)
-        print(f"\n=== Training PGExplainer ({n_epochs} epochs, {sample_size} graphs/epoch) ===")
-        for epoch in range(n_epochs):
-            epoch_losses = []
-            graphs = random.sample(self.train_data, sample_size)
-            for graph in graphs:
-                vp_mask = graph[self.viewpoint_object].mask.squeeze(-1).bool()
-                if not vp_mask.any():
-                    continue
-
-                # Skip graphs where the model produces NaN (empty edge types
-                # can cause NaN attention in HGTConv).
-                with torch.no_grad():
-                    target = seed_model(graph.x_dict, graph.edge_index_dict)
-                if not torch.isfinite(target).all():
-                    continue
-
-                # Capture last-layer node embeddings via forward hooks on HGTConv.
-                raw_embs = get_embeddings_hetero(
-                    seed_model,
-                    pg_algo.SUPPORTED_HETERO_MODELS,
-                    graph.x_dict,
-                    graph.edge_index_dict,
-                )
-                last_emb = {nt: embs[-1] for nt, embs in raw_embs.items() if embs}
-                if not last_emb:
-                    continue
-
-                # Custom training step — PyG's set_hetero_masks is a no-op for
-                # HGTConv (it only targets to_hetero() ModuleDict models). We apply
-                # masks by aggregating soft edge scores to node-level scales and
-                # multiplying the input features, keeping the whole path differentiable.
-                pg_algo.optimizer.zero_grad()
-                temperature = pg_algo._get_temperature(epoch)
-
-                # Generate per-edge mask logits via the PGExplainer MLP.
-                mask_logits = {}
-                for etype, ei in graph.edge_index_dict.items():
-                    src, _, dst = etype
-                    if src not in last_emb or dst not in last_emb:
-                        continue
-                    edge_emb = torch.cat(
-                        [last_emb[src][ei[0]], last_emb[dst][ei[1]]], dim=-1
-                    )
-                    logits = pg_algo.mlp(edge_emb).view(-1)
-                    mask_logits[etype] = pg_algo._concrete_sample(logits, temperature)
-
-                if not mask_logits:
-                    continue
-
-                # Aggregate soft sigmoid mask values to a per-node mean scale.
-                node_scale = {}
-                for etype, logits in mask_logits.items():
-                    src, _, dst = etype
-                    ei = graph.edge_index_dict[etype]
-                    soft = logits.sigmoid()
-                    n_src = graph[src].x.size(0)
-                    n_dst = graph[dst].x.size(0)
-                    ones = torch.ones_like(soft)
-                    src_agg = (
-                        torch.zeros(n_src, device=self.device).scatter_add_(0, ei[0], soft)
-                        / torch.zeros(n_src, device=self.device).scatter_add_(0, ei[0], ones).clamp(min=1)
-                    )
-                    dst_agg = (
-                        torch.zeros(n_dst, device=self.device).scatter_add_(0, ei[1], soft)
-                        / torch.zeros(n_dst, device=self.device).scatter_add_(0, ei[1], ones).clamp(min=1)
-                    )
-                    node_scale[src] = node_scale.get(src, torch.zeros(n_src, device=self.device)) + src_agg
-                    node_scale[dst] = node_scale.get(dst, torch.zeros(n_dst, device=self.device)) + dst_agg
-
-                # Normalise per-node scale to [0, 1] and multiply input features.
-                masked_x_dict = {}
-                for nt in graph.node_types:
-                    x = graph[nt].x
-                    if nt in node_scale and node_scale[nt].numel() > 0:
-                        max_val = node_scale[nt].max().clamp(min=1e-8)
-                        scale = (node_scale[nt] / max_val).unsqueeze(-1)
-                        masked_x_dict[nt] = x * scale
-                    else:
-                        masked_x_dict[nt] = x
-
-                # Masked forward pass (differentiable via the scaled x_dict).
-                y_hat = seed_model(masked_x_dict, graph.edge_index_dict)
-                if not torch.isfinite(y_hat).all():
-                    continue
-
-                # Fidelity: masked prediction should match original.
-                fid_loss = F.mse_loss(y_hat, target.detach())
-
-                # Edge regularisation: size (sparsity) + entropy (binariness).
-                reg_loss = torch.tensor(0.0, device=self.device)
-                for logits in mask_logits.values():
-                    m = logits.sigmoid()
-                    reg_loss = reg_loss + m.sum() * pg_algo.coeffs['edge_size']
-                    mc = 0.99 * m + 0.005
-                    entropy = -(mc * mc.log() + (1 - mc) * (1 - mc).log())
-                    reg_loss = reg_loss + entropy.mean() * pg_algo.coeffs['edge_ent']
-
-                loss = fid_loss + reg_loss
-                if not torch.isfinite(loss):
-                    continue
-
-                loss.backward()
-                pg_algo.optimizer.step()
-                epoch_losses.append(loss.item())
-
-            if (epoch + 1) % 5 == 0 or epoch == 0:
-                mean_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else float('nan')
-                print(f"  Epoch {epoch + 1:3d}/{n_epochs} | Loss: {mean_loss:.4f} ({len(epoch_losses)} valid graphs)")
-
-        # Mark as fully trained so PGExplainer.forward() doesn't raise on inference.
-        pg_algo._curr_epoch = n_epochs - 1
-
-        # Save the trained explainer algorithm (MLP weights)
-        if save_path is None:
-            kpi = f"TimeFrom_{self.viewpoint_object}_to_{self.path_dict['kpi_event']}"
-            save_path = f"{self.path_dict['model_path']}/Hetero/{kpi}_pgexplainer.pt"
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        torch.save(pg_algo.state_dict(), save_path)
-        print(f"PGExplainer saved to {save_path}")
-        return explainer
-
-    def pg_explain_trace(self, order_id, top_k=5, save_dir=None):
-        """Generate a PGExplainer-based explanation for one order trace.
-
-        Loads the trained PGExplainer from disk, finds the last-event snapshot
-        for ``order_id`` in the test set, generates soft edge masks, then feeds
-        them into the existing evaluation and visualization pipeline.
-
-        Returns a dict with keys: node_importances, edge_importances, metrics,
-        save_dir.
-        """
-        import json
-        from torch_geometric.explain import Explainer as PyGExplainer, ModelConfig
-        from torch_geometric.explain.algorithm import PGExplainer
-        from model_classes.pg_explainer_utils import SeedNodeWrapper, hetero_explanation_to_importances
-
-        # --- Load model ---
-        arch_path = self.model_path.replace(".pth", "_arch.json")
-        arch = {"hidden_channels": 64, "num_layers": 3, "num_heads": 4}
-        if os.path.exists(arch_path):
-            with open(arch_path) as f:
-                arch = json.load(f)
-        model = HGT.HGT(
-            hidden_channels=arch["hidden_channels"],
-            out_channels=1,
-            num_layers=arch["num_layers"],
-            num_heads=arch["num_heads"],
-            data=self.train_data[0],
-            viewpoint=self.viewpoint_object,
-        ).to(self.device)
-        model.load_state_dict(torch.load(self.model_path, weights_only=False))
-        model.eval()
-
-        seed_model = SeedNodeWrapper(model).to(self.device)
-        with torch.no_grad():
-            seed_model(self.train_data[0].x_dict, self.train_data[0].edge_index_dict)
-
-        # --- Load trained explainer ---
-        kpi = f"TimeFrom_{self.viewpoint_object}_to_{self.path_dict['kpi_event']}"
-        explainer_path = f"{self.path_dict['model_path']}/Hetero/{kpi}_pgexplainer.pt"
-        if not os.path.exists(explainer_path):
-            raise FileNotFoundError(
-                f"Trained PGExplainer not found at {explainer_path}. "
-                "Call train_pg_explainer() first."
-            )
-
-        pg_algo = PGExplainer(epochs=1, lr=0.003)
-        # connect() must be called (via PyGExplainer.__init__) before any pg_algo method
-        # that accesses self.model_config (e.g. train, forward).
-        explainer = PyGExplainer(
-            model=seed_model,
-            algorithm=pg_algo,
-            explanation_type='phenomenon',
-            edge_mask_type='object',
-            model_config=ModelConfig(mode='regression', task_level='graph'),
-        )
-        # Initialize the lazy Linear(-1, 64) in pg_algo.mlp so load_state_dict
-        # can match tensor shapes (input dim = 2 * hidden_channels).
-        with torch.no_grad():
-            dummy_emb = torch.zeros(1, 2 * arch['hidden_channels'], device=self.device)
-            pg_algo.mlp(dummy_emb)
-        pg_algo.load_state_dict(torch.load(explainer_path, weights_only=False))
-        pg_algo._curr_epoch = 0  # epochs=1 → epochs-1=0; satisfies "fully trained" check
-
-        # --- Find last-event graph for this order ---
-        explain_subgraph = None
-        for g in self.test_data:
-            if (g[self.viewpoint_object].last_event.item()
-                    and g[self.viewpoint_object].id.item() == order_id):
-                explain_subgraph = g
-                break
-        if explain_subgraph is None:
-            raise ValueError(f"No last-event graph found for order_id={order_id} in test set.")
-
-        # --- Generate explanation ---
-        with torch.no_grad():
-            target = explain_subgraph[self.viewpoint_object].y[0:1]
-        explanation = explainer(
-            explain_subgraph.x_dict,
-            explain_subgraph.edge_index_dict,
-            target=target,
-        )
-
-        # --- Convert to existing pipeline format ---
-        node_importances, edge_importances = hetero_explanation_to_importances(
-            explanation, explain_subgraph, threshold=0.5
-        )
-
-        # --- Save directory ---
-        if save_dir is None:
-            save_dir = f"{self.path_dict['explainer_path']}order_{order_id}_pg/"
-        os.makedirs(save_dir, exist_ok=True)
-
-        # Baseline prediction (for summary)
-        baseline_value = self._predict_value_for_graph(explain_subgraph, 0)
-        pred_h = baseline_value / 3600
-
-        print(f"\n=== PGExplainer: Order #{order_id} (predicted: {pred_h:.1f}h remaining) ===")
-        print(f"Top {top_k} edges by PGExplainer importance:")
-        for rank, (et, e_idx, score, large) in enumerate(edge_importances[:top_k], 1):
-            src_t, _, dst_t = et
-            ei = explain_subgraph[et].edge_index
-            src_id = ei[0, e_idx].item()
-            dst_id = ei[1, e_idx].item()
-            flag = "  [HIGH]" if large else ""
-            print(f"  {rank}. {src_t}[{src_id}]→{dst_t}[{dst_id}]  score={score:.3f}{flag}")
-
-        print(f"\nTop {top_k} nodes by aggregated edge importance:")
-        for rank, (nt, nid, score, large) in enumerate(node_importances[:top_k], 1):
-            flag = "  [HIGH]" if large else ""
-            print(f"  {rank}. {nt}[{nid}]  score={score:.3f}{flag}")
-
-        # --- Explanation quality metrics (reuse existing method) ---
-        metrics = self.evaluate_explanation_quality(
-            explain_subgraph, 0, node_importances, edge_importances,
-            node_top_k=top_k, edge_top_k=top_k * 3, verbose=True,
-        )
-
-        # --- Visualizations (reuse existing pipeline) ---
-        self.plot_node_type_summary(
-            node_importances,
-            save_path=os.path.join(save_dir, "pg_node_type_summary.png"),
-        )
-
-        explanation_G = self.reg_explanation_subgraph(
-            explain_subgraph, 0, node_importances, edge_importances, node_top_k=top_k
-        )
-        self.reg_visualize_explanation_subgraph(
-            explanation_G,
-            save_path=os.path.join(save_dir, "pg_explanation_subgraph.png"),
-        )
-
-        results = {
-            "order_id": order_id,
-            "node_importances": node_importances,
-            "edge_importances": edge_importances,
-            "metrics": metrics,
-            "save_dir": save_dir,
-        }
-        print(f"\nPGExplainer artifacts saved to {save_dir}")
-        return results
-
-    # ------------------------------------------------------------------
     # Explanation helpers
     # ------------------------------------------------------------------
 
@@ -1195,6 +874,244 @@ class Explainer(Modelling):
         print(f"\nAggregate outputs saved to: {save_dir}")
 
         return all_metrics
+
+    # ------------------------------------------------------------------
+    # Counterfactual explanations
+    # ------------------------------------------------------------------
+
+    def _graph_dissimilarity(self, g1, g2):
+        """Return (total_dissimilarity, components_dict) between two trace graphs.
+
+        Four components, each in [0, 1]:
+          feat   — mean-pooled per-type feature distance (L2 + cosine average)
+          type   — multiset Jaccard distance over node-type counts
+          edge   — multiset Jaccard distance over edge-type counts
+          struct — normalized absolute difference in total edge count
+        Total = sum of the four components, in [0, 4].
+        """
+        # D_feat
+        feat_scores = []
+        for nt in g1.node_types:
+            if nt not in g2.node_types:
+                continue
+            x1, x2 = g1[nt].x, g2[nt].x
+            if x1.size(0) == 0 or x2.size(0) == 0:
+                continue
+            mu1, mu2 = x1.mean(dim=0), x2.mean(dim=0)
+            l2 = (mu1 - mu2).norm() / (mu1.norm() + mu2.norm() + 1e-8)
+            sim = F.cosine_similarity(mu1.unsqueeze(0), mu2.unsqueeze(0)).item()
+            cos_dist = 1.0 - (sim + 1.0) / 2.0
+            feat_scores.append((l2.item() + cos_dist) / 2.0)
+        d_feat = sum(feat_scores) / len(feat_scores) if feat_scores else 0.0
+
+        # D_type: multiset Jaccard over raw node-type counts
+        all_ntypes = set(g1.node_types) | set(g2.node_types)
+        c1 = {t: (g1[t].x.size(0) if t in g1.node_types else 0) for t in all_ntypes}
+        c2 = {t: (g2[t].x.size(0) if t in g2.node_types else 0) for t in all_ntypes}
+        n_inter = sum(min(c1[t], c2[t]) for t in all_ntypes)
+        n_union = sum(max(c1[t], c2[t]) for t in all_ntypes)
+        d_type = 1.0 - n_inter / n_union if n_union > 0 else 0.0
+
+        # D_edge: multiset Jaccard over raw edge-type counts
+        all_etypes = set(g1.edge_types) | set(g2.edge_types)
+        e1 = {et: (g1[et].edge_index.size(1) if et in g1.edge_types else 0) for et in all_etypes}
+        e2 = {et: (g2[et].edge_index.size(1) if et in g2.edge_types else 0) for et in all_etypes}
+        e_inter = sum(min(e1[et], e2[et]) for et in all_etypes)
+        e_union = sum(max(e1[et], e2[et]) for et in all_etypes)
+        d_edge = 1.0 - e_inter / e_union if e_union > 0 else 0.0
+
+        # D_struct: normalized total edge count difference
+        E1 = sum(g1[et].edge_index.size(1) for et in g1.edge_types)
+        E2 = sum(g2[et].edge_index.size(1) for et in g2.edge_types)
+        d_struct = abs(E1 - E2) / max(E1, E2, 1)
+
+        total = d_feat + d_type + d_edge + d_struct
+        return total, {'feat': d_feat, 'type': d_type, 'edge': d_edge, 'struct': d_struct}
+
+    @torch.no_grad()
+    def _outcome_bands(self, last_event_graphs):
+        """Compute quartile boundaries (Q1, Q2, Q3) in seconds over the given graphs."""
+        import numpy as np
+        preds = [self._predict_value_for_graph(g, 0) for g in last_event_graphs]
+        return np.percentile(preds, [25, 50, 75]).tolist(), preds
+
+    def find_counterfactuals(self, order_id, target_band='opposite', n_results=3, min_candidates=5):
+        """Find the n_results most similar test traces with a contrasting predicted outcome.
+
+        target_band: 'opposite' (default) — traces predicted below Q1 if query is above Q2,
+                     or above Q3 if query is below Q2; or a (low_s, high_s) tuple in seconds.
+        min_candidates: minimum pool size before the length window is widened.
+        """
+        import json
+
+        arch_cfg_path = self.model_path.replace('.pth', '_arch.json')
+        if os.path.exists(arch_cfg_path):
+            with open(arch_cfg_path) as f:
+                arch = json.load(f)
+            self.model = HGT.HGT(
+                hidden_channels=arch['hidden_channels'],
+                out_channels=1,
+                num_layers=arch['num_layers'],
+                num_heads=arch['num_heads'],
+                data=self.test_data[0],
+                viewpoint=self.viewpoint_object,
+            ).to(self.device)
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        # Locate query trace
+        query_graph = None
+        for g in self.test_data:
+            if (g[self.viewpoint_object]['last_event'].item()
+                    and g[self.viewpoint_object]['id'].item() == order_id):
+                query_graph = g
+                break
+        if query_graph is None:
+            raise ValueError(f"Order ID {order_id} with last_event=True not found in test data.")
+
+        last_event_graphs = [g for g in self.test_data
+                             if g[self.viewpoint_object]['last_event'].item()]
+
+        quartiles, all_preds = self._outcome_bands(last_event_graphs)
+        q1, _q2, q3 = quartiles
+        query_pred = self._predict_value_for_graph(query_graph, 0)
+
+        # Target band bounds in seconds
+        if target_band == 'opposite':
+            if query_pred <= _q2:
+                low, high = q3, float('inf')
+            else:
+                low, high = float('-inf'), q1
+        else:
+            low, high = target_band
+
+        # Build initial candidate pool (correct band, excluding query)
+        query_oid = order_id
+        candidates_all = [
+            (g, pred)
+            for g, pred in zip(last_event_graphs, all_preds)
+            if g[self.viewpoint_object]['id'].item() != query_oid and low <= pred <= high
+        ]
+
+        # Prefix-length stratification with progressive fallback
+        n_q = query_graph['Events'].x.size(0) if 'Events' in query_graph.node_types else 1
+        window = max(2.0, 0.2 * n_q)
+        filtered = []
+        for _ in range(4):   # initial attempt + 3 doublings
+            filtered = [
+                (g, pred) for g, pred in candidates_all
+                if abs((g['Events'].x.size(0) if 'Events' in g.node_types else 1) - n_q) <= window
+            ]
+            if len(filtered) >= min_candidates:
+                break
+            window *= 2
+
+        if not filtered:
+            filtered = candidates_all  # last-resort: skip length gate entirely
+            window = float('inf')
+
+        # Rank by graph dissimilarity
+        results = []
+        for g, pred in filtered:
+            total, comps = self._graph_dissimilarity(query_graph, g)
+            results.append({
+                'order_id': int(g[self.viewpoint_object]['id'].item()),
+                'predicted_hours': pred / 3600.0,
+                'dissimilarity': total,
+                'n_events': g['Events'].x.size(0) if 'Events' in g.node_types else 0,
+                'length_window_used': window,
+                'components': comps,
+                'graph': g,
+            })
+
+        results.sort(key=lambda r: r['dissimilarity'])
+        return results[:n_results]
+
+    def explain_counterfactual(self, order_id, target_band='opposite', n_results=3, min_candidates=5):
+        """Print counterfactual comparison for a given order and save a node-type bar chart."""
+        results = self.find_counterfactuals(order_id, target_band, n_results, min_candidates)
+
+        # Re-fetch query for display (model already loaded by find_counterfactuals)
+        query_graph = None
+        for g in self.test_data:
+            if (g[self.viewpoint_object]['last_event'].item()
+                    and g[self.viewpoint_object]['id'].item() == order_id):
+                query_graph = g
+                break
+        query_pred = self._predict_value_for_graph(query_graph, 0)
+        n_q = query_graph['Events'].x.size(0) if 'Events' in query_graph.node_types else '?'
+
+        print(f"\n{'=' * 60}")
+        print(f"Counterfactual Explanation for {self.viewpoint_object} #{order_id}")
+        print(f"  Query: {round(query_pred / 3600)}h predicted | prefix length: {n_q} events")
+        print(f"  Graph: " +
+              ", ".join(f"{nt}={query_graph[nt].num_nodes}" for nt in query_graph.node_types))
+
+        if not results:
+            print("  No counterfactuals found.")
+            print('=' * 60)
+            return results
+
+        print(f"\n  Top {len(results)} counterfactual(s) [target band: "
+              f"{'opposite quartile' if target_band == 'opposite' else str(target_band)}]:")
+
+        for i, r in enumerate(results, 1):
+            win_str = (f"{r['length_window_used']:.0f}" if r['length_window_used'] != float('inf')
+                       else "∞ (fallback)")
+            print(f"\n  CF #{i} — Order #{r['order_id']}")
+            print(f"    Predicted : {r['predicted_hours']:.1f}h | "
+                  f"prefix: {r['n_events']} events | "
+                  f"window used: ±{win_str}")
+            print(f"    Total dissimilarity: {r['dissimilarity']:.4f}  "
+                  f"(feat={r['components']['feat']:.3f}, "
+                  f"type={r['components']['type']:.3f}, "
+                  f"edge={r['components']['edge']:.3f}, "
+                  f"struct={r['components']['struct']:.3f})")
+
+            all_ntypes = sorted(set(list(query_graph.node_types) + list(r['graph'].node_types)))
+            rows = []
+            for nt in all_ntypes:
+                n1 = query_graph[nt].x.size(0) if nt in query_graph.node_types else 0
+                n2 = r['graph'][nt].x.size(0) if nt in r['graph'].node_types else 0
+                delta = n2 - n1
+                rows.append(f"      {nt:<12} {n1:>3} → {n2:>3}  ({delta:+d})")
+            print("    Node counts (query → CF):")
+            print('\n'.join(rows))
+
+        # Save bar chart for top CF
+        save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}_cf")
+        os.makedirs(save_dir, exist_ok=True)
+        self._plot_cf_node_comparison(query_graph, results[0]['graph'], order_id,
+                                      results[0]['order_id'], save_dir)
+        print(f"\n  Plot saved to: {save_dir}")
+        print('=' * 60)
+        return results
+
+    def _plot_cf_node_comparison(self, query_graph, cf_graph, query_id, cf_id, save_dir):
+        """Side-by-side bar chart of node type counts: query vs. top counterfactual."""
+        all_ntypes = sorted(set(list(query_graph.node_types) + list(cf_graph.node_types)))
+        counts_q = [query_graph[nt].x.size(0) if nt in query_graph.node_types else 0
+                    for nt in all_ntypes]
+        counts_cf = [cf_graph[nt].x.size(0) if nt in cf_graph.node_types else 0
+                     for nt in all_ntypes]
+
+        x = list(range(len(all_ntypes)))
+        w = 0.35
+        fig, ax = plt.subplots(figsize=(9, 4))
+        ax.bar([i - w / 2 for i in x], counts_q, w,
+               label=f"Query (#{query_id})", color="#4C72B0", alpha=0.85)
+        ax.bar([i + w / 2 for i in x], counts_cf, w,
+               label=f"CF (#{cf_id})", color="#DD8452", alpha=0.85)
+        ax.set_xticks(x)
+        ax.set_xticklabels(all_ntypes, rotation=30, ha='right', fontsize=9)
+        ax.set_ylabel("Node count")
+        ax.set_title(f"Node type distribution: Query #{query_id} vs. CF #{cf_id}")
+        ax.legend(fontsize=9)
+        ax.grid(True, axis='y', alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "cf_node_type_comparison.png"), dpi=150)
+        plt.close()
+        print(f"Saved CF node-type comparison to {save_dir}")
 
     def cf_explanation(self):
         object_idx = 1971

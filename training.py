@@ -1,5 +1,4 @@
 import torch
-import optuna
 import json
 
 from torch.nn import Linear
@@ -78,6 +77,11 @@ class Modelling:
 
         self.model = self.model.to(self.device)
 
+        self.feature_names = {
+            **{nt: names for nt, names in (self.path_dict.get('attributes') or {}).items()},
+            **{nt: names for nt, names in (self.path_dict.get('time_attributes') or {}).items()},
+        }
+
         # Define save path for the models
         model_path = self.path_dict['model_path']
 
@@ -101,7 +105,13 @@ class Modelling:
         if os.path.exists(self._params_path):
             with open(self._params_path) as f:
                 all_params = json.load(f)
-            return all_params.get(self.task_id)
+            result = all_params.get(self.task_id)
+            if result:
+                return result
+        arch_path = f"{self.path_dict['model_path']}/Hetero/{self.task_id}_arch.json"
+        if os.path.exists(arch_path):
+            with open(arch_path) as f:
+                return json.load(f)
         return None
 
     def _save_params(self, params):
@@ -290,6 +300,7 @@ class Modelling:
         torch.save(self.model.state_dict(), self.model_path)
 
     def sweep(self, n_trials=30):
+        import optuna
         criterion = torch.nn.L1Loss()
 
         def objective(trial):
