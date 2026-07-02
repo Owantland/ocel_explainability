@@ -664,19 +664,6 @@ class Explainer(Modelling):
             save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}")
         os.makedirs(save_dir, exist_ok=True)
 
-        import json
-        arch_cfg_path = self.model_path.replace(".pth", "_arch.json")
-        if os.path.exists(arch_cfg_path):
-            with open(arch_cfg_path) as f:
-                arch = json.load(f)
-            self.model = HGT.HGT(
-                hidden_channels=arch["hidden_channels"],
-                out_channels=1,
-                num_layers=arch["num_layers"],
-                num_heads=arch["num_heads"],
-                data=self.test_data[0],
-                viewpoint=self.viewpoint_object,
-            ).to(self.device)
         self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
         self.model.eval()
 

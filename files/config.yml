@@ -8,7 +8,7 @@ order_management:
   added_depth: 0
   unique_ids: ['Orders', 'Items', 'Packages']
   kpi_type: 0
-  kpi_event: "PayOrder" #"CreatePackage" "PackageDelivered" "PayOrder"
+  kpi_event: "PackageDelivered" #"CreatePackage" "PackageDelivered" "PayOrder"
   kpi_viewpoint: "Orders"
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:
@@ -18,6 +18,8 @@ order_management:
   time_attributes:
     Products: ['weight', 'price'] # First value is the set attribute and the second one is the time sensitive one
   encoding: ['Customers', 'Employees']
+  role_encoding:
+    Employees: 'role'   # encode by role (Sales/Shipment/Warehousing → 3D) instead of OCEL_ID (18D)
 
 logistics:
   ocel_path: "files/databases/logistics.sqlite"
@@ -37,7 +39,6 @@ logistics:
     Container: ['AmountofHandlingUnits', 'Weight']
     TransportDocument: ['AmountofContainers']
   time_attributes:
-    Products: [ 'weight', 'price' ] # First value is the set attribute and the second one is the time sensitive one
   encoding: ['HandlingUnit', 'Truck', 'Forklift', 'Vehicle']
 
 
