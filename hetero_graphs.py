@@ -180,16 +180,29 @@ class HeteroGraphsGenerator:
                 # Adds the kpi values for the kpi object
                 kpi_ob = self.path_dict['kpi_viewpoint']
 
+                # Build per-instance y-values: each viewpoint node may have a different
+                # remaining time (e.g. two Packages delivered at different times).
+                vp_ob_ids  = ast.literal_eval(row[f"{kpi_ob}::ids"])
+                primary_id = y_df['ob_id'].iloc[0]
+                y_vals = []
+                for ob_id in vp_ob_ids:
+                    if ob_id == primary_id:
+                        y_vals.append(float(y_val))
+                    else:
+                        end_ts = pd.to_datetime(self.active_orders_dict[ob_id])
+                        secs   = max(0.0, (end_ts - current_ts).total_seconds())
+                        y_vals.append(secs)
+                n_vp = len(y_vals)
+
                 if self.path_dict['kpi_type'] == 0:
-                    data[kpi_ob].y = torch.tensor(y_val, dtype=torch.float32).reshape(-1, 1)
-                    data[kpi_ob].mask = torch.tensor(True, dtype=torch.bool).reshape(-1, 1)
-
+                    data[kpi_ob].y    = torch.tensor(y_vals, dtype=torch.float32).reshape(-1, 1)
+                    data[kpi_ob].mask = torch.ones(n_vp, 1, dtype=torch.bool)
                 else:
-                    data[kpi_ob].y = torch.tensor([y_val], dtype=torch.long)
-                    data[kpi_ob].mask = torch.tensor([True], dtype=torch.bool)
+                    data[kpi_ob].y    = torch.tensor(y_vals, dtype=torch.long)
+                    data[kpi_ob].mask = torch.ones(n_vp, dtype=torch.bool)
 
-                data[kpi_ob].id = torch.tensor(process, dtype=torch.float32).reshape(-1, 1)
-                data[kpi_ob].last_event = torch.tensor(last_event, dtype=torch.bool).reshape(-1, 1)
+                data[kpi_ob].id         = torch.full((n_vp, 1), float(process), dtype=torch.float32)
+                data[kpi_ob].last_event = torch.full((n_vp, 1), last_event, dtype=torch.bool)
 
                 # Add return indexes to all edges
                 data = T.ToUndirected()(data)

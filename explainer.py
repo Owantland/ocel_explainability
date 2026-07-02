@@ -669,8 +669,8 @@ class Explainer(Modelling):
 
         explain_subgraph = None
         for g in self.test_data:
-            if (g[self.viewpoint_object]['last_event'].item()
-                    and g[self.viewpoint_object]['id'].item() == order_id):
+            if (g[self.viewpoint_object]['last_event'][0].item()
+                    and g[self.viewpoint_object]['id'][0].item() == order_id):
                 explain_subgraph = g
                 break
         if explain_subgraph is None:
@@ -772,7 +772,7 @@ class Explainer(Modelling):
         self.model.eval()
 
         last_event_graphs = [g for g in self.test_data
-                             if g[self.viewpoint_object]['last_event'].item()]
+                             if g[self.viewpoint_object]['last_event'][0].item()]
         sample = last_event_graphs[:n_traces]
         print(f"Running aggregate explanation on {len(sample)} traces…")
 
@@ -949,15 +949,15 @@ class Explainer(Modelling):
         # Locate query trace
         query_graph = None
         for g in self.test_data:
-            if (g[self.viewpoint_object]['last_event'].item()
-                    and g[self.viewpoint_object]['id'].item() == order_id):
+            if (g[self.viewpoint_object]['last_event'][0].item()
+                    and g[self.viewpoint_object]['id'][0].item() == order_id):
                 query_graph = g
                 break
         if query_graph is None:
             raise ValueError(f"Order ID {order_id} with last_event=True not found in test data.")
 
         last_event_graphs = [g for g in self.test_data
-                             if g[self.viewpoint_object]['last_event'].item()]
+                             if g[self.viewpoint_object]['last_event'][0].item()]
 
         quartiles, all_preds = self._outcome_bands(last_event_graphs)
         q1, _q2, q3 = quartiles
@@ -977,7 +977,7 @@ class Explainer(Modelling):
         candidates_all = [
             (g, pred)
             for g, pred in zip(last_event_graphs, all_preds)
-            if g[self.viewpoint_object]['id'].item() != query_oid and low <= pred <= high
+            if g[self.viewpoint_object]['id'][0].item() != query_oid and low <= pred <= high
         ]
 
         # Prefix-length stratification with progressive fallback
@@ -1002,7 +1002,7 @@ class Explainer(Modelling):
         for g, pred in filtered:
             total, comps = self._graph_dissimilarity(query_graph, g)
             results.append({
-                'order_id': int(g[self.viewpoint_object]['id'].item()),
+                'order_id': int(g[self.viewpoint_object]['id'][0].item()),
                 'predicted_hours': pred / 3600.0,
                 'dissimilarity': total,
                 'n_events': g['Events'].x.size(0) if 'Events' in g.node_types else 0,
@@ -1021,8 +1021,8 @@ class Explainer(Modelling):
         # Re-fetch query for display (model already loaded by find_counterfactuals)
         query_graph = None
         for g in self.test_data:
-            if (g[self.viewpoint_object]['last_event'].item()
-                    and g[self.viewpoint_object]['id'].item() == order_id):
+            if (g[self.viewpoint_object]['last_event'][0].item()
+                    and g[self.viewpoint_object]['id'][0].item() == order_id):
                 query_graph = g
                 break
         query_pred = self._predict_value_for_graph(query_graph, 0)
@@ -1129,7 +1129,7 @@ class Explainer(Modelling):
 
         self.model.eval()
         last_event_graphs = [
-            g for g in self.test_data if g[self.viewpoint_object]['last_event'].item()
+            g for g in self.test_data if g[self.viewpoint_object]['last_event'][0].item()
         ]
         if n_traces is not None:
             last_event_graphs = last_event_graphs[:n_traces]

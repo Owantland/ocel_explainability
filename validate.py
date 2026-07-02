@@ -24,16 +24,16 @@ records = []
 
 with torch.no_grad():
     for g in m.test_data:
-        pred_norm = m.model(g.x_dict, g.edge_index_dict).item()
+        pred_norm = m.model(g.x_dict, g.edge_index_dict)[0].item()
         pred_h    = pred_norm * m.target_std.item() + m.target_mean.item()
         pred_h   /= 3600.0
 
-        true_norm = g[vp].y.item()
+        true_norm = g[vp].y[0].item()
         true_h    = true_norm * m.target_std.item() + m.target_mean.item()
         true_h   /= 3600.0
 
-        order_id   = int(g[vp].id.item())
-        last_event = g[vp].last_event.item()
+        order_id   = int(g[vp].id[0].item())
+        last_event = g[vp].last_event[0].item()
         n_events   = g['Events'].num_nodes
 
         records.append({
