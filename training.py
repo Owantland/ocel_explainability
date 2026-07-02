@@ -375,6 +375,40 @@ class Modelling:
                                     pruner=optuna.pruners.MedianPruner(n_warmup_steps=10))
         study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
+        # ── Visualise top-3 trials ────────────────────────────────────────────
+        completed = [t for t in study.trials
+                     if t.state == optuna.trial.TrialState.COMPLETE]
+        top3 = sorted(completed, key=lambda t: t.value)[:3]
+
+        out_dir = f"files/explainer_outputs/{self.database}/validation_2000"
+        os.makedirs(out_dir, exist_ok=True)
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        colors = ['#e15759', '#4e79a7', '#59a14f']
+        for rank, (trial_obj, color) in enumerate(zip(top3, colors), start=1):
+            epochs = sorted(trial_obj.intermediate_values)
+            maes   = [trial_obj.intermediate_values[e] for e in epochs]
+            label  = (f"#{rank}  h={trial_obj.params['hidden_channels']}  "
+                      f"L={trial_obj.params['num_layers']}  "
+                      f"heads={trial_obj.params['num_heads']}  "
+                      f"lr={trial_obj.params['lr']:.1e}  "
+                      f"(best={trial_obj.value:.4f})")
+            ax.plot(epochs, maes, color=color, lw=1.8, label=label)
+            best_ep = min(trial_obj.intermediate_values, key=trial_obj.intermediate_values.get)
+            ax.scatter([best_ep], [trial_obj.intermediate_values[best_ep]],
+                       color=color, s=60, zorder=5)
+
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Val MAE (normalised)')
+        ax.set_title(f'Sweep — val MAE over epochs: top-3 trials\n'
+                     f'({self.database}, cant={self.cant})')
+        ax.legend(fontsize=8, loc='upper right')
+        plt.tight_layout()
+        sweep_path = f"{out_dir}/sweep_top3.png"
+        plt.savefig(sweep_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Sweep plot saved to {sweep_path}")
+
         best = study.best_params
         best_params = {'hidden_channels': best['hidden_channels'], 'num_layers': best['num_layers'],
                        'num_heads': best['num_heads'], 'lr': best['lr'], 'weight_decay': best['weight_decay']}
