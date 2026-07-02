@@ -383,6 +383,273 @@ class Modelling:
         self.params = best_params
         self.model = self._build_model(best_params).to(self.device)
 
+    # ── Homogeneous event graph methods ───────────────────────────────────────
+
+    def _hetero_to_homo(self, graphs):
+        """Convert normalised HeteroData prefixes to homogeneous Data (events only)."""
+        from torch_geometric.data import Data
+        vp = self.viewpoint_object
+        et = ('Events', 'to', 'Events')
+        result = []
+        for g in graphs:
+            edge_index = (g[et].edge_index if et in g.edge_types
+                          else torch.zeros(2, 0, dtype=torch.long))
+            result.append(Data(
+                x          = g['Events'].x,
+                edge_index = edge_index,
+                y          = g[vp].y[0],             # shape [1], normalised
+                id         = g[vp].id[0, 0],
+                last_event = g[vp].last_event[0, 0],
+            ))
+        return result
+
+    def homo_train_step(self, model, loader, optimizer, criterion, device):
+        model.train()
+        total_loss, total_examples = 0.0, 0
+        for batch in loader:
+            batch = batch.to(device)
+            optimizer.zero_grad()
+            out  = model(batch.x, batch.edge_index, batch.batch)  # [B]
+            loss = criterion(out, batch.y.squeeze(-1))
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            total_examples += batch.num_graphs
+            total_loss     += loss.item() * batch.num_graphs
+        return total_loss / total_examples
+
+    @torch.no_grad()
+    def homo_eval(self, loader, model, criterion, device):
+        model.eval()
+        total_loss, total_examples = 0.0, 0
+        for batch in loader:
+            batch = batch.to(device)
+            out  = model(batch.x, batch.edge_index, batch.batch)
+            loss = criterion(out, batch.y.squeeze(-1))
+            total_examples += batch.num_graphs
+            total_loss     += float(loss) * batch.num_graphs
+        return total_loss / total_examples
+
+    def Homo_Reg_Modelling(self):
+        """Train a homogeneous GCN on event-only graphs; save checkpoint + training log."""
+
+        torch.manual_seed(42)
+        random.seed(42)
+        np.random.seed(42)
+
+        homo_train = self._hetero_to_homo(self.train_data)
+        homo_val   = self._hetero_to_homo(self.val_data)
+        homo_test  = self._hetero_to_homo(self.test_data)
+
+        batch_size  = self.path_dict.get('batch_size', 16)
+        train_loader = DataLoader(homo_train, batch_size=batch_size, shuffle=True)
+        val_loader   = DataLoader(homo_val,   batch_size=batch_size, shuffle=False)
+        test_loader  = DataLoader(homo_test,  batch_size=batch_size, shuffle=False)
+
+        in_ch = homo_train[0].x.size(-1)  # 17 (normalised Events features)
+        model = REG_GNN.REG_GNN(
+            in_channels     = in_ch,
+            hidden_channels = self.params.get('hidden_channels', 48),
+            num_layers      = self.params.get('num_layers', 3),
+        ).to(self.device)
+
+        homo_model_path = self.model_path.replace(".pth", "_homo.pth")
+        criterion = torch.nn.L1Loss()
+
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr           = self.params['lr'],
+            weight_decay = self.params['weight_decay'],
+        )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=10
+        )
+
+        max_epochs, early_stop_patience = 200, 20
+        best_val_mae, best_state        = float("inf"), None
+        epochs_without_improvement      = 0
+        log = []
+
+        pbar = tqdm(range(1, max_epochs + 1), desc="HomoGNN")
+        for epoch in pbar:
+            train_loss = self.homo_train_step(model, train_loader, optimizer, criterion, self.device)
+            val_mae    = self.homo_eval(val_loader, model, criterion, self.device)
+            scheduler.step(val_mae)
+
+            current_lr = optimizer.param_groups[0]["lr"]
+            log.append({'epoch': epoch, 'train_loss': train_loss,
+                        'val_mae': val_mae, 'lr': current_lr})
+
+            if val_mae < best_val_mae:
+                print("New Best!")
+                best_val_mae = val_mae
+                best_state   = copy.deepcopy(model.state_dict())
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+
+            if epoch % 10 == 0 or epoch == 1:
+                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | "
+                      f"Val MAE: {val_mae:.4f} | LR: {current_lr:.2e}")
+
+            if epochs_without_improvement >= early_stop_patience:
+                print(f"\nEarly stopping at epoch {epoch}")
+                break
+        pbar.close()
+
+        if best_state is not None:
+            model.load_state_dict(best_state)
+        test_loss = self.homo_eval(test_loader, model, criterion, self.device)
+        print(f"HomoGNN Final MAE: {test_loss:.4f}")
+
+        torch.save(model.state_dict(), homo_model_path)
+        pd.DataFrame(log).to_csv(
+            homo_model_path.replace(".pth", "_training_log.csv"), index=False
+        )
+        print(f"HomoGNN checkpoint saved to {homo_model_path}")
+
+    def compare_models(self):
+        """Evaluate HGT and HomoGNN side-by-side on the test split and save a comparison plot."""
+
+        vp = self.viewpoint_object
+        homo_test      = self._hetero_to_homo(self.test_data)
+        homo_model_path = self.model_path.replace(".pth", "_homo.pth")
+
+        # ── Load HGT ────────────────────────────────────────────────────────
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        # ── Load HomoGNN ─────────────────────────────────────────────────────
+        in_ch = homo_test[0].x.size(-1)
+        homo_model = REG_GNN.REG_GNN(
+            in_channels     = in_ch,
+            hidden_channels = self.params.get('hidden_channels', 48),
+            num_layers      = self.params.get('num_layers', 3),
+        ).to(self.device)
+        homo_model.load_state_dict(torch.load(homo_model_path, weights_only=False))
+        homo_model.eval()
+
+        # ── Collect predictions ──────────────────────────────────────────────
+        records = []
+        with torch.no_grad():
+            for g_het, g_hom in zip(self.test_data, homo_test):
+                g_het = g_het.to(self.device)
+                g_hom = g_hom.to(self.device)
+
+                hgt_pred_n  = self.model(g_het.x_dict, g_het.edge_index_dict)[0].item()
+                homo_pred_n = homo_model(
+                    g_hom.x.unsqueeze(0) if g_hom.x.dim() == 1 else g_hom.x,
+                    g_hom.edge_index,
+                    torch.zeros(g_hom.num_nodes, dtype=torch.long, device=self.device),
+                ).item()
+
+                true_n = g_het[vp].y[0].item()
+                denorm = lambda v: (v * self.target_std.item() + self.target_mean.item()) / 3600.0
+
+                records.append({
+                    'true_h':       denorm(true_n),
+                    'hgt_pred_h':   denorm(hgt_pred_n),
+                    'homo_pred_h':  denorm(homo_pred_n),
+                    'n_events':     g_het['Events'].num_nodes,
+                    'last_event':   bool(g_het[vp].last_event[0].item()),
+                })
+
+        df        = pd.DataFrame(records)
+        last_mask = df['last_event'].values
+        y_true    = df['true_h'].values
+
+        # ── Metrics helper ────────────────────────────────────────────────────
+        def _metrics(y_t, y_p):
+            ae   = np.abs(y_t - y_p)
+            mae  = ae.mean()
+            rmse = np.sqrt((ae**2).mean())
+            ss_r = ((y_t - y_p)**2).sum()
+            ss_t = ((y_t - y_t.mean())**2).sum()
+            r2   = 1 - ss_r / ss_t if ss_t > 0 else float('nan')
+            return mae, rmse, r2
+
+        def _depth_mae(y_t, y_p, n_ev):
+            bins   = [(1,3,'1-3'), (4,6,'4-6'), (7,9,'7-9'), (10,9999,'10+')]
+            return {lbl: np.abs(y_t[(n_ev>=lo)&(n_ev<=hi)] - y_p[(n_ev>=lo)&(n_ev<=hi)]).mean()
+                    for lo, hi, lbl in bins}
+
+        n_ev = df['n_events'].values
+        models_preds = [('HomoGNN (GCN)', df['homo_pred_h'].values),
+                        ('HGT (ours)',    df['hgt_pred_h'].values)]
+
+        # ── Print table ───────────────────────────────────────────────────────
+        sep = '─' * 70
+        print(f"\n{'Model':<18}  {'ALL PREFIXES':^30}  {'LAST-EVENT ONLY':^18}")
+        print(f"{'':18}  {'MAE(h)':>7}  {'RMSE(h)':>7}  {'R²':>6}  "
+              f"{'MAE(h)':>7}  {'RMSE(h)':>7}  {'R²':>6}")
+        print(sep)
+        for name, preds in models_preds:
+            ma, rm, r2   = _metrics(y_true, preds)
+            mal, rml, r2l = _metrics(y_true[last_mask], preds[last_mask])
+            print(f"{name:<18}  {ma:7.1f}  {rm:7.1f}  {r2:6.3f}  "
+                  f"{mal:7.1f}  {rml:7.1f}  {r2l:6.3f}")
+        print()
+
+        # ── Plot ─────────────────────────────────────────────────────────────
+        out_dir = f"files/explainer_outputs/{self.database}/validation_2000"
+        os.makedirs(out_dir, exist_ok=True)
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+        # Left: scatter on last-event prefixes
+        ax = axes[0]
+        y_last = y_true[last_mask]
+        lim = max(y_last.max(),
+                  df['homo_pred_h'].values[last_mask].max(),
+                  df['hgt_pred_h'].values[last_mask].max()) * 1.08
+
+        hgt_mae_last  = _metrics(y_last, df['hgt_pred_h'].values[last_mask])[0]
+        homo_mae_last = _metrics(y_last, df['homo_pred_h'].values[last_mask])[0]
+
+        ax.scatter(y_last, df['homo_pred_h'].values[last_mask],
+                   alpha=0.55, s=22, color='steelblue',
+                   label=f"HomoGNN  (MAE={homo_mae_last:.1f}h)")
+        ax.scatter(y_last, df['hgt_pred_h'].values[last_mask],
+                   alpha=0.55, s=22, color='tomato',
+                   label=f"HGT       (MAE={hgt_mae_last:.1f}h)")
+        ax.plot([0, lim], [0, lim], 'k--', lw=1, label='Perfect')
+        ax.set_xlim(0, lim); ax.set_ylim(0, lim)
+        ax.set_xlabel('True remaining time (h)')
+        ax.set_ylabel('Predicted remaining time (h)')
+        ax.set_title('Predicted vs True — last-event prefixes')
+        ax.legend(fontsize=9)
+
+        # Right: MAE by depth (all prefixes)
+        ax    = axes[1]
+        BINS  = ['1-3', '4-6', '7-9', '10+']
+        x     = np.arange(len(BINS))
+        width = 0.3
+        depth_data = {name: _depth_mae(y_true, preds, n_ev)
+                      for name, preds in models_preds}
+        colors = {'HomoGNN (GCN)': 'steelblue', 'HGT (ours)': 'tomato'}
+        for i, (name, clr) in enumerate(colors.items()):
+            vals = [depth_data[name][b] for b in BINS]
+            bars = ax.bar(x + (i - 0.5) * width, vals, width, label=name,
+                          color=clr, edgecolor='white', linewidth=0.5)
+            for bar, v in zip(bars, vals):
+                if not np.isnan(v):
+                    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height()+1,
+                            f'{v:.0f}', ha='center', va='bottom', fontsize=7)
+        ax.set_xticks(x)
+        ax.set_xticklabels(BINS)
+        ax.set_xlabel('Prefix depth (n events seen)')
+        ax.set_ylabel('MAE (h)')
+        ax.set_title('MAE by prefix depth — all prefixes')
+        ax.legend(fontsize=9)
+
+        plt.suptitle(f'HomoGNN vs HGT — {self.database} (cant={self.cant})',
+                     fontsize=12, y=1.01)
+        plt.tight_layout()
+        out_path = f"{out_dir}/homo_comparison.png"
+        plt.savefig(out_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Comparison plot saved to {out_path}")
+
     def BinaryModelling(self, training_data, val_data, test_data):
         viewpoint_object = self.viewpoint_object
 
