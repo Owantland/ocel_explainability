@@ -684,6 +684,52 @@ class Modelling:
         plt.close()
         print(f"Comparison plot saved to {out_path}")
 
+    def plot_training_curves(self):
+        """Plot train loss and val MAE over epochs for HGT vs HomoGNN side-by-side."""
+        het_path  = self.model_path.replace(".pth", "_training_log.csv")
+        homo_path = self.model_path.replace(".pth", "_homo_training_log.csv")
+        het_df    = pd.read_csv(het_path)
+        homo_df   = pd.read_csv(homo_path)
+
+        HGT_COLOR  = '#e15759'
+        HOMO_COLOR = '#4e79a7'
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+        # ── Left: Training Loss ───────────────────────────────────────────
+        ax = axes[0]
+        ax.plot(het_df['epoch'],  het_df['train_loss'],  color=HGT_COLOR,  lw=1.8, label='HGT')
+        ax.plot(homo_df['epoch'], homo_df['train_loss'], color=HOMO_COLOR, lw=1.8, label='HomoGNN')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Train Loss (normalised L1)')
+        ax.set_title('Training Loss')
+        ax.legend(fontsize=9)
+
+        # ── Right: Validation MAE ─────────────────────────────────────────
+        ax = axes[1]
+        for df, name, color in [(het_df, 'HGT', HGT_COLOR), (homo_df, 'HomoGNN', HOMO_COLOR)]:
+            best_idx = df['val_mae'].idxmin()
+            best_ep  = int(df.loc[best_idx, 'epoch'])
+            best_mae = df.loc[best_idx, 'val_mae']
+            ax.plot(df['epoch'], df['val_mae'], color=color, lw=1.8,
+                    label=f"{name}  (best={best_mae:.4f} @ ep {best_ep})")
+            ax.scatter([best_ep], [best_mae], color=color, s=60, zorder=5)
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Val MAE (normalised)')
+        ax.set_title('Validation MAE')
+        ax.legend(fontsize=9)
+
+        plt.suptitle(f'Training Curves — HGT vs HomoGNN\n({self.database}, cant={self.cant})',
+                     fontsize=12)
+        plt.tight_layout()
+
+        out_dir  = f"files/explainer_outputs/{self.database}/validation_2000"
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = f"{out_dir}/training_curves.png"
+        plt.savefig(out_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Training curves saved to {out_path}")
+
     def BinaryModelling(self, training_data, val_data, test_data):
         viewpoint_object = self.viewpoint_object
 
