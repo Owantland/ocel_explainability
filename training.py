@@ -1,5 +1,7 @@
 import torch
 import json
+import random
+import numpy as np
 
 from torch.nn import Linear
 import torch.nn.functional as F
@@ -27,7 +29,7 @@ class Modelling:
         self.path_dict = self.funcs.get_paths()
         self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
         self.viewpoint_object = self.path_dict['kpi_viewpoint']
-        self.device = torch.device('cpu')
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         # Load relevant datasets
         self.train_data = torch.load(f"{self.path_dict['pytorch_path']}/train_graphs_sg.pt", weights_only=False)
@@ -44,9 +46,19 @@ class Modelling:
             self.params = self._load_params() or _DEFAULTS[0]
             self.model = self._build_model(self.params)
 
-            # Standardize the output values
+            # Standardize the output values.
+            # Load from sidecar if it exists — survives graph regeneration without silent
+            # de-normalisation. Falls back to computing from train data on first run.
             train_y_all = torch.cat([g[self.viewpoint_object].y for g in self.train_data])
-            target_mean, target_std = train_y_all.mean(), train_y_all.std()
+            _model_dir = f"{self.path_dict['model_path']}/Hetero"
+            _norm_path = f"{_model_dir}/{self.task_id}_norm.json"
+            if os.path.exists(_norm_path):
+                with open(_norm_path) as _f:
+                    _saved = json.load(_f)
+                target_mean = torch.tensor(_saved["target_mean"])
+                target_std  = torch.tensor(_saved["target_std"])
+            else:
+                target_mean, target_std = train_y_all.mean(), train_y_all.std()
             for m in [self.train_data, self.val_data, self.test_data]:
                 for g in m:
                     g[self.viewpoint_object].y = (g[self.viewpoint_object].y - target_mean) / target_std
@@ -165,6 +177,7 @@ class Modelling:
             y = batch[self.viewpoint_object].y
             loss = criterion(out, y)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             batch_size = len(batch[self.viewpoint_object].batch)
@@ -229,41 +242,21 @@ class Modelling:
 
         return total_correct / total_examples, f1.compute().item()
 
-    # Update the regression model
     def Het_Reg_Modelling(self, training_data, val_data, test_data):
-        """
-        :param het_train_data:
-        :param het_val_data:
-        :param het_test_data:
-        :return: Trains and tests a regression model for heterogeneous graph structures for comparison with the
-        homogeneous model predictions and explanations.
-        """
-        viewpoint_object = self.viewpoint_object
+        torch.manual_seed(42)
+        random.seed(42)
+        np.random.seed(42)
 
-        # Create the loaders for training and validation
-        train_loader = DataLoader(training_data, batch_size=16, shuffle=True)
-        val_loader = DataLoader(val_data, batch_size=16)
-        test_loader = DataLoader(test_data, batch_size=16)
+        batch_size = self.path_dict.get('batch_size', 16)
+        train_loader = DataLoader(training_data, batch_size=batch_size, shuffle=True)
+        val_loader   = DataLoader(val_data,      batch_size=batch_size, shuffle=False)
+        test_loader  = DataLoader(test_data,     batch_size=batch_size, shuffle=False)
 
-        # Define save path for the models
-        model_path = self.path_dict['model_path']
-        kpi_event = self.path_dict['kpi_event']
-        test_kpi = f"TimeFrom_{self.viewpoint_object}_to_{kpi_event}"
-
-        if not os.path.exists(f"{model_path}/Hetero"):
-            os.makedirs(f"{model_path}/Hetero")
-        model_path = f"{model_path}/Hetero/{test_kpi}.pth"
-
-        # Model values
-        data = training_data[0]
-        model = self.model
-        device = torch.device("cpu")
-        model = model.to(device)
-        data = data.to(device)
+        model = self.model.to(self.device)
         criterion = torch.nn.L1Loss()
 
         with torch.no_grad():
-            batch = next(iter(train_loader))
+            batch = next(iter(train_loader)).to(self.device)
             model(batch.x_dict, batch.edge_index_dict)
 
         optimizer = torch.optim.Adam(model.parameters(),
@@ -280,13 +273,18 @@ class Modelling:
         best_val_mae = float("inf")
         best_state = None
         epochs_without_improvement = 0
+        log = []
 
         pbar = tqdm(range(1, max_epochs + 1))
 
         for epoch in pbar:
-            train_loss = self.het_train(model, train_loader, optimizer, criterion, device)
-            val_mae = self.het_loss_test(val_loader, model, criterion, device)  # Should use a separate validation set loader
+            train_loss = self.het_train(model, train_loader, optimizer, criterion, self.device)
+            val_mae    = self.het_loss_test(val_loader, model, criterion, self.device)
             scheduler.step(val_mae)
+
+            current_lr = optimizer.param_groups[0]["lr"]
+            log.append({'epoch': epoch, 'train_loss': train_loss,
+                        'val_mae': val_mae, 'lr': current_lr})
 
             if val_mae < best_val_mae:
                 print("New Best!")
@@ -297,7 +295,6 @@ class Modelling:
                 epochs_without_improvement += 1
 
             if epoch % 10 == 0 or epoch == 1:
-                current_lr = optimizer.param_groups[0]["lr"]
                 print(
                     f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | "
                     f"Val MAE: {val_mae:.4f} | LR: {current_lr:.2e}"
@@ -311,15 +308,27 @@ class Modelling:
 
         if best_state is not None:
             model.load_state_dict(best_state)
-        test_loss = self.het_loss_test(test_loader, model, criterion, device)
+        test_loss = self.het_loss_test(test_loader, model, criterion, self.device)
         print(f'Final MAE: {test_loss}')
 
-        # Save best model
         torch.save(self.model.state_dict(), self.model_path)
+
+        norm_path = self.model_path.replace(".pth", "_norm.json")
+        with open(norm_path, "w") as f:
+            json.dump({"target_mean": self.target_mean.item(),
+                       "target_std":  self.target_std.item()}, f)
+
+        log_path = self.model_path.replace(".pth", "_training_log.csv")
+        pd.DataFrame(log).to_csv(log_path, index=False)
 
     def sweep(self, n_trials=30):
         import optuna
+        torch.manual_seed(42)
+        random.seed(42)
+        np.random.seed(42)
+
         criterion = torch.nn.L1Loss()
+        batch_size = self.path_dict.get('batch_size', 16)
 
         def objective(trial):
             hidden_channels = trial.suggest_categorical('hidden_channels', [16, 32, 48, 64, 96])
@@ -334,18 +343,22 @@ class Modelling:
                             'num_heads': num_heads, 'lr': lr, 'weight_decay': weight_decay}
             model = self._build_model(trial_params).to(self.device)
 
-            train_loader = DataLoader(self.train_data, batch_size=16, shuffle=True)
-            val_loader = DataLoader(self.val_data, batch_size=16)
+            train_loader = DataLoader(self.train_data, batch_size=batch_size, shuffle=True)
+            val_loader   = DataLoader(self.val_data,   batch_size=batch_size, shuffle=False)
             with torch.no_grad():
                 batch = next(iter(train_loader)).to(self.device)
                 model(batch.x_dict, batch.edge_index_dict)
 
             optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode="min", factor=0.5, patience=10
+            )
             best_val, patience_count = float('inf'), 0
 
-            for epoch in range(1, 51):
+            for epoch in range(1, 101):
                 self.het_train(model, train_loader, optimizer, criterion, self.device)
                 val_mae = self.het_loss_test(val_loader, model, criterion, self.device)
+                scheduler.step(val_mae)
                 trial.report(val_mae, epoch)
                 if trial.should_prune():
                     raise optuna.TrialPruned()
@@ -353,7 +366,7 @@ class Modelling:
                     best_val, patience_count = val_mae, 0
                 else:
                     patience_count += 1
-                    if patience_count >= 5:
+                    if patience_count >= 10:
                         break
 
             return best_val
