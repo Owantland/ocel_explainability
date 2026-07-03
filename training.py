@@ -1,16 +1,14 @@
+import ast
 import torch
 import json
 import random
 import numpy as np
 
-from torch.nn import Linear
-import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, GraphConv
-from torch_geometric.nn import global_mean_pool
+from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
-from model_classes import REG_GNN, HGT_CLASS, REG_GAT, HGT
-from torchmetrics import F1Score, ConfusionMatrix, Accuracy
+from model_classes import REG_GNN, HGT_CLASS, HGT
+from torchmetrics import F1Score
 
 import sup_funcs as sf
 import pandas as pd
@@ -18,7 +16,6 @@ from tqdm import tqdm
 import os
 
 import matplotlib.pyplot as plt
-import networkx as nx
 import copy
 
 class Modelling:
@@ -97,15 +94,20 @@ class Modelling:
             **{nt: names for nt, names in (self.path_dict.get('time_attributes') or {}).items()},
         }
 
-        # Extend feature names for enriched node types based on actual graph feature counts
+        # Extend feature names for enriched node types based on actual graph feature counts.
+        # Events layout: [ev_type one-hot | temporal | C3 activity counts | O1-ext obj counts]
         _temporal_names = ['elapsed_h', 'waiting_h', 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos']
         _order_extra = ['n_items', 'total_weight', 'n_products']
         if self.train_data and self.train_data[0]['Events'].num_nodes > 0:
-            n_ev = self.train_data[0]['Events'].x.shape[1]
-            n_types = max(0, n_ev - len(_temporal_names))
+            _ocel      = pd.read_csv(f"{self.path_dict['graph_output_path']}ocel.csv")
+            _n_types   = len(ast.literal_eval(_ocel['ev_type'].iloc[0]))
+            _obj_types = [c.replace('::ids', '') for c in _ocel.columns if c.endswith('::ids')]
             self.feature_names['Events'] = (
-                [f'type_{i}' for i in range(n_types)] + _temporal_names
-            )[:n_ev]
+                [f'type_{i}' for i in range(_n_types)]
+                + _temporal_names
+                + [f'c3_{i}' for i in range(_n_types)]
+                + [f'o1_{ot}' for ot in _obj_types]
+            )
         if self.train_data and self.train_data[0][self.viewpoint_object].num_nodes > 0:
             vp = self.viewpoint_object
             n_vp = self.train_data[0][vp].x.shape[1]
@@ -118,14 +120,6 @@ class Modelling:
         if not os.path.exists(f"{model_path}/Hetero"):
             os.makedirs(f"{model_path}/Hetero")
         self.model_path = f"{model_path}/Hetero/{self.task_id}.pth"
-
-    def decode_epoch(self, epoch_val):
-        timestamp = pd.Timestamp(epoch_val, unit='s')
-        return timestamp
-
-    def decode_time(self, total_secs):
-        timestamp = pd.Timedelta(round(total_secs, 2), unit='s')
-        return timestamp
 
     @property
     def _params_path(self):
@@ -383,7 +377,7 @@ class Modelling:
                      if t.state == optuna.trial.TrialState.COMPLETE]
         top3 = sorted(completed, key=lambda t: t.value)[:3]
 
-        out_dir = f"files/explainer_outputs/{self.database}/validation_2000"
+        out_dir = f"files/explainer_outputs/{self.database}/validation_{self.cant}"
         os.makedirs(out_dir, exist_ok=True)
 
         fig, ax = plt.subplots(figsize=(10, 5))
@@ -424,7 +418,6 @@ class Modelling:
 
     def _hetero_to_homo(self, graphs):
         """Convert normalised HeteroData prefixes to homogeneous Data (events only)."""
-        from torch_geometric.data import Data
         vp = self.viewpoint_object
         et = ('Events', 'to', 'Events')
         result = []
@@ -483,7 +476,7 @@ class Modelling:
         val_loader   = DataLoader(homo_val,   batch_size=batch_size, shuffle=False)
         test_loader  = DataLoader(homo_test,  batch_size=batch_size, shuffle=False)
 
-        in_ch = homo_train[0].x.size(-1)  # 17 (normalised Events features)
+        in_ch = homo_train[0].x.size(-1)  # Events dim after normalisation (C3 + O1-ext enriched)
         model = REG_GNN.REG_GNN(
             in_channels     = in_ch,
             hidden_channels = self.params.get('hidden_channels', 48),
@@ -567,6 +560,7 @@ class Modelling:
         homo_model.eval()
 
         # ── Collect predictions ──────────────────────────────────────────────
+        denorm = lambda v: (v * self.target_std.item() + self.target_mean.item()) / 3600.0
         records = []
         with torch.no_grad():
             for g_het, g_hom in zip(self.test_data, homo_test):
@@ -581,7 +575,6 @@ class Modelling:
                 ).item()
 
                 true_n = g_het[vp].y[0].item()
-                denorm = lambda v: (v * self.target_std.item() + self.target_mean.item()) / 3600.0
 
                 records.append({
                     'true_h':       denorm(true_n),
@@ -628,7 +621,7 @@ class Modelling:
         print()
 
         # ── Plot ─────────────────────────────────────────────────────────────
-        out_dir = f"files/explainer_outputs/{self.database}/validation_2000"
+        out_dir = f"files/explainer_outputs/{self.database}/validation_{self.cant}"
         os.makedirs(out_dir, exist_ok=True)
 
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
@@ -726,7 +719,7 @@ class Modelling:
                      fontsize=12)
         plt.tight_layout()
 
-        out_dir  = f"files/explainer_outputs/{self.database}/validation_2000"
+        out_dir  = f"files/explainer_outputs/{self.database}/validation_{self.cant}"
         os.makedirs(out_dir, exist_ok=True)
         out_path = f"{out_dir}/training_curves.png"
         plt.savefig(out_path, dpi=150, bbox_inches='tight')
@@ -734,37 +727,7 @@ class Modelling:
         print(f"Training curves saved to {out_path}")
 
     def BinaryModelling(self, training_data, val_data, test_data):
-        viewpoint_object = self.viewpoint_object
-
-        # Create loaders
-        train_loader = DataLoader(training_data, batch_size=16, shuffle=True)
-        val_loader = DataLoader(val_data, batch_size=16)
-        test_loader = DataLoader(test_data, batch_size=16)
-
-        # # Choose criterion
-        # criterion = F.cross_entropy
-        #
-        # # Materialize HGTConv's lazy linear layers with one real forward pass
-        # # before constructing the optimizer (same reason as the regression example).
-        # with torch.no_grad():
-        #     batch = next(iter(train_loader))
-        #     self.model(batch.x_dict, batch.edge_index_dict)
-        #
-        # optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)#, weight_decay=1e-5)
-        #
-        # # Run training loop
-        # best_val = 0.0
-        # pbar = tqdm(range(1, 51))
-        #
-        # for epoch in pbar:
-        #     train_loss = self.class_train(train_loader, optimizer, criterion)
-        #     val_acc, val_f1 = self.class_eval(val_loader)
-        #
-        #     print(f'Epoch: {epoch:03d}, Loss: {train_loss:.4f}, Val ACC: {val_acc:.4f} | Val F1: {val_f1:.4f}')
-        #     if val_f1 > best_val:
-        #         best_val = val_acc
-        #         print("New best!")
-        #         torch.save(self.model.state_dict(), self.model_path)
+        raise NotImplementedError("BinaryModelling not yet implemented")
 
     def Modelling(self):
         """

@@ -15,7 +15,7 @@ class TrainTestBuilder:
         self.pd_active_orders = self.get_active_orders()
 
         # Assigns train/test split values
-        self.index_train = round(0.6 * self.cant)
+        self.index_train = round(0.70 * self.cant)
         self.split_test_index = .5
 
     def get_active_orders(self):
@@ -78,4 +78,10 @@ class TrainTestBuilder:
             (self.pd_active_orders[1] > last_timestamp) & (self.pd_active_orders[2] <= split_timestamp_val)][0]
         test_orders = self.pd_active_orders[self.pd_active_orders[1] > last_timestamp_val][0]
 
+        print(f"\n[TrainTestBuilder] Split for {self.cant} traces:")
+        print(f"  Train : {len(train_orders):4d}  ({100*len(train_orders)/self.cant:.1f}%)")
+        print(f"  Val   : {len(val_orders):4d}  ({100*len(val_orders)/self.cant:.1f}%)")
+        print(f"  Test  : {len(test_orders):4d}  ({100*len(test_orders)/self.cant:.1f}%)")
+        gap = self.cant - len(train_orders) - len(val_orders) - len(test_orders)
+        print(f"  Gap   : {gap:4d}  ({100*gap/self.cant:.1f}%)  [temporal no-overlap exclusions]")
         return train_orders, val_orders, test_orders

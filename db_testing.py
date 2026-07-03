@@ -664,6 +664,92 @@ def verify_hetero_graphs(database='order_management', cant=2000):
     return errors
 
 
+def compare_to_hoeg(database='order_management', cant=2000):
+    """Print a structured comparison between this project's graph and HOEG (Smit et al. 2024)."""
+    funcs = sup.SupportFunctions(database, cant)
+    path_dict = funcs.get_paths()
+
+    with open(f"{path_dict['graph_output_path']}tensor_dict.json") as f:
+        td_base = json.load(f)
+
+    ocel_df = pd.read_csv(f"{path_dict['graph_output_path']}ocel.csv")
+    n_ev_types    = len(ast.literal_eval(ocel_df['ev_type'].iloc[0]))
+    obj_type_order = [c.replace('::ids', '') for c in ocel_df.columns if c.endswith('::ids')]
+
+    ev_dim     = td_base['Events'] + 6 + n_ev_types + len(obj_type_order)
+    ord_dim    = td_base.get('Orders', 0) + 3 + 1
+    obj_dims   = {k: v for k, v in td_base.items() if '_to_' not in k and k != 'Events'}
+    obj_dims['Orders'] = ord_dim
+    node_types = [k for k in td_base if '_to_' not in k]
+    edge_types = [k for k in td_base if '_to_' in k]
+    obj_to_obj = [e for e in edge_types if 'Events' not in e]
+    obj_to_ev  = [e for e in edge_types if 'Events' in e and e != 'Events_to_Events']
+
+    print(f"\n{'='*70}")
+    print(f"Graph Structure Comparison: This Project vs. HOEG (Smit et al. 2024)")
+    print(f"Dataset: {database}, cant={cant}")
+    print(f"{'='*70}")
+
+    rows = [
+        ("Node types",
+         f"{len(node_types)}: Events + {len(obj_type_order)} typed object types",
+         "2 categories: Event + Object (untyped)"),
+        ("Event node features",
+         f"{ev_dim}D (ev_type {n_ev_types}D + 6 temporal "
+         f"+ {n_ev_types}D C3 + {len(obj_type_order)}D O1-ext)",
+         "Basic event type one-hot"),
+        ("Object features",
+         "Typed: " + ", ".join(f"{k}={v}D" for k, v in obj_dims.items()),
+         "Static aggregated attrs (limitation: immutable)"),
+        ("Time-varying attrs",
+         "Yes — closest-timestamp lookup for Products",
+         "No — static only"),
+        ("Event→Event edges",
+         "Events_to_Events (directly-follows)",
+         "'follows' (directly-follows)"),
+        ("Object→Event edges",
+         f"{len(obj_to_ev)} typed (one per object type)",
+         "1 untyped 'interacts' edge"),
+        ("Object→Object edges",
+         f"{len(obj_to_obj)}: " + ", ".join(obj_to_obj),
+         "None"),
+        ("Graph model",
+         "HGT (multi-head attention, HGTConv)",
+         "k-dim HGNN (type-specific linear proj.)"),
+        ("Prefix strategy",
+         "One graph per event prefix",
+         "One graph per event prefix"),
+        ("KPI target node",
+         "Viewpoint object (Orders) — multi-instance",
+         "Case-level (trace)"),
+        ("XAI layer",
+         "LOO + InputXGradient + Counterfactual",
+         "None"),
+        ("Baseline",
+         "HomoGNN (REG_GNN.py)",
+         "EFG (event-only homogeneous GNN)"),
+    ]
+
+    col_w = [26, 46, 44]
+    sep   = "-" * sum(col_w)
+    print(f"\n  {'Dimension':<{col_w[0]}} {'This Project':<{col_w[1]}} {'HOEG':<{col_w[2]}}")
+    print(f"  {sep}")
+    for dim, ours, hoeg in rows:
+        print(f"  {dim:<{col_w[0]}} {ours:<{col_w[1]}} {hoeg:<{col_w[2]}}")
+
+    print(f"\n{'='*70}")
+    print("Key structural advantages of this project over HOEG:")
+    print(f"  1. {len(obj_to_obj)} object-to-object schema edges (HOEG: 0) "
+          f"— propagates domain structure")
+    print(f"  2. {len(obj_to_ev)} typed object→event edges "
+          f"vs. HOEG's single untyped 'interacts' edge")
+    print(f"  3. {ev_dim}D event features vs. HOEG's basic event-type one-hot")
+    print(f"  4. Time-varying object attributes "
+          f"(HOEG explicitly identifies static attrs as a limitation)")
+    print(f"  5. 3 post-hoc XAI methods (HOEG: none)")
+    print(f"{'='*70}\n")
+
+
 # MAIN
 cant = 2000
 database = 'order_management'
@@ -671,29 +757,32 @@ database = 'order_management'
 verify_process_generation(database, cant)
 verify_ocel_generator(database, cant)
 verify_hetero_graphs(database, cant)
+compare_to_hoeg(database, cant)
 
-# # Obtains all related nodes and arcs in the dataset and then generates the list of process executions
-# p = pg.ProcessGeneration(database, cant)
-# nodes = p.related_nodes()
-# p.get_ev_log(nodes)
+# Obtains all related nodes and arcs in the dataset and then generates the list of process executions
+p = pg.ProcessGeneration(database, cant)
+nodes = p.related_nodes()
+p.get_ev_log(nodes)
 
-# # Generate the OCEL file with relevant attributes (required when role_encoding config changes)
-# g = og.Generator(database, cant)
-# g.generate_ocel(nodes)
+# # # # Generate the OCEL file with relevant attributes (required when role_encoding config changes)
+# # # g = og.Generator(database, cant)
+# # # g.generate_ocel(nodes)
 
-# # # Apply the train test split to the set of process executions to obtain the relevant sets for learning set generation
-# ttb = tb.TrainTestBuilder(database, cant)
-# train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps = ttb.timestamps_generator()
-#
-# # # Obtains the learning set for training, testing and validation and converts it into pytorch tensors
-# hgg = hg.HeteroGraphsGenerator(database, cant, train_sampled_timestamps,
-#                                val_sampled_timestamps, test_sampled_timestamps)
-# hgg.trace_kpi()
-#
-# m = t.Modelling(database, cant)
-# m.sweep()
-# m.Modelling()
-#
+# # Apply the train test split to the set of process executions to obtain the relevant sets for learning set generation
+ttb = tb.TrainTestBuilder(database, cant)
+train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps = ttb.timestamps_generator()
+
+# # Obtains the learning set for training, testing and validation and converts it into pytorch tensors
+hgg = hg.HeteroGraphsGenerator(database, cant, train_sampled_timestamps,
+                               val_sampled_timestamps, test_sampled_timestamps)
+hgg.trace_kpi()
+
+m = t.Modelling(database, cant)
+m.sweep()
+m.Modelling()
+m.Homo_Reg_Modelling()
+m.compare_models()
+
 # # ── Validation ────────────────────────────────────────────────────────────────
 # import torch
 # import pandas as pd
