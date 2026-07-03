@@ -57,6 +57,17 @@ class HeteroGraphsGenerator:
         if 'Orders' in self.tensor_dict:
             self.tensor_dict['Orders'] += 3    # +3 aggregate features → 4D
 
+        # Adams et al. gap features: C3 (activity frequency) + O1-ext (object type counts)
+        self.n_ev_types = len(ast.literal_eval(self.ocel_df['ev_type'].iloc[0]))
+        self.obj_type_order = [
+            c.replace('::ids', '')
+            for c in self.ocel_df.columns if c.endswith('::ids')
+        ]
+        self.tensor_dict['Events'] += self.n_ev_types           # C3: +n_ev_types D
+        self.tensor_dict['Events'] += len(self.obj_type_order)  # O1-ext: +n_obj_types D
+        if 'Orders' in self.tensor_dict:
+            self.tensor_dict['Orders'] += 1                     # n_packages: +1D
+
         # Creates a variety of dictionaries of relationships between objects
         self.pd_active_orders, self.active_orders_dict = self.preprocessing_steps()
 
@@ -104,9 +115,10 @@ class HeteroGraphsGenerator:
             cnt = 0
             start_ts = pd.to_datetime(start_time)
             prev_ts = None
+            activity_counts = [0] * self.n_ev_types  # C3 accumulator, reset per trace
             for i, row in active_df.iterrows():
                 last_event = True if cnt == len(active_df) - 1 else False
-                # Add Events with 6 temporal features appended to the one-hot type encoding
+                # Build partial event feature; obj_counts (O1-ext) appended after active_graph update
                 ev_type = ast.literal_eval(row['ev_type'])
                 current_ts = pd.to_datetime(row['timestamp'])
                 elapsed_h = (current_ts - start_ts).total_seconds() / 3600.0
@@ -114,14 +126,13 @@ class HeteroGraphsGenerator:
                 prev_ts = current_ts
                 h_frac = current_ts.hour + current_ts.minute / 60.0
                 dow = current_ts.dayofweek
-                ev_type = ev_type + [
+                activity_counts[ev_type.index(1)] += 1  # C3: inclusive count for this event
+                ev_feat_partial = ev_type + [
                     elapsed_h, waiting_h,
                     math.sin(2 * math.pi * h_frac / 24.0), math.cos(2 * math.pi * h_frac / 24.0),
                     math.sin(2 * math.pi * dow / 7.0),     math.cos(2 * math.pi * dow / 7.0),
-                ]
+                ] + list(activity_counts)
                 ev_id = row['ev_id']
-                active_events.append(ev_type)
-                active_graph['Events'] = active_events
 
                 # Add nodes
                 ev_cols = ['ev_id', 'ev_type', 'ev_idx', 'timestamp', 'vwpnt_id']
@@ -142,17 +153,23 @@ class HeteroGraphsGenerator:
                     edge = ast.literal_eval(edge)
                     active_graph[col] = edge
 
-                # Order aggregate features: n_items, total_weight, n_distinct_products
+                # Order aggregate features: n_items, total_weight, n_distinct_products, n_packages
                 # Appended to each Orders node's feature vector whenever Orders is in the prefix.
                 if 'Orders' in active_graph:
                     items_feats = active_graph.get('Items', [])  # list of [weight, price] per item
                     n_items = float(len(items_feats))
                     total_weight = float(sum(f[0] for f in items_feats)) if items_feats else 0.0
                     n_products = float(len(active_graph.get('Products', [])))
+                    n_packages = float(len(active_graph.get('Packages', [])))
                     active_graph['Orders'] = [
-                        order_feats + [n_items, total_weight, n_products]
+                        order_feats + [n_items, total_weight, n_products, n_packages]
                         for order_feats in active_graph['Orders']
                     ]
+
+                # Complete event feature with O1-ext object type counts, now that active_graph is set
+                obj_counts = [float(len(active_graph.get(ot, []))) for ot in self.obj_type_order]
+                active_events.append(ev_feat_partial + obj_counts)
+                active_graph['Events'] = active_events
 
                 y_val = ys[cnt]
                 cnt += 1
