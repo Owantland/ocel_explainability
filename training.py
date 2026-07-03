@@ -322,6 +322,11 @@ class Modelling:
         pd.DataFrame(log).to_csv(log_path, index=False)
 
     def sweep(self, n_trials=30):
+        """
+        Performs a training sweep of multiple hyperparameters to find the optimal model settings
+        :param n_trials: number of trials for sweep
+        :return: Saves the best hyperparameters to a json file
+        """
         import optuna
         torch.manual_seed(42)
         random.seed(42)
@@ -331,16 +336,15 @@ class Modelling:
         batch_size = self.path_dict.get('batch_size', 16)
 
         def objective(trial):
-            hidden_channels = trial.suggest_categorical('hidden_channels', [16, 32, 48, 64, 96])
-            num_heads = trial.suggest_categorical('num_heads', [1, 2, 4, 8])
+            hidden_channels = trial.suggest_categorical('hidden_channels', [8, 16, 24, 32, 48, 64, 128, 256])
+            num_heads = trial.suggest_categorical('num_heads', [1, 2])
             if hidden_channels % num_heads != 0:
                 raise optuna.TrialPruned()
-            num_layers = trial.suggest_int('num_layers', 1, 3)
-            lr = trial.suggest_float('lr', 1e-4, 1e-2, log=True)
-            weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True)
+            num_layers = trial.suggest_int('num_layers', 1, 2)
+            lr = trial.suggest_categorical('lr', [1e-3, 1e-2])
 
             trial_params = {'hidden_channels': hidden_channels, 'num_layers': num_layers,
-                            'num_heads': num_heads, 'lr': lr, 'weight_decay': weight_decay}
+                            'num_heads': num_heads, 'lr': lr}
             model = self._build_model(trial_params).to(self.device)
 
             train_loader = DataLoader(self.train_data, batch_size=batch_size, shuffle=True)
@@ -349,13 +353,13 @@ class Modelling:
                 batch = next(iter(train_loader)).to(self.device)
                 model(batch.x_dict, batch.edge_index_dict)
 
-            optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.001)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, mode="min", factor=0.5, patience=10
             )
             best_val, patience_count = float('inf'), 0
 
-            for epoch in range(1, 101):
+            for epoch in range(1, 31):
                 self.het_train(model, train_loader, optimizer, criterion, self.device)
                 val_mae = self.het_loss_test(val_loader, model, criterion, self.device)
                 scheduler.step(val_mae)
@@ -366,9 +370,8 @@ class Modelling:
                     best_val, patience_count = val_mae, 0
                 else:
                     patience_count += 1
-                    if patience_count >= 10:
+                    if patience_count >= 4:
                         break
-
             return best_val
 
         study = optuna.create_study(direction='minimize',
@@ -411,7 +414,7 @@ class Modelling:
 
         best = study.best_params
         best_params = {'hidden_channels': best['hidden_channels'], 'num_layers': best['num_layers'],
-                       'num_heads': best['num_heads'], 'lr': best['lr'], 'weight_decay': best['weight_decay']}
+                       'num_heads': best['num_heads'], 'lr': best['lr'], 'weight_decay': 0.001}
         print(f"Best params for {self.task_id}: {best_params}  (val MAE: {study.best_value:.4f})")
         self._save_params(best_params)
         self.params = best_params
