@@ -18,6 +18,25 @@ import pandas as pd
 import datetime as dt
 import ast
 
+
+def _remap_events_edge(edge, remap, src_is_events, tgt_is_events):
+    """Translate an edge's Events-side indices from their absolute (pre-windowing)
+    position -- baked into edges.csv by ocel_generator.py against each process's
+    full, untrimmed event sequence -- to their local position within the current
+    (start_time, end_time)-filtered active_df. Drops edges whose Events endpoint
+    references an excluded (out-of-window) event entirely."""
+    src_list, tgt_list = edge
+    new_src, new_tgt = [], []
+    for s, t in zip(src_list, tgt_list):
+        ns = remap.get(s) if src_is_events else s
+        nt = remap.get(t) if tgt_is_events else t
+        if ns is None or nt is None:
+            continue
+        new_src.append(ns)
+        new_tgt.append(nt)
+    return [new_src, new_tgt]
+
+
 class HeteroGraphsGenerator:
     def __init__(self, database, cant, train_sample, val_sample, test_sample):
         self.database = database
@@ -102,9 +121,23 @@ class HeteroGraphsGenerator:
             start_time = self.ev_log[self.ev_log['vwpnt_id'] == process]['timestamp'].values[0]
             end_time = self.ev_log[self.ev_log['vwpnt_id'] == process]['timestamp'].values[-1]
             active_df = self.ocel_df[self.ocel_df['vwpnt_id'] == process]
+            full_event_ids = active_df['ev_id'].tolist()
             active_df = active_df[active_df['timestamp'] < end_time]
+            active_df = active_df[active_df['timestamp'] > start_time]
+
+            # events_idx_remap: absolute (pre-windowing) event position -> local position
+            # within the filtered active_df. Needed because Events_to_Events/*_to_Events
+            # edge indices in edges.csv were computed by ocel_generator.py against each
+            # process's full, untrimmed event sequence -- excluding leading events here
+            # shifts every surviving event's position, so edge indices must follow.
+            old_idx_of_evid = {eid: pos for pos, eid in enumerate(full_event_ids)}
+            new_idx_of_evid = {eid: pos for pos, eid in enumerate(active_df['ev_id'])}
+            events_idx_remap = {old_idx_of_evid[eid]: new_idx_of_evid[eid]
+                                 for eid in active_df['ev_id']}
+
             edges = self.edges[self.edges['vwpnt_id'] == process]
             edges = edges[edges['timestamp'] <= end_time]
+            edges = edges[edges['timestamp'] > start_time]
             y_df    = self.all_kpis[self.all_kpis['viewpoint_id'] == process].reset_index(drop=True)
             evlog_t = self.ev_log[self.ev_log['vwpnt_id'] == process].reset_index(drop=True)
             # Map ev_id → kpi_val via positional alignment of ev_log and all_kpis.
@@ -156,6 +189,10 @@ class HeteroGraphsGenerator:
                 for col in cols:
                     edge = active_edges[col].values[0]
                     edge = ast.literal_eval(edge)
+                    src_type, tgt_type = col.split('_to_')
+                    if src_type == 'Events' or tgt_type == 'Events':
+                        edge = _remap_events_edge(edge, events_idx_remap,
+                                                   src_type == 'Events', tgt_type == 'Events')
                     active_graph[col] = edge
 
                 # Order aggregate features: n_items, total_weight, n_distinct_products, n_packages

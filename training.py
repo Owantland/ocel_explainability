@@ -364,7 +364,7 @@ class Modelling:
                 batch = next(iter(train_loader)).to(self.device)
                 model(batch.x_dict, batch.edge_index_dict)
 
-            optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.001)
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, mode="min", factor=0.5, patience=10
             )
@@ -441,7 +441,7 @@ class Modelling:
 
         best = study.best_params
         best_params = {'hidden_channels': best['hidden_channels'], 'num_layers': best['num_layers'],
-                       'num_heads': best['num_heads'], 'lr': best['lr'], 'weight_decay': 0.001}
+                       'num_heads': best['num_heads'], 'lr': best['lr'], 'weight_decay': 1e-5}
         print(f"Best params for {self.task_id}: {best_params}  (val MAE: {study.best_value:.4f})")
         self._save_params(best_params)
         self.params = best_params
