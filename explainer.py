@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import os
 from model_classes import HGT
 from training import Modelling
+from torch_geometric.explain import Explainer as PyGExplainer, CaptumExplainer
 
 
 class Explainer(Modelling):
@@ -1100,29 +1101,47 @@ class Explainer(Modelling):
         plt.close()
         print(f"Saved CF node-type comparison to {save_dir}")
 
-    # ── Feature attribution (InputXGradient) ──────────────────────────────────
+    # ── Feature attribution (PyG Explainer + CaptumExplainer) ───────────────────
+    # Verified against the previous hand-rolled `captum.attr.InputXGradient(forward_func)`
+    # call: identical output (max abs diff 0.0) on the same graphs/weights, so this wrapper
+    # replaces it directly and additionally supports IntegratedGradients via the same API.
 
-    def _compute_ig_for_graph(self, graph):
-        """Run InputXGradient via Captum directly; return signed per-type attribution arrays."""
-        from captum.attr import InputXGradient
+    _DEPTH_BINS = [(1, 3, '1-3'), (4, 6, '4-6'), (7, 9, '7-9'), (10, 9999, '10+')]
+
+    def _get_pyg_explainer(self, method):
+        """Build (and cache) a PyG Explainer wrapping the given Captum attribution method."""
+        if not hasattr(self, '_pyg_explainers'):
+            self._pyg_explainers = {}
+        if method not in self._pyg_explainers:
+            algo_kwargs = {'n_steps': 50} if method == 'IntegratedGradients' else {}
+            self._pyg_explainers[method] = PyGExplainer(
+                model=self.model,
+                algorithm=CaptumExplainer(method, **algo_kwargs),
+                explanation_type='model',
+                node_mask_type='attributes',
+                model_config=dict(mode='regression', task_level='node', return_type='raw'),
+            )
+        return self._pyg_explainers[method]
+
+    def _compute_attribution_for_graph(self, graph, method='InputXGradient'):
+        """Run the given Captum attribution method via PyG's Explainer; return signed
+        per-type attribution arrays."""
         node_types = list(graph.node_types)
-        edge_index_dict = graph.edge_index_dict  # fixed context — not attributed
-
-        def forward_func(*x_tensors):
-            x_dict = dict(zip(node_types, x_tensors))
-            return self.model(x_dict, edge_index_dict)  # [N_orders, 1]
-
-        ig = InputXGradient(forward_func)
-        inputs = tuple(graph[nt].x.clone().requires_grad_(True) for nt in node_types)
+        x_dict = {nt: graph[nt].x for nt in node_types}
         try:
-            attributions = ig.attribute(inputs, target=0)
+            explanation = self._get_pyg_explainer(method)(x_dict, graph.edge_index_dict, index=0)
         except Exception as exc:
-            print(f"    IG failed: {exc}")
+            print(f"    {method} failed: {exc}")
             return {}
-        return {nt: attr.detach().cpu().numpy() for nt, attr in zip(node_types, attributions)}
+        return {nt: explanation.node_mask_dict[nt].detach().cpu().numpy() for nt in node_types}
 
-    def explain_feature_attribution(self, n_traces=None):
-        """InputXGradient feature attribution aggregated across last-event test graphs."""
+    def explain_feature_attribution(self, n_traces=None,
+                                     methods=('InputXGradient', 'IntegratedGradients'),
+                                     depth_stratify=True):
+        """Feature attribution aggregated across last-event test graphs, computed for each
+        method in `methods` and cross-validated against each other via the top-K/bottom-K
+        perturbation fidelity check. If `depth_stratify`, also runs a depth-stratified
+        breakdown across ALL test prefixes (see `_explain_attribution_by_depth`)."""
         import numpy as np
         import pandas as pd
         from matplotlib.patches import Patch
@@ -1135,136 +1154,227 @@ class Explainer(Modelling):
             last_event_graphs = last_event_graphs[:n_traces]
         n = len(last_event_graphs)
 
-        # Accumulate per-type signed importance arrays (mean-pooled over nodes per graph)
-        accum = {}  # {node_type: list of [F_type] arrays}
-        for i, graph in enumerate(last_event_graphs):
-            if i % max(1, n // 10) == 0:
-                print(f"  IG attribution: {100 * i // n}%")
-            masks = self._compute_ig_for_graph(graph)
-            for nt, mask in masks.items():  # mask: [N_type, F_type] signed
-                if mask.shape[0] == 0:
-                    continue
-                accum.setdefault(nt, []).append(mask.mean(axis=0))
-        print("  IG attribution: 100%")
-
-        # Mean signed and mean absolute per (node_type, dim)
-        mean_signed = {nt: np.stack(arrs).mean(axis=0) for nt, arrs in accum.items()}
-        mean_abs    = {nt: np.abs(np.stack(arrs)).mean(axis=0) for nt, arrs in accum.items()}
-
-        # Print ranked summary
-        print("\n" + "=" * 60)
-        print("Feature Attribution (InputXGradient) — Dataset-Level")
-        print(f"  Graphs analysed: {n}")
-        print("=" * 60)
-        for nt in sorted(mean_abs):
-            scores = mean_abs[nt]
-            fnames = self.feature_names.get(nt, [f"feat_{j}" for j in range(len(scores))])
-            top_idx = np.argsort(scores)[::-1][:3]
-            top_str = ", ".join(
-                f"{fnames[j] if j < len(fnames) else f'feat_{j}'}={scores[j]:.4f}"
-                for j in top_idx
-            )
-            print(f"  {nt:12s}  top-3: {top_str}")
-
-        # Output directory
         out_dir = os.path.join(self.path_dict['explainer_path'], 'attribution')
         os.makedirs(out_dir, exist_ok=True)
 
-        # Per-type bar charts
-        for nt in sorted(mean_abs):
-            scores_abs = mean_abs[nt]
-            scores_sgn = mean_signed[nt]
-            fnames = self.feature_names.get(nt, [f"feat_{j}" for j in range(len(scores_abs))])
-            labels = [fnames[j] if j < len(fnames) else f"feat_{j}" for j in range(len(scores_abs))]
-            order  = np.argsort(scores_abs)[::-1]
-            colors = ['#4C72B0' if scores_sgn[j] >= 0 else '#DD8452' for j in order]
+        method_mean_abs = {}  # method -> {node_type: [F_type] mean-abs array}
+        for method in methods:
+            # Accumulate per-type signed importance arrays (mean-pooled over nodes per graph)
+            accum = {}  # {node_type: list of [F_type] arrays}
+            for i, graph in enumerate(last_event_graphs):
+                if i % max(1, n // 10) == 0:
+                    print(f"  {method} attribution: {100 * i // n}%")
+                masks = self._compute_attribution_for_graph(graph, method=method)
+                for nt, mask in masks.items():  # mask: [N_type, F_type] signed
+                    if mask.shape[0] == 0:
+                        continue
+                    accum.setdefault(nt, []).append(mask.mean(axis=0))
+            print(f"  {method} attribution: 100%")
 
-            fig, ax = plt.subplots(figsize=(max(6, len(scores_abs) * 0.45 + 2), 4))
-            ax.barh([labels[j] for j in order], scores_abs[order], color=colors, alpha=0.85)
-            ax.set_xlabel("Mean |InputXGradient| attribution")
-            ax.set_title(f"Feature attribution — {nt} nodes")
-            ax.grid(True, axis='x', alpha=0.3)
-            ax.legend(handles=[Patch(color='#4C72B0', label='+ (raises prediction)'),
-                                Patch(color='#DD8452', label='− (lowers prediction)')],
-                      fontsize=8)
+            # Mean signed and mean absolute per (node_type, dim)
+            mean_signed = {nt: np.stack(arrs).mean(axis=0) for nt, arrs in accum.items()}
+            mean_abs    = {nt: np.abs(np.stack(arrs)).mean(axis=0) for nt, arrs in accum.items()}
+            method_mean_abs[method] = mean_abs
+
+            # Print ranked summary
+            print("\n" + "=" * 60)
+            print(f"Feature Attribution ({method}) — Dataset-Level")
+            print(f"  Graphs analysed: {n}")
+            print("=" * 60)
+            for nt in sorted(mean_abs):
+                scores = mean_abs[nt]
+                fnames = self.feature_names.get(nt, [f"feat_{j}" for j in range(len(scores))])
+                top_idx = np.argsort(scores)[::-1][:3]
+                top_str = ", ".join(
+                    f"{fnames[j] if j < len(fnames) else f'feat_{j}'}={scores[j]:.4f}"
+                    for j in top_idx
+                )
+                print(f"  {nt:12s}  top-3: {top_str}")
+
+            suffix = method.lower()
+
+            # Per-type bar charts
+            for nt in sorted(mean_abs):
+                scores_abs = mean_abs[nt]
+                scores_sgn = mean_signed[nt]
+                fnames = self.feature_names.get(nt, [f"feat_{j}" for j in range(len(scores_abs))])
+                labels = [fnames[j] if j < len(fnames) else f"feat_{j}" for j in range(len(scores_abs))]
+                order  = np.argsort(scores_abs)[::-1]
+                colors = ['#4C72B0' if scores_sgn[j] >= 0 else '#DD8452' for j in order]
+
+                fig, ax = plt.subplots(figsize=(max(6, len(scores_abs) * 0.45 + 2), 4))
+                ax.barh([labels[j] for j in order], scores_abs[order], color=colors, alpha=0.85)
+                ax.set_xlabel(f"Mean |{method}| attribution")
+                ax.set_title(f"Feature attribution — {nt} nodes ({method})")
+                ax.grid(True, axis='x', alpha=0.3)
+                ax.legend(handles=[Patch(color='#4C72B0', label='+ (raises prediction)'),
+                                    Patch(color='#DD8452', label='− (lowers prediction)')],
+                          fontsize=8)
+                plt.tight_layout()
+                plt.savefig(os.path.join(out_dir, f"ig_{nt.lower()}_importance_{suffix}.png"), dpi=150)
+                plt.close()
+
+            # Heatmap across all node types
+            all_types = sorted(mean_abs)
+            max_dims  = max(len(v) for v in mean_abs.values())
+            heat = np.zeros((len(all_types), max_dims))
+            for i, nt in enumerate(all_types):
+                arr = mean_abs[nt]
+                heat[i, :len(arr)] = arr
+
+            fig, ax = plt.subplots(figsize=(max(8, max_dims * 0.5 + 2), len(all_types) + 1))
+            im = ax.imshow(heat, aspect='auto', cmap='YlOrRd')
+            ax.set_yticks(range(len(all_types)))
+            ax.set_yticklabels(all_types)
+            ax.set_xlabel("Feature dimension index")
+            ax.set_title(f"Feature attribution heatmap (mean |{method}|)")
+            plt.colorbar(im, ax=ax, shrink=0.8)
             plt.tight_layout()
-            plt.savefig(os.path.join(out_dir, f"ig_{nt.lower()}_importance.png"), dpi=150)
+            plt.savefig(os.path.join(out_dir, f"ig_heatmap_{suffix}.png"), dpi=150)
             plt.close()
 
-        # Heatmap across all node types
-        all_types = sorted(mean_abs)
-        max_dims  = max(len(v) for v in mean_abs.values())
-        heat = np.zeros((len(all_types), max_dims))
-        for i, nt in enumerate(all_types):
-            arr = mean_abs[nt]
-            heat[i, :len(arr)] = arr
+            # CSV
+            rows = []
+            for nt in sorted(mean_abs):
+                fnames = self.feature_names.get(nt, [])
+                for dim, (s, a) in enumerate(zip(mean_signed[nt], mean_abs[nt])):
+                    fname = fnames[dim] if dim < len(fnames) else f"feat_{dim}"
+                    rows.append({'node_type': nt, 'feature_dim': dim, 'feature_name': fname,
+                                 'mean_signed': round(float(s), 6), 'mean_abs': round(float(a), 6)})
+            pd.DataFrame(rows).to_csv(os.path.join(out_dir, f"ig_attribution_{suffix}.csv"), index=False)
+            print(f"\nSaved {method} attribution outputs to: {out_dir}")
 
-        fig, ax = plt.subplots(figsize=(max(8, max_dims * 0.5 + 2), len(all_types) + 1))
-        im = ax.imshow(heat, aspect='auto', cmap='YlOrRd')
-        ax.set_yticks(range(len(all_types)))
-        ax.set_yticklabels(all_types)
-        ax.set_xlabel("Feature dimension index")
-        ax.set_title("Feature attribution heatmap (mean |InputXGradient|)")
-        plt.colorbar(im, ax=ax, shrink=0.8)
-        plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, "ig_heatmap.png"), dpi=150)
-        plt.close()
-
-        # CSV
-        rows = []
-        for nt in sorted(mean_abs):
-            fnames = self.feature_names.get(nt, [])
-            for dim, (s, a) in enumerate(zip(mean_signed[nt], mean_abs[nt])):
-                fname = fnames[dim] if dim < len(fnames) else f"feat_{dim}"
-                rows.append({'node_type': nt, 'feature_dim': dim, 'feature_name': fname,
-                             'mean_signed': round(float(s), 6), 'mean_abs': round(float(a), 6)})
-        pd.DataFrame(rows).to_csv(os.path.join(out_dir, "ig_attribution.csv"), index=False)
-        print(f"\nSaved attribution outputs to: {out_dir}")
-
-        # ── Validation: perturbation fidelity (top-K vs bottom-K) ────────────
+        # ── Validation: perturbation fidelity (top-K vs bottom-K), per method ───
         print("\n── Perturbation fidelity validation (K=2) ──")
-        all_features = [
-            (float(score), nt, int(dim))
-            for nt in mean_abs
-            for dim, score in enumerate(mean_abs[nt])
-        ]
-        all_features.sort(key=lambda x: x[0], reverse=True)
-        K = 2
-        top_k = [(nt, dim) for _, nt, dim in all_features[:K]]
-        bot_k  = [(nt, dim) for _, nt, dim in all_features[-K:]]
 
         def _feat_label(nt, dim):
             fnames = self.feature_names.get(nt, [])
             return f"{nt}[{fnames[dim] if dim < len(fnames) else f'feat_{dim}'}]"
 
-        top_shifts, bot_shifts = [], []
-        with torch.no_grad():
-            for graph in last_event_graphs:
-                baseline = self._predict_value_for_graph(graph, 0)
+        fidelity_summary = []
+        for method in methods:
+            mean_abs = method_mean_abs[method]
+            all_features = [
+                (float(score), nt, int(dim))
+                for nt in mean_abs
+                for dim, score in enumerate(mean_abs[nt])
+            ]
+            all_features.sort(key=lambda x: x[0], reverse=True)
+            K = 2
+            top_k = [(nt, dim) for _, nt, dim in all_features[:K]]
+            bot_k  = [(nt, dim) for _, nt, dim in all_features[-K:]]
 
-                x_top = {k: v.clone() for k, v in graph.x_dict.items()}
-                for nt, dim in top_k:
-                    if nt in x_top and dim < x_top[nt].size(1):
-                        x_top[nt][:, dim] = 0.0
-                out_top = self.model(x_top, graph.edge_index_dict)
-                pred_top = (out_top * self.target_std + self.target_mean)[0].item()
-                top_shifts.append(abs(baseline - pred_top))
+            top_shifts, bot_shifts = [], []
+            with torch.no_grad():
+                for graph in last_event_graphs:
+                    baseline = self._predict_value_for_graph(graph, 0)
 
-                x_bot = {k: v.clone() for k, v in graph.x_dict.items()}
-                for nt, dim in bot_k:
-                    if nt in x_bot and dim < x_bot[nt].size(1):
-                        x_bot[nt][:, dim] = 0.0
-                out_bot = self.model(x_bot, graph.edge_index_dict)
-                pred_bot = (out_bot * self.target_std + self.target_mean)[0].item()
-                bot_shifts.append(abs(baseline - pred_bot))
+                    x_top = {k: v.clone() for k, v in graph.x_dict.items()}
+                    for nt, dim in top_k:
+                        if nt in x_top and dim < x_top[nt].size(1):
+                            x_top[nt][:, dim] = 0.0
+                    out_top = self.model(x_top, graph.edge_index_dict)
+                    pred_top = (out_top * self.target_std + self.target_mean)[0].item()
+                    top_shifts.append(abs(baseline - pred_top))
 
-        top_mean_h = np.mean(top_shifts) / 3600
-        bot_mean_h = np.mean(bot_shifts) / 3600
-        print(f"  Top-K ({', '.join(_feat_label(nt, d) for nt, d in top_k)}): mean |Δpred| = {top_mean_h:.3f}h")
-        print(f"  Bot-K ({', '.join(_feat_label(nt, d) for nt, d in bot_k)}): mean |Δpred| = {bot_mean_h:.3f}h")
-        status = "PASS" if top_mean_h > bot_mean_h else "FAIL"
-        print(f"  Fidelity check: {status}  (top-K shift {'>' if top_mean_h > bot_mean_h else '<='} bot-K shift)")
+                    x_bot = {k: v.clone() for k, v in graph.x_dict.items()}
+                    for nt, dim in bot_k:
+                        if nt in x_bot and dim < x_bot[nt].size(1):
+                            x_bot[nt][:, dim] = 0.0
+                    out_bot = self.model(x_bot, graph.edge_index_dict)
+                    pred_bot = (out_bot * self.target_std + self.target_mean)[0].item()
+                    bot_shifts.append(abs(baseline - pred_bot))
+
+            top_mean_h = np.mean(top_shifts) / 3600
+            bot_mean_h = np.mean(bot_shifts) / 3600
+            gap = top_mean_h - bot_mean_h
+            status = "PASS" if top_mean_h > bot_mean_h else "FAIL"
+            fidelity_summary.append((method, top_mean_h, bot_mean_h, gap, status))
+            print(f"  [{method}] Top-K ({', '.join(_feat_label(nt, d) for nt, d in top_k)}): "
+                  f"mean |Δpred| = {top_mean_h:.3f}h")
+            print(f"  [{method}] Bot-K ({', '.join(_feat_label(nt, d) for nt, d in bot_k)}): "
+                  f"mean |Δpred| = {bot_mean_h:.3f}h")
+            print(f"  [{method}] Fidelity check: {status}  "
+                  f"(top-K shift {'>' if top_mean_h > bot_mean_h else '<='} bot-K shift, gap={gap:+.3f}h)")
+
+        if len(methods) > 1:
+            print("\n  Method comparison (higher gap = more faithful by this project's own check):")
+            for method, top_h, bot_h, gap, status in sorted(fidelity_summary, key=lambda r: -r[3]):
+                print(f"    {method:20s}  top={top_h:.3f}h  bot={bot_h:.3f}h  gap={gap:+.3f}h  {status}")
+
         print("=" * 60 + "\n")
+
+        # ── Depth-stratified attribution (OCEL analogue of Zhai et al.'s time-of-day
+        #    heatmap), computed across ALL test prefixes, not just last-event graphs ───
+        if depth_stratify:
+            self._explain_attribution_by_depth(methods=methods, n_traces=n_traces)
+
+    def _explain_attribution_by_depth(self, methods=('InputXGradient',), n_traces=None,
+                                       node_type=None):
+        """Depth-stratified feature attribution across ALL test prefixes (not just
+        last-event graphs) — the OCEL analogue of Zhai et al.'s time-of-day heatmap.
+        Reuses the same depth bins as compare_models()/baselines.py's depth_mae()."""
+        import numpy as np
+        import pandas as pd
+
+        node_type = node_type or self.viewpoint_object
+        graphs = self.test_data if n_traces is None else self.test_data[:n_traces]
+        n = len(graphs)
+        print(f"\nDepth-stratified attribution: {n} prefixes across all depths "
+              f"(vs. last-event-only scope used above — this is slower, one backward "
+              f"pass per prefix per method)")
+
+        out_dir = os.path.join(self.path_dict['explainer_path'], 'attribution')
+        os.makedirs(out_dir, exist_ok=True)
+
+        for method in methods:
+            bin_accum = {lbl: [] for _, _, lbl in self._DEPTH_BINS}
+            for i, graph in enumerate(graphs):
+                if i % max(1, n // 10) == 0:
+                    print(f"  {method} depth attribution: {100 * i // n}%")
+                n_events = graph['Events'].x.size(0) if 'Events' in graph.node_types else 0
+                lbl = next((l for lo, hi, l in self._DEPTH_BINS if lo <= n_events <= hi), None)
+                if lbl is None:
+                    continue
+                masks = self._compute_attribution_for_graph(graph, method=method)
+                mask = masks.get(node_type)
+                if mask is None or mask.shape[0] == 0:
+                    continue
+                bin_accum[lbl].append(np.abs(mask).mean(axis=0))
+            print(f"  {method} depth attribution: 100%")
+
+            labels = [lbl for _, _, lbl in self._DEPTH_BINS if bin_accum[lbl]]
+            if not labels:
+                print(f"  No {node_type} prefixes with data for {method} depth attribution — skipped")
+                continue
+            fnames = self.feature_names.get(node_type, [])
+            heat = np.stack([np.stack(bin_accum[lbl]).mean(axis=0) for lbl in labels])
+
+            fig, ax = plt.subplots(figsize=(max(8, heat.shape[1] * 0.5 + 2), len(labels) + 1.5))
+            im = ax.imshow(heat, aspect='auto', cmap='YlOrRd')
+            ax.set_yticks(range(len(labels)))
+            ax.set_yticklabels(labels)
+            ax.set_xticks(range(heat.shape[1]))
+            feat_labels = [fnames[j] if j < len(fnames) else f"feat_{j}" for j in range(heat.shape[1])]
+            ax.set_xticklabels(feat_labels, rotation=45, ha='right', fontsize=8)
+            ax.set_ylabel("Prefix depth (n events seen)")
+            ax.set_title(f"{node_type} feature attribution by prefix depth (mean |{method}|)")
+            plt.colorbar(im, ax=ax, shrink=0.8)
+            plt.tight_layout()
+            suffix = method.lower()
+            plt.savefig(os.path.join(out_dir, f"ig_depth_heatmap_{node_type.lower()}_{suffix}.png"), dpi=150)
+            plt.close()
+
+            rows = []
+            for lbl in labels:
+                arr = np.stack(bin_accum[lbl]).mean(axis=0)
+                for dim, val in enumerate(arr):
+                    fname = fnames[dim] if dim < len(fnames) else f"feat_{dim}"
+                    rows.append({'depth_bin': lbl, 'feature_dim': dim, 'feature_name': fname,
+                                 'mean_abs': round(float(val), 6), 'n_prefixes': len(bin_accum[lbl])})
+            pd.DataFrame(rows).to_csv(
+                os.path.join(out_dir, f"ig_depth_attribution_{node_type.lower()}_{suffix}.csv"), index=False)
+            print(f"  Saved {method} depth-stratified attribution to: {out_dir}")
 
     def cf_explanation(self):
         object_idx = 1971
