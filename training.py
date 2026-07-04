@@ -108,7 +108,7 @@ class Modelling:
         # Extend feature names for enriched node types based on actual graph feature counts.
         # Events layout: [ev_type one-hot | temporal | C3 activity counts | O1-ext obj counts]
         _temporal_names = ['elapsed_h', 'waiting_h', 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos']
-        _order_extra = ['n_items', 'total_weight', 'n_products']
+        _order_extra = ['n_items', 'total_weight', 'n_products', 'n_packages']
         if self.train_data and self.train_data[0]['Events'].num_nodes > 0:
             _ocel      = pd.read_csv(f"{self.path_dict['graph_output_path']}ocel.csv")
             _n_types   = len(ast.literal_eval(_ocel['ev_type'].iloc[0]))
