@@ -102,12 +102,17 @@ class HeteroGraphsGenerator:
             start_time = self.ev_log[self.ev_log['vwpnt_id'] == process]['timestamp'].values[0]
             end_time = self.ev_log[self.ev_log['vwpnt_id'] == process]['timestamp'].values[-1]
             active_df = self.ocel_df[self.ocel_df['vwpnt_id'] == process]
-            active_df = active_df[active_df['timestamp'] >= start_time]
             active_df = active_df[active_df['timestamp'] < end_time]
             edges = self.edges[self.edges['vwpnt_id'] == process]
             edges = edges[edges['timestamp'] <= end_time]
-            y_df = self.all_kpis[self.all_kpis['viewpoint_id'] == process]
-            ys = y_df['kpi_val'].to_list()
+            y_df    = self.all_kpis[self.all_kpis['viewpoint_id'] == process].reset_index(drop=True)
+            evlog_t = self.ev_log[self.ev_log['vwpnt_id'] == process].reset_index(drop=True)
+            # Map ev_id → kpi_val via positional alignment of ev_log and all_kpis.
+            # Events present in ocel.csv but absent from ev_log (e.g. between two deliveries)
+            # are computed on the fly from the remaining time to end_time.
+            ev_kpi_map = dict(zip(evlog_t['ocel_id'].astype(str),
+                                  y_df['kpi_val'].astype(float)))
+            end_ts = pd.to_datetime(end_time)
 
             # Construct the collection of prefixes that make up the training sample
             active_events = []
@@ -171,7 +176,11 @@ class HeteroGraphsGenerator:
                 active_events.append(ev_feat_partial + obj_counts)
                 active_graph['Events'] = active_events
 
-                y_val = ys[cnt]
+                ev_id = row['ev_id']
+                if ev_id in ev_kpi_map:
+                    y_val = ev_kpi_map[ev_id]
+                else:
+                    y_val = max(0.0, (end_ts - current_ts).total_seconds())
                 cnt += 1
 
                 # Create heterogeneous graph
@@ -199,24 +208,31 @@ class HeteroGraphsGenerator:
 
                 # Build per-instance y-values: each viewpoint node may have a different
                 # remaining time (e.g. two Packages delivered at different times).
+                # Nodes whose object ID is outside the tracked set are masked out so
+                # they do not contribute to the training loss.
                 vp_ob_ids  = ast.literal_eval(row[f"{kpi_ob}::ids"])
                 primary_id = y_df['ob_id'].iloc[0]
-                y_vals = []
+                y_vals, mask_vals = [], []
                 for ob_id in vp_ob_ids:
                     if ob_id == primary_id:
                         y_vals.append(float(y_val))
-                    else:
+                        mask_vals.append(True)
+                    elif ob_id in self.active_orders_dict:
                         end_ts = pd.to_datetime(self.active_orders_dict[ob_id])
                         secs   = max(0.0, (end_ts - current_ts).total_seconds())
                         y_vals.append(secs)
+                        mask_vals.append(True)
+                    else:
+                        y_vals.append(0.0)   # placeholder; excluded by mask
+                        mask_vals.append(False)
                 n_vp = len(y_vals)
 
                 if self.path_dict['kpi_type'] == 0:
-                    data[kpi_ob].y    = torch.tensor(y_vals, dtype=torch.float32).reshape(-1, 1)
-                    data[kpi_ob].mask = torch.ones(n_vp, 1, dtype=torch.bool)
+                    data[kpi_ob].y    = torch.tensor(y_vals,    dtype=torch.float32).reshape(-1, 1)
+                    data[kpi_ob].mask = torch.tensor(mask_vals, dtype=torch.bool).reshape(-1, 1)
                 else:
-                    data[kpi_ob].y    = torch.tensor(y_vals, dtype=torch.long)
-                    data[kpi_ob].mask = torch.ones(n_vp, dtype=torch.bool)
+                    data[kpi_ob].y    = torch.tensor(y_vals,    dtype=torch.long)
+                    data[kpi_ob].mask = torch.tensor(mask_vals, dtype=torch.bool)
 
                 data[kpi_ob].id         = torch.full((n_vp, 1), float(process), dtype=torch.float32)
                 data[kpi_ob].last_event = torch.full((n_vp, 1), last_event, dtype=torch.bool)
