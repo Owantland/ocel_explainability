@@ -34,18 +34,20 @@ class Modelling:
         self.test_data = torch.load(f"{self.path_dict['pytorch_path']}/test_graphs_sg.pt", weights_only=False)
 
         kpi_type = self.path_dict['kpi_type']
+
+        # Load model defaults if sweep is not succesful
         _DEFAULTS = {
             0: {'hidden_channels': 24, 'num_layers': 2, 'num_heads': 2, 'lr': 0.001, 'weight_decay': 1e-5},
             1: {'hidden_channels': 64, 'num_layers': 2, 'num_heads': 2, 'lr': 0.001, 'weight_decay': 1e-5},
         }
         if kpi_type == 0:  # Regression
+            # Appropriately name the task
             self.task_id = f"TimeFrom_{self.viewpoint_object}_to_{self.path_dict['kpi_event']}"
-            self.params = self._load_params() or _DEFAULTS[0]
+            self.params = self._load_params() or _DEFAULTS[0] # Ensure there are sweep hyperparemeters to load
             self.model = self._build_model(self.params)
 
             # Standardize the output values.
-            # Load from sidecar if it exists — survives graph regeneration without silent
-            # de-normalisation. Falls back to computing from train data on first run.
+            # Checks if there is a saved file containing the standardized values to import
             train_y_all = torch.cat([g[self.viewpoint_object].y for g in self.train_data])
             _model_dir = f"{self.path_dict['model_path']}/Hetero"
             _norm_path = f"{_model_dir}/{self.task_id}_norm.json"
@@ -59,15 +61,18 @@ class Modelling:
             for m in [self.train_data, self.val_data, self.test_data]:
                 for g in m:
                     g[self.viewpoint_object].y = (g[self.viewpoint_object].y - target_mean) / target_std
+
+            # Print out the Mean and STD of the chosen regression database
             print(f"Mean (hours): {round(target_mean.item() / 3600)}, STD (hours): {round(target_std.item() / 3600)}")
             self.target_mean, self.target_std = target_mean.to(self.device), target_std.to(self.device)
 
+        # Classifier
         elif kpi_type == 1:
             self.task_id = f"Classifier_{self.path_dict['kpi_event']}"
             self.params = self._load_params() or _DEFAULTS[1]
             self.model = self._build_model(self.params)
 
-        # Node feature standardization — covers continuous attributes and Events
+        # Node feature standardization — Must always be performed
         # (Events contains a mix of one-hot type flags and continuous temporal features;
         # z-normalising all dims is valid and the model adapts via its linear projections)
         continuous_node_types = (
@@ -89,6 +94,7 @@ class Modelling:
 
         self.model = self.model.to(self.device)
 
+        # Constructs a list of feature names for use in the explainer layer
         self.feature_names = {
             **{nt: names for nt, names in (self.path_dict.get('attributes') or {}).items()},
             **{nt: names for nt, names in (self.path_dict.get('time_attributes') or {}).items()},
@@ -114,13 +120,13 @@ class Modelling:
             base_names = list((self.path_dict.get('attributes') or {}).get(vp, []))
             self.feature_names[vp] = (base_names + _order_extra)[:n_vp]
 
-        # Define save path for the models
+        # Define save path for the model
         model_path = self.path_dict['model_path']
-
         if not os.path.exists(f"{model_path}/Hetero"):
             os.makedirs(f"{model_path}/Hetero")
         self.model_path = f"{model_path}/Hetero/{self.task_id}.pth"
 
+    # Define model parameter functions
     @property
     def _params_path(self):
         return f"{self.path_dict['model_path']}/Hetero/model_params.json"
@@ -147,6 +153,7 @@ class Modelling:
         with open(self._params_path, 'w') as f:
             json.dump(all_params, f, indent=2)
 
+    # Constructs the appropriate model type depending on the task at hand
     def _build_model(self, params):
         kpi_type = self.path_dict['kpi_type']
         if kpi_type == 0:
@@ -167,14 +174,15 @@ class Modelling:
         for batch in train_loader:
             batch = batch.to(device)
             optimizer.zero_grad()
-            out = model(batch.x_dict, batch.edge_index_dict)
-            y = batch[self.viewpoint_object].y
-            loss = criterion(out, y)
+            out  = model(batch.x_dict, batch.edge_index_dict)
+            mask = batch[self.viewpoint_object].mask.view(-1)
+            y    = batch[self.viewpoint_object].y.view(-1, out.shape[-1])
+            loss = criterion(out[mask], y[mask])
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            batch_size = len(batch[self.viewpoint_object].batch)
+            batch_size = int(mask.sum())
             total_examples += batch_size
             total_loss += float(loss) * batch_size
         return total_loss / total_examples
@@ -186,11 +194,12 @@ class Modelling:
         total_loss, total_examples = 0.0, 0
         for batch in loader:
             batch = batch.to(device)
-            out = model(batch.x_dict, batch.edge_index_dict)
-            y = batch[self.viewpoint_object].y
-            loss = criterion(out, y)
+            out  = model(batch.x_dict, batch.edge_index_dict)
+            mask = batch[self.viewpoint_object].mask.view(-1)
+            y    = batch[self.viewpoint_object].y.view(-1, out.shape[-1])
+            loss = criterion(out[mask], y[mask])
 
-            batch_size = len(batch[self.viewpoint_object].batch)
+            batch_size = int(mask.sum())
             total_examples += batch_size
             total_loss += float(loss) * batch_size
         return total_loss / total_examples
@@ -237,15 +246,18 @@ class Modelling:
         return total_correct / total_examples, f1.compute().item()
 
     def Het_Reg_Modelling(self, training_data, val_data, test_data):
+        # Estanlish seeds to ensure replicability
         torch.manual_seed(42)
         random.seed(42)
         np.random.seed(42)
 
+        # Define the data loaders
         batch_size = self.path_dict.get('batch_size', 16)
         train_loader = DataLoader(training_data, batch_size=batch_size, shuffle=True)
         val_loader   = DataLoader(val_data,      batch_size=batch_size, shuffle=False)
         test_loader  = DataLoader(test_data,     batch_size=batch_size, shuffle=False)
 
+        # Instantiate model, optimizer and criterion
         model = self.model.to(self.device)
         criterion = torch.nn.L1Loss()
 
@@ -253,19 +265,17 @@ class Modelling:
             batch = next(iter(train_loader)).to(self.device)
             model(batch.x_dict, batch.edge_index_dict)
 
-        optimizer = torch.optim.Adam(model.parameters(),
-                                     lr=self.params['lr'],
-                                     weight_decay=self.params['weight_decay'])
-
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=self.params['lr'],
+            weight_decay=self.params['weight_decay'],
+        )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=10
+            optimizer, mode="min", factor=0.5, patience=5
         )
 
-        max_epochs = 200
-        early_stop_patience = 20
-
-        best_val_mae = float("inf")
-        best_state = None
+        max_epochs, early_stop_patience = 50, 5
+        best_val_mae, best_state = float("inf"), None
         epochs_without_improvement = 0
         log = []
 
@@ -279,6 +289,10 @@ class Modelling:
             current_lr = optimizer.param_groups[0]["lr"]
             log.append({'epoch': epoch, 'train_loss': train_loss,
                         'val_mae': val_mae, 'lr': current_lr})
+            print(
+                f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | "
+                f"Val MAE: {val_mae:.4f} | LR: {current_lr:.2e}"
+            )
 
             if val_mae < best_val_mae:
                 print("New Best!")
@@ -287,12 +301,6 @@ class Modelling:
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
-
-            if epoch % 10 == 0 or epoch == 1:
-                print(
-                    f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | "
-                    f"Val MAE: {val_mae:.4f} | LR: {current_lr:.2e}"
-                )
 
             if epochs_without_improvement >= early_stop_patience:
                 print(f"\nEarly stopping at epoch {epoch} "
@@ -414,14 +422,20 @@ class Modelling:
         self.params = best_params
         self.model = self._build_model(best_params).to(self.device)
 
-    # ── Homogeneous event graph methods ───────────────────────────────────────
 
+    """
+        ─────────────────────── Homogeneous event graph methods ───────────────────────────────────────
+    """
     def _hetero_to_homo(self, graphs):
         """Convert normalised HeteroData prefixes to homogeneous Data (events only)."""
         vp = self.viewpoint_object
         et = ('Events', 'to', 'Events')
         result = []
         for g in graphs:
+            if g[vp].y.shape[0] == 0:
+                # kpi_viewpoint object hasn't appeared yet in this prefix (e.g. before the
+                # object-creating event) — no supervision target to convert, skip it.
+                continue
             edge_index = (g[et].edge_index if et in g.edge_types
                           else torch.zeros(2, 0, dtype=torch.long))
             result.append(Data(
@@ -463,24 +477,28 @@ class Modelling:
     def Homo_Reg_Modelling(self):
         """Train a homogeneous GCN on event-only graphs; save checkpoint + training log."""
 
+        # Ensure replicability of results
         torch.manual_seed(42)
         random.seed(42)
         np.random.seed(42)
 
+        # Transform heterogeneous graphs into homogeneous analogs
         homo_train = self._hetero_to_homo(self.train_data)
         homo_val   = self._hetero_to_homo(self.val_data)
         homo_test  = self._hetero_to_homo(self.test_data)
 
+        # Prepare the loaders for the train/test loop
         batch_size  = self.path_dict.get('batch_size', 16)
         train_loader = DataLoader(homo_train, batch_size=batch_size, shuffle=True)
         val_loader   = DataLoader(homo_val,   batch_size=batch_size, shuffle=False)
         test_loader  = DataLoader(homo_test,  batch_size=batch_size, shuffle=False)
 
+        # Prepare the model with best parameters
         in_ch = homo_train[0].x.size(-1)  # Events dim after normalisation (C3 + O1-ext enriched)
         model = REG_GNN.REG_GNN(
             in_channels     = in_ch,
             hidden_channels = self.params.get('hidden_channels', 48),
-            num_layers      = self.params.get('num_layers', 3),
+            num_layers      = self.params.get('num_layers', 2),
         ).to(self.device)
 
         homo_model_path = self.model_path.replace(".pth", "_homo.pth")
@@ -492,14 +510,15 @@ class Modelling:
             weight_decay = self.params['weight_decay'],
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=10
+            optimizer, mode="min", factor=0.5, patience=5
         )
 
-        max_epochs, early_stop_patience = 200, 20
+        max_epochs, early_stop_patience = 50, 5
         best_val_mae, best_state        = float("inf"), None
         epochs_without_improvement      = 0
         log = []
 
+        # Model training loop
         pbar = tqdm(range(1, max_epochs + 1), desc="HomoGNN")
         for epoch in pbar:
             train_loss = self.homo_train_step(model, train_loader, optimizer, criterion, self.device)
@@ -510,6 +529,9 @@ class Modelling:
             log.append({'epoch': epoch, 'train_loss': train_loss,
                         'val_mae': val_mae, 'lr': current_lr})
 
+            print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | "
+                  f"Val MAE: {val_mae:.4f} | LR: {current_lr:.2e}")
+
             if val_mae < best_val_mae:
                 print("New Best!")
                 best_val_mae = val_mae
@@ -517,10 +539,6 @@ class Modelling:
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
-
-            if epoch % 10 == 0 or epoch == 1:
-                print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | "
-                      f"Val MAE: {val_mae:.4f} | LR: {current_lr:.2e}")
 
             if epochs_without_improvement >= early_stop_patience:
                 print(f"\nEarly stopping at epoch {epoch}")
@@ -538,11 +556,17 @@ class Modelling:
         )
         print(f"HomoGNN checkpoint saved to {homo_model_path}")
 
+    """
+        Baseline comparison and graph output
+    """
     def compare_models(self):
         """Evaluate HGT and HomoGNN side-by-side on the test split and save a comparison plot."""
 
         vp = self.viewpoint_object
-        homo_test      = self._hetero_to_homo(self.test_data)
+        # _hetero_to_homo() skips prefixes where the kpi_viewpoint object hasn't appeared yet;
+        # apply the same filter here so het_test and homo_test stay aligned for zip() below.
+        het_test        = [g for g in self.test_data if g[vp].y.shape[0] > 0]
+        homo_test       = self._hetero_to_homo(self.test_data)
         homo_model_path = self.model_path.replace(".pth", "_homo.pth")
 
         # ── Load HGT ────────────────────────────────────────────────────────
@@ -563,7 +587,7 @@ class Modelling:
         denorm = lambda v: (v * self.target_std.item() + self.target_mean.item()) / 3600.0
         records = []
         with torch.no_grad():
-            for g_het, g_hom in zip(self.test_data, homo_test):
+            for g_het, g_hom in zip(het_test, homo_test):
                 g_het = g_het.to(self.device)
                 g_hom = g_hom.to(self.device)
 
