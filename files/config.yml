@@ -8,7 +8,7 @@ order_management:
   added_depth: 0
   unique_ids: ['Orders', 'Items', 'Packages']
   kpi_type: 0
-  kpi_event: "PackageDelivered" #"CreatePackage" "PackageDelivered" "PayOrder"
+  kpi_event: "PayOrder" #"CreatePackage" "PackageDelivered" "PayOrder"
   kpi_viewpoint: "Orders"
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:
@@ -31,7 +31,7 @@ logistics:
   added_depth: 2
   unique_ids: ['CustomerOrder', 'TransportDocument', 'Container', 'HandlingUnit']
   kpi_type: 0
-  kpi_event: "Depart"
+  kpi_event: "Depart" # LoadToVehicle
   kpi_viewpoint: "TransportDocument"
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:

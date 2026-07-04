@@ -871,13 +871,18 @@ class Explainer(Modelling):
         """Return (total_dissimilarity, components_dict) between two trace graphs.
 
         Four components, each in [0, 1]:
-          feat   — mean-pooled per-type feature distance (L2 + cosine average)
+          feat   — seed-centric per-type feature distance (L2 + cosine average)
           type   — multiset Jaccard distance over node-type counts
           edge   — multiset Jaccard distance over edge-type counts
           struct — normalized absolute difference in total edge count
         Total = sum of the four components, in [0, 4].
         """
-        # D_feat
+        # D_feat — seed-centric, matching Zhai et al.'s actual formula (each of g1's own
+        # nodes of a type is treated as a "seed" and compared against every one of g2's
+        # nodes of that type, then averaged over g1's nodes) rather than pre-pooling both
+        # sides to per-type means. For the viewpoint type (exactly 1 node per graph) this
+        # reduces to the original single-seed formula; for multi-instance types (Items,
+        # Events, ...) it avoids diluting outlier nodes on the query side into one mean.
         feat_scores = []
         for nt in g1.node_types:
             if nt not in g2.node_types:
@@ -885,11 +890,16 @@ class Explainer(Modelling):
             x1, x2 = g1[nt].x, g2[nt].x
             if x1.size(0) == 0 or x2.size(0) == 0:
                 continue
-            mu1, mu2 = x1.mean(dim=0), x2.mean(dim=0)
-            l2 = (mu1 - mu2).norm() / (mu1.norm() + mu2.norm() + 1e-8)
-            sim = F.cosine_similarity(mu1.unsqueeze(0), mu2.unsqueeze(0)).item()
-            cos_dist = 1.0 - (sim + 1.0) / 2.0
-            feat_scores.append((l2.item() + cos_dist) / 2.0)
+            x2_norm_mean = x2.norm(dim=1).mean()
+            x1_norms = x1.norm(dim=1)
+            diff_norms = (x2.unsqueeze(0) - x1.unsqueeze(1)).norm(dim=2)  # [N1, N2]
+            l2_per_seed = diff_norms.mean(dim=1) / (x2_norm_mean + x1_norms + 1e-8)  # [N1]
+
+            cos_sim = F.cosine_similarity(x1.unsqueeze(1), x2.unsqueeze(0), dim=2)  # [N1, N2]
+            cos_dist_per_seed = 1.0 - (cos_sim.mean(dim=1) + 1.0) / 2.0  # [N1]
+
+            per_seed_dist = (l2_per_seed + cos_dist_per_seed) / 2.0  # [N1]
+            feat_scores.append(per_seed_dist.mean().item())
         d_feat = sum(feat_scores) / len(feat_scores) if feat_scores else 0.0
 
         # D_type: multiset Jaccard over raw node-type counts
