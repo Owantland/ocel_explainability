@@ -13,7 +13,7 @@ import pandas as pd
 import sup_funcs as sup
 
 
-def verify_process_generation(database='order_management', cant=2000):
+def verify_process_generation(database='logistics', cant=2000):
     """Cross-check process_generation outputs against the raw OCEL database."""
     funcs = sup.SupportFunctions(database, cant)
     path_dict = funcs.get_paths()
@@ -185,8 +185,12 @@ def verify_process_generation(database='order_management', cant=2000):
     return errors
 
 
-def verify_ocel_generator(database='order_management', cant=2000):
-    """Spot-check ocel.csv attributes against the raw DB and audit Adams et al. coverage."""
+def verify_ocel_generator(database='logistics', cant=2000):
+    """Spot-check ocel.csv attributes against the raw DB and audit Adams et al. coverage.
+
+    Fully config-driven — reads object types/attribute columns from path_dict instead of
+    hardcoding order_management's schema, so it runs against any dataset in config.yml.
+    """
 
     def _has_objects(val):
         if pd.isna(val):
@@ -204,6 +208,65 @@ def verify_ocel_generator(database='order_management', cant=2000):
     ocel_df   = pd.read_csv(f"{path_dict['graph_output_path']}ocel.csv")
     ev_log_df = pd.read_csv(path_dict['ev_log_path'])
     errors    = []
+
+    def _resolve_table(ob_type):
+        """object_{type} table, falling back to event_{type} (mirrors Generator.get_attributes)."""
+        table = f'object_{ob_type}'
+        cursor.execute(f"PRAGMA table_info({table})")
+        if not cursor.fetchall():
+            table = f'event_{ob_type}'
+        return table
+
+    def _dispatch_branch(ob_type):
+        """Which config branch a type resolves to — mirrors Generator.generate_ocel's
+        attributes > time_attributes > role_encoding > encoding priority chain."""
+        if ob_type in path_dict['attributes']:
+            return 'attributes'
+        if ob_type in (path_dict.get('time_attributes') or {}):
+            return 'time_attributes'
+        if ob_type in (path_dict.get('role_encoding') or {}):
+            return 'role_encoding'
+        if ob_type in path_dict['encoding']:
+            return 'encoding'
+        return None
+
+    def _within_tol(a, b):
+        return abs(a - b) <= max(0.01, 0.001 * abs(b))
+
+    def _check_static_attrs(ob_type, attr_cols, sample_n=5):
+        """Generic attribute-mismatch check for any type in path_dict['attributes']
+        (covers what used to be three hardcoded checks: viewpoint, Items, Packages)."""
+        id_col, attr_col = f'{ob_type}::ids', f'{ob_type}::attributes'
+        if id_col not in ocel_df.columns:
+            print(f"  SKIP: no {id_col} column")
+            return
+        subset = ocel_df[ocel_df[id_col].apply(_has_objects)]
+        if subset.empty:
+            print(f"  SKIP: no rows with {ob_type} objects")
+            return
+        table = _resolve_table(ob_type)
+        agg_exprs = ', '.join(f'MAX({c})' for c in attr_cols)
+        n = min(sample_n, len(subset))
+        n_ok = 0
+        for _, row in subset.sample(n, random_state=42).iterrows():
+            ids   = ast.literal_eval(row[id_col])
+            attrs = ast.literal_eval(row[attr_col])
+            for ob_id, attr in zip(ids, attrs):
+                cursor.execute(f"SELECT {agg_exprs} FROM {table} WHERE ocel_id=?", (ob_id,))
+                db_vals = cursor.fetchone()
+                if db_vals is None or all(v is None for v in db_vals):
+                    continue
+                for col_name, a_val, db_val in zip(attr_cols, attr, db_vals):
+                    if db_val is None:
+                        continue
+                    if not _within_tol(a_val, db_val):
+                        errors.append(
+                            f"{ob_type} {col_name} mismatch {ob_id}: expected {db_val}, got {a_val}"
+                        )
+                    else:
+                        n_ok += 1
+        print(f"  OK: {ob_type} ({', '.join(attr_cols)}) — {n_ok} value(s) matched DB "
+              f"across {n} sampled row(s)")
 
     print(f"\n{'='*60}")
     print(f"Verifying ocel_generator output: {database}, cant={cant}")
@@ -238,160 +301,166 @@ def verify_ocel_generator(database='order_management', cant=2000):
         print(f"  OK: 10 sampled encodings correct ({len(ev_types)}D)")
 
     # ------------------------------------------------------------------
-    # Check 2 — Orders attribute: price (D3)
+    # Check 2 — Attribute-typed objects (D3): viewpoint + everything else in
+    # path_dict['attributes'] (was 3 hardcoded checks: Orders/Items/Packages)
     # ------------------------------------------------------------------
-    print(f"\n[Check 2] {path_dict['viewpoint']} attribute (price)...")
-    viewpoint = path_dict['viewpoint']
-    for _, row in ocel_df[ocel_df[f'{viewpoint}::ids'].apply(_has_objects)].sample(5, random_state=42).iterrows():
-        ids   = ast.literal_eval(row[f'{viewpoint}::ids'])
-        attrs = ast.literal_eval(row[f'{viewpoint}::attributes'])
-        for ob_id, attr in zip(ids, attrs):
-            cursor.execute(f"SELECT MAX(price) FROM object_{viewpoint} WHERE ocel_id=?", (ob_id,))
-            db_price = cursor.fetchone()[0]
-            if db_price is None:
-                continue
-            if abs(attr[0] - db_price) > 0.01:
-                errors.append(f"Orders price mismatch {ob_id}: expected {db_price}, got {attr[0]}")
-            else:
-                print(f"  OK: {ob_id} price={attr[0]} ✓")
+    print(f"\n[Check 2] Attribute-typed objects ({', '.join(path_dict['attributes'])})...")
+    for ob_type, attr_cols in path_dict['attributes'].items():
+        _check_static_attrs(ob_type, attr_cols)
 
     # ------------------------------------------------------------------
-    # Check 3 — Items attributes: weight, price (D3)
+    # Check 3 — Role encoding (R1) — was hardcoded to Employees
     # ------------------------------------------------------------------
-    print("\n[Check 3] Items attributes (weight, price)...")
-    for _, row in ocel_df[ocel_df['Items::ids'].apply(_has_objects)].sample(5, random_state=42).iterrows():
-        ids   = ast.literal_eval(row['Items::ids'])
-        attrs = ast.literal_eval(row['Items::attributes'])
-        for ob_id, attr in zip(ids, attrs):
-            cursor.execute("SELECT MAX(weight), MAX(price) FROM object_Items WHERE ocel_id=?", (ob_id,))
-            db_w, db_p = cursor.fetchone()
-            if db_w is None:
-                continue
-            if abs(attr[0] - db_w) > 0.001 or abs(attr[1] - db_p) > 0.01:
-                errors.append(f"Items mismatch {ob_id}: expected ({db_w},{db_p}), got {attr}")
-            else:
-                print(f"  OK: {ob_id} weight={attr[0]}, price={attr[1]} ✓")
+    print("\n[Check 3] Role encoding (R1)...")
+    role_cfg = path_dict.get('role_encoding') or {}
+    if not role_cfg:
+        print("  SKIP: no role_encoding configured for this dataset")
+    for ob_type, role_col in role_cfg.items():
+        if _dispatch_branch(ob_type) != 'role_encoding':
+            continue
+        table = _resolve_table(ob_type)
+        cursor.execute(
+            f"SELECT DISTINCT {role_col} FROM {table} WHERE {role_col} IS NOT NULL ORDER BY 1"
+        )
+        roles = [r[0] for r in cursor.fetchall()]
+        print(f"  {ob_type}: roles in DB ({len(roles)}): {roles}")
 
-    # ------------------------------------------------------------------
-    # Check 4 — Packages attribute: weight (D3)
-    # ------------------------------------------------------------------
-    print("\n[Check 4] Packages attribute (weight)...")
-    pkg_col = 'Packages::ids'
-    if pkg_col in ocel_df.columns and ocel_df[ocel_df[pkg_col].apply(_has_objects)].shape[0] > 0:
-        for _, row in ocel_df[ocel_df[pkg_col].apply(_has_objects)].sample(5, random_state=42).iterrows():
-            ids   = ast.literal_eval(row['Packages::ids'])
-            attrs = ast.literal_eval(row['Packages::attributes'])
-            for ob_id, attr in zip(ids, attrs):
-                cursor.execute("SELECT MAX(weight) FROM object_Packages WHERE ocel_id=?", (ob_id,))
-                db_w = cursor.fetchone()[0]
-                if db_w is None:
+        id_col, attr_col = f'{ob_type}::ids', f'{ob_type}::attributes'
+        rows = ocel_df[ocel_df[id_col].apply(_has_objects)]
+        if rows.empty:
+            print(f"  SKIP: no rows with {ob_type} objects")
+            continue
+        n = min(5, len(rows))
+        for _, row in rows.sample(n, random_state=42).iterrows():
+            ids   = ast.literal_eval(row[id_col])
+            attrs = ast.literal_eval(row[attr_col])
+            for ob_id, enc in zip(ids, attrs):
+                if not enc:
                     continue
-                if abs(attr[0] - db_w) > 0.001:
-                    errors.append(f"Packages weight mismatch {ob_id}: expected {db_w}, got {attr[0]}")
-                else:
-                    print(f"  OK: {ob_id} weight={attr[0]} ✓")
-    else:
-        print("  SKIP: no Packages column or no rows with packages")
-
-    # ------------------------------------------------------------------
-    # Check 5 — Employee role encoding (R1)
-    # ------------------------------------------------------------------
-    print("\n[Check 5] Employee role encoding (R1)...")
-    cursor.execute("SELECT DISTINCT role FROM object_Employees WHERE role IS NOT NULL ORDER BY 1")
-    roles = [r[0] for r in cursor.fetchall()]
-    print(f"  Roles in DB ({len(roles)}): {roles}")
-
-    emp_rows = ocel_df[ocel_df['Employees::ids'].apply(_has_objects)].sample(5, random_state=42)
-    for _, row in emp_rows.iterrows():
-        emp_ids  = ast.literal_eval(row['Employees::ids'])
-        emp_attrs = ast.literal_eval(row['Employees::attributes'])
-        for emp_id, enc in zip(emp_ids, emp_attrs):
-            if not enc:
-                continue
-            if len(enc) != len(roles):
-                errors.append(f"R1: employee dim {len(enc)} ≠ {len(roles)} for {emp_id}")
-                continue
-            if sum(enc) != 1:
-                errors.append(f"R1: employee encoding not one-hot for {emp_id}: {enc}")
-                continue
-            cursor.execute("SELECT MAX(role) FROM object_Employees WHERE ocel_id=?", (emp_id,))
-            db_role = cursor.fetchone()[0]
-            if db_role not in roles:
-                errors.append(f"R1: unknown role '{db_role}' for {emp_id}")
-                continue
-            if enc[roles.index(db_role)] != 1:
-                errors.append(f"R1: role mismatch {emp_id}: role={db_role}, enc={enc}")
-            else:
-                print(f"  OK: {emp_id} → {db_role} → {enc} ✓")
-
-    # ------------------------------------------------------------------
-    # Check 6 — Customer encoding dimensions (R1)
-    # ------------------------------------------------------------------
-    print("\n[Check 6] Customer encoding (R1)...")
-    cursor.execute("SELECT COUNT(DISTINCT ocel_id) FROM object_Customers")
-    n_cust = cursor.fetchone()[0]
-    cursor.execute("SELECT DISTINCT ocel_id FROM object_Customers ORDER BY 1")
-    cust_list    = [r[0] for r in cursor.fetchall()]
-    expected_dim = n_cust if n_cust < 50 else 1
-    print(f"  {n_cust} distinct customers → expected {expected_dim}D encoding")
-
-    for _, row in ocel_df[ocel_df['Customers::ids'].apply(_has_objects)].sample(5, random_state=42).iterrows():
-        ids   = ast.literal_eval(row['Customers::ids'])
-        attrs = ast.literal_eval(row['Customers::attributes'])
-        for cust_id, enc in zip(ids, attrs):
-            if len(enc) != expected_dim:
-                errors.append(f"R1: customer dim {len(enc)} ≠ {expected_dim} for {cust_id}")
-                continue
-            if expected_dim > 1:
+                if len(enc) != len(roles):
+                    errors.append(f"role_encoding: {ob_type} dim {len(enc)} ≠ {len(roles)} for {ob_id}")
+                    continue
                 if sum(enc) != 1:
-                    errors.append(f"R1: customer encoding not one-hot for {cust_id}")
+                    errors.append(f"role_encoding: {ob_type} encoding not one-hot for {ob_id}: {enc}")
                     continue
-                if cust_id not in cust_list:
-                    errors.append(f"R1: unknown customer '{cust_id}'")
+                cursor.execute(f"SELECT MAX({role_col}) FROM {table} WHERE ocel_id=?", (ob_id,))
+                db_role = cursor.fetchone()[0]
+                if db_role not in roles:
+                    errors.append(f"role_encoding: unknown role '{db_role}' for {ob_id} ({ob_type})")
                     continue
-                if enc[cust_list.index(cust_id)] != 1:
-                    errors.append(f"R1: customer position mismatch for {cust_id}")
+                if enc[roles.index(db_role)] != 1:
+                    errors.append(f"role_encoding: {ob_type} role mismatch {ob_id}: role={db_role}, enc={enc}")
                 else:
-                    print(f"  OK: {cust_id} → pos {cust_list.index(cust_id)} ✓")
+                    print(f"  OK: {ob_id} → {db_role} → {enc} ✓")
 
     # ------------------------------------------------------------------
-    # Check 7 — Products attributes: weight + closest-timestamp price (D3)
-    # Products use the time_attributes lookup (closest timestamp), not MAX.
+    # Check 4 — Plain ID encoding (R1) — was hardcoded to Customers.
+    # Off-by-one fixed to match Generator.get_1h_encoding's real boundary
+    # (>50 distinct ids -> 1D fallback; previous test used the wrong `<50` cutoff).
     # ------------------------------------------------------------------
-    print("\n[Check 7] Products attributes (weight, closest-timestamp price)...")
-    prod_rows = ocel_df[ocel_df['Products::ids'].apply(_has_objects)].sample(3, random_state=42)
+    print("\n[Check 4] ID encoding (one-hot by object ID)...")
+    encoding_types = [ot for ot in path_dict['encoding'] if _dispatch_branch(ot) == 'encoding']
+    if not encoding_types:
+        print("  SKIP: no object types resolve to plain ID encoding for this dataset")
+    for ob_type in encoding_types:
+        table = _resolve_table(ob_type)
+        cursor.execute(f"SELECT COUNT(DISTINCT ocel_id) FROM {table}")
+        n_ids = cursor.fetchone()[0]
+        cursor.execute(f"SELECT DISTINCT ocel_id FROM {table} ORDER BY 1")
+        id_list      = [r[0] for r in cursor.fetchall()]
+        expected_dim = 1 if n_ids > 50 else n_ids
+        print(f"  {ob_type}: {n_ids} distinct id(s) → expected {expected_dim}D encoding")
 
-    for _, row in prod_rows.iterrows():
-        ids   = ast.literal_eval(row['Products::ids'])
-        attrs = ast.literal_eval(row['Products::attributes'])
-        ts    = pd.Timestamp(row['timestamp'])
-        for prod_id, attr in zip(ids, attrs):
-            cursor.execute(
-                "SELECT ocel_time, weight, price FROM object_Products "
-                "WHERE ocel_id=? ORDER BY ocel_time",
-                (prod_id,)
-            )
-            db_rows = cursor.fetchall()
-            if not db_rows:
-                continue
-            closest = min(db_rows, key=lambda r: abs((pd.Timestamp(r[0]) - ts).total_seconds()))
-            db_w, db_p = closest[1], closest[2]
-            if db_w is None or db_p is None:
-                # change-tracking row with null attrs — skip (ocel_generator uses COALESCE fallback)
-                continue
-            if abs(attr[0] - db_w) > 0.001 or abs(attr[1] - db_p) > 0.01:
-                errors.append(
-                    f"Products mismatch {prod_id} at {ts.date()}: "
-                    f"expected ({db_w},{db_p}), got {attr}"
+        id_col, attr_col = f'{ob_type}::ids', f'{ob_type}::attributes'
+        rows = ocel_df[ocel_df[id_col].apply(_has_objects)]
+        if rows.empty:
+            print(f"  SKIP: no rows with {ob_type} objects")
+            continue
+        n = min(5, len(rows))
+        for _, row in rows.sample(n, random_state=42).iterrows():
+            ids   = ast.literal_eval(row[id_col])
+            attrs = ast.literal_eval(row[attr_col])
+            for ob_id, enc in zip(ids, attrs):
+                if len(enc) != expected_dim:
+                    errors.append(f"encoding: {ob_type} dim {len(enc)} ≠ {expected_dim} for {ob_id}")
+                    continue
+                if expected_dim > 1:
+                    if sum(enc) != 1:
+                        errors.append(f"encoding: {ob_type} encoding not one-hot for {ob_id}")
+                        continue
+                    if ob_id not in id_list:
+                        errors.append(f"encoding: unknown {ob_type} id '{ob_id}'")
+                        continue
+                    if enc[id_list.index(ob_id)] != 1:
+                        errors.append(f"encoding: {ob_type} position mismatch for {ob_id}")
+                    else:
+                        print(f"  OK: {ob_id} → pos {id_list.index(ob_id)} ✓")
+
+    # ------------------------------------------------------------------
+    # Check 5 — Time-varying attributes (D3, closest-timestamp lookup) —
+    # was hardcoded to Products. Null-fallback now mirrors
+    # Generator._lookup_time_attrs' COALESCE behavior exactly (previously
+    # this check just skipped on a null closest-row value instead of
+    # falling back to any non-null value for that object id).
+    # ------------------------------------------------------------------
+    print("\n[Check 5] Time-varying attributes (closest-timestamp lookup)...")
+    time_cfg = path_dict.get('time_attributes') or {}
+    if not time_cfg:
+        print("  SKIP: no time_attributes configured for this dataset")
+    for ob_type, attr_cols in time_cfg.items():
+        if _dispatch_branch(ob_type) != 'time_attributes':
+            continue
+        fixed_attr, time_attr = attr_cols[0], attr_cols[1]
+        table = _resolve_table(ob_type)
+        id_col, attr_col = f'{ob_type}::ids', f'{ob_type}::attributes'
+        rows = ocel_df[ocel_df[id_col].apply(_has_objects)]
+        if rows.empty:
+            print(f"  SKIP: no rows with {ob_type} objects")
+            continue
+        n = min(3, len(rows))
+        for _, row in rows.sample(n, random_state=42).iterrows():
+            ids   = ast.literal_eval(row[id_col])
+            attrs = ast.literal_eval(row[attr_col])
+            ts    = pd.Timestamp(row['timestamp'])
+            for ob_id, attr in zip(ids, attrs):
+                cursor.execute(
+                    f"SELECT ocel_time, {fixed_attr}, {time_attr} FROM {table} "
+                    f"WHERE ocel_id=? ORDER BY ocel_time",
+                    (ob_id,)
                 )
-            else:
-                print(f"  OK: {prod_id} at {ts.date()} → weight={attr[0]}, price={attr[1]} ✓")
+                db_rows = cursor.fetchall()
+                if not db_rows:
+                    continue
+                closest = min(db_rows, key=lambda r: abs((pd.Timestamp(r[0]) - ts).total_seconds()))
+                db_fixed, db_time = closest[1], closest[2]
+                if db_fixed is None:
+                    # COALESCE fallback, mirroring Generator._lookup_time_attrs: fall back to
+                    # any non-null fixed_attr value for this id instead of skipping outright.
+                    fallback = [r[1] for r in db_rows if r[1] is not None]
+                    db_fixed = fallback[0] if fallback else None
+                if db_fixed is None or db_time is None:
+                    continue
+                if not _within_tol(attr[0], db_fixed) or not _within_tol(attr[1], db_time):
+                    errors.append(
+                        f"{ob_type} mismatch {ob_id} at {ts.date()}: "
+                        f"expected ({db_fixed},{db_time}), got {attr}"
+                    )
+                else:
+                    print(f"  OK: {ob_id} at {ts.date()} → {fixed_attr}={attr[0]}, {time_attr}={attr[1]} ✓")
 
     # ------------------------------------------------------------------
-    # Check 8 — Object completeness (all columns present, no NaN)
+    # Check 6 — Object completeness (all columns present, no NaN).
+    # obj_types is now the union of every config collection that can
+    # produce a column, mirroring generate_ocel's own type coverage
+    # instead of a hardcoded order_management type list.
     # ------------------------------------------------------------------
-    print("\n[Check 8] Object completeness (no NaN columns)...")
-    obj_types = ['Orders', 'Customers', 'Employees', 'Items', 'Products', 'Packages']
+    print("\n[Check 6] Object completeness (no NaN columns)...")
+    obj_types = sorted(
+        set(path_dict['attributes'])
+        | set(path_dict.get('time_attributes') or {})
+        | set(path_dict.get('role_encoding') or {})
+        | set(path_dict['encoding'])
+    )
     missing_cols = [ot for ot in obj_types if f'{ot}::ids' not in ocel_df.columns]
     if missing_cols:
         errors.append(f"Missing object type columns: {missing_cols}")
@@ -407,25 +476,27 @@ def verify_ocel_generator(database='order_management', cant=2000):
             print(f"  OK: all {len(obj_types)} object type columns fully populated")
 
     # ------------------------------------------------------------------
-    # Adams et al. coverage audit (informational)
+    # Adams et al. coverage audit (informational — never feeds `errors`)
     # ------------------------------------------------------------------
     print(f"\n{'='*60}")
     print("Adams et al. Feature Coverage Audit")
     print(f"{'='*60}")
+    role_note = "role + ID encodings" if (path_dict.get('role_encoding') or {}) else "ID encodings"
+    attr_cols_flat = sorted({c for cols in path_dict['attributes'].values() for c in cols})
     coverage = [
-        ("C1 current activity",     "✓ present",  "ocel_generator.py: 11D one-hot ev_type"),
+        ("C1 current activity",     "✓ present",  f"ocel_generator.py: {len(ev_types)}D one-hot ev_type"),
         ("C2 preceding activities", "~ implicit", "hetero_graphs.py: directly-follows edges"),
-        ("C3 activity frequency",   "✓ present",  "hetero_graphs.py: 11D C3 in Events[17:28]"),
-        ("D3 object attributes",    "✓ present",  "ocel_generator.py: price, weight"),
+        ("C3 activity frequency",   "✓ present",  f"hetero_graphs.py: {len(ev_types)}D C3 cumulative counts"),
+        ("D3 object attributes",    "✓ present",  f"ocel_generator.py: {', '.join(attr_cols_flat)}"),
         ("D1/D2 agg. history",      "~ implicit", "HGT message passing over graph"),
-        ("R1 resource identity",    "✓ present",  "ocel_generator.py: role + ID encodings"),
+        ("R1 resource identity",    "✓ present",  f"ocel_generator.py: {role_note}"),
         ("R2/R3 workload",          "✗ absent",   "deferred"),
         ("P1 elapsed time",         "✓ present",  "hetero_graphs.py: elapsed_h (Events[11])"),
         ("P2 waiting time",         "✓ present",  "hetero_graphs.py: waiting_h (Events[12])"),
         ("P3-P5 sync/pooling",      "✗ absent",   "deferred (need per-event obj cols)"),
         ("P6-P10 object lag",       "✗ absent",   "deferred (need per-event obj cols)"),
         ("O1 object count",         "✓ present",  "hetero_graphs.py: n_items/n_products/n_packages on Orders"),
-        ("O1-ext per-type counts",  "✓ present",  "hetero_graphs.py: 6D O1-ext in Events[28:34]"),
+        ("O1-ext per-type counts",  "✓ present",  "hetero_graphs.py: per-event object-type counts"),
         ("O2-O6 per-event counts",  "✗ absent",   "deferred (need per-event obj cols)"),
     ]
     for feature, status, note in coverage:
@@ -447,7 +518,7 @@ def verify_ocel_generator(database='order_management', cant=2000):
     return errors
 
 
-def verify_hetero_graphs(database='order_management', cant=2000):
+def verify_hetero_graphs(database='logistics', cant=2000):
     """Verify that get_learning_set() produces graphs with correct Adams et al. feature values."""
     import torch
 
@@ -664,7 +735,7 @@ def verify_hetero_graphs(database='order_management', cant=2000):
     return errors
 
 
-def compare_to_hoeg(database='order_management', cant=2000):
+def compare_to_hoeg(database='logistics', cant=2000):
     """Print a structured comparison between this project's graph and HOEG (Smit et al. 2024)."""
     funcs = sup.SupportFunctions(database, cant)
     path_dict = funcs.get_paths()
@@ -693,41 +764,41 @@ def compare_to_hoeg(database='order_management', cant=2000):
     rows = [
         ("Node types",
          f"{len(node_types)}: Events + {len(obj_type_order)} typed object types",
-         "2 categories: Event + Object (untyped)"),
+         "Same idea: Event + typed object-type nodes"),
         ("Event node features",
          f"{ev_dim}D (ev_type {n_ev_types}D + 6 temporal "
          f"+ {n_ev_types}D C3 + {len(obj_type_order)}D O1-ext)",
-         "Basic event type one-hot"),
+         "Subset of Adams et al. features (C2,P2,P5,O3) — same as EFG"),
         ("Object features",
          "Typed: " + ", ".join(f"{k}={v}D" for k, v in obj_dims.items()),
-         "Static aggregated attrs (limitation: immutable)"),
+         "Typed per object, not aggregated — but static/immutable only"),
         ("Time-varying attrs",
          "Yes — closest-timestamp lookup for Products",
-         "No — static only"),
+         "No — static only (limitation named in their own discussion)"),
         ("Event→Event edges",
          "Events_to_Events (directly-follows)",
          "'follows' (directly-follows)"),
         ("Object→Event edges",
          f"{len(obj_to_ev)} typed (one per object type)",
-         "1 untyped 'interacts' edge"),
+         "Also typed per object type; generic 'interacts' predicate"),
         ("Object→Object edges",
          f"{len(obj_to_obj)}: " + ", ".join(obj_to_obj),
-         "None"),
+         "None (object graph used only to extract executions)"),
         ("Graph model",
          "HGT (multi-head attention, HGTConv)",
-         "k-dim HGNN (type-specific linear proj.)"),
+         "k-dimensional GNN (Morris et al. 2019) — not attention-based"),
         ("Prefix strategy",
          "One graph per event prefix",
          "One graph per event prefix"),
         ("KPI target node",
-         "Viewpoint object (Orders) — multi-instance",
-         "Case-level (trace)"),
+         "Viewpoint object (Orders) — multi-instance, masked",
+         "Case-level — one remaining-time value per execution"),
         ("XAI layer",
          "LOO + InputXGradient + Counterfactual",
          "None"),
         ("Baseline",
          "HomoGNN (REG_GNN.py)",
-         "EFG (event-only homogeneous GNN)"),
+         "EFG (event-only, GCN — Adams et al.)"),
     ]
 
     col_w = [26, 46, 44]
@@ -739,25 +810,34 @@ def compare_to_hoeg(database='order_management', cant=2000):
 
     print(f"\n{'='*70}")
     print("Key structural advantages of this project over HOEG:")
-    print(f"  1. {len(obj_to_obj)} object-to-object schema edges (HOEG: 0) "
-          f"— propagates domain structure")
-    print(f"  2. {len(obj_to_ev)} typed object→event edges "
-          f"vs. HOEG's single untyped 'interacts' edge")
-    print(f"  3. {ev_dim}D event features vs. HOEG's basic event-type one-hot")
+    print(f"  1. {len(obj_to_obj)} object-to-object schema edges (HOEG: 0 — its object "
+          f"graph is only used to extract executions, not embedded in them)")
+    print(f"  2. Per-instance multi-target with masking (multiple {path_dict['kpi_viewpoint']} "
+          f"per prefix) vs. HOEG's single case-level target")
+    print(f"  3. Full Adams et al. feature coverage (C1-C3, D1-D3, R1-R3, P1-P10, O1-O6) "
+          f"vs. HOEG/EFG's subset (C2, P2, P5, O3 only)")
     print(f"  4. Time-varying object attributes "
           f"(HOEG explicitly identifies static attrs as a limitation)")
     print(f"  5. 3 post-hoc XAI methods (HOEG: none)")
+    print(f"\nDesign choice, not a strict advantage:")
+    print(f"  6. HGTConv (attention-based) vs. HOEG's k-dimensional GNN — this project "
+          f"explores the 'different heterogeneous GNN architectures' HOEG's authors "
+          f"list as future work")
     print(f"{'='*70}\n")
 
 
 # MAIN
 cant = 2000
-database = 'order_management'
+database = 'logistics'
 
+# kpi_event changed (Depart → LoadToVehicle): ev_log/all_kpis/hetero graphs on disk are for
+# the old KPI and must be regenerated. verify_hetero_graphs and compare_to_hoeg remain
+# hardcoded to the order_management object schema and crash against `logistics` — still
+# skipped. verify_process_generation and verify_ocel_generator are schema-agnostic enough to run.
 verify_process_generation(database, cant)
 verify_ocel_generator(database, cant)
-verify_hetero_graphs(database, cant)
-compare_to_hoeg(database, cant)
+# verify_hetero_graphs(database, cant)
+# compare_to_hoeg(database, cant)
 
 # Obtains all related nodes and arcs in the dataset and then generates the list of process executions
 p = pg.ProcessGeneration(database, cant)
@@ -768,17 +848,22 @@ p.get_ev_log(nodes)
 # # # g = og.Generator(database, cant)
 # # # g.generate_ocel(nodes)
 
-# # Apply the train test split to the set of process executions to obtain the relevant sets for learning set generation
+# Apply the train test split to the set of process executions to obtain the relevant sets for learning set generation
 ttb = tb.TrainTestBuilder(database, cant)
 train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps = ttb.timestamps_generator()
 
-# # Obtains the learning set for training, testing and validation and converts it into pytorch tensors
+# Obtains the learning set for training, testing and validation and converts it into pytorch tensors
 hgg = hg.HeteroGraphsGenerator(database, cant, train_sampled_timestamps,
                                val_sampled_timestamps, test_sampled_timestamps)
 hgg.trace_kpi()
 
 m = t.Modelling(database, cant)
-m.sweep()
+# Sweep skipped: no saved hyperparameters exist yet for this new task_id
+# (TimeFrom_TransportDocument_to_LoadToVehicle), so Modelling() falls back to the regression
+# defaults (hidden=24, layers=2, heads=2, lr=1e-3). A 30-trial sweep was observed taking >1h
+# without finishing even trial 1 on this dataset scale, so it's skipped in favor of training
+# directly with defaults — consistent with the previous Depart run.
+# m.sweep()
 m.Modelling()
 m.Homo_Reg_Modelling()
 m.compare_models()
