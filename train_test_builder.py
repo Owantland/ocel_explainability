@@ -22,20 +22,38 @@ class TrainTestBuilder:
         # Finds the timeframe for each order and puts them in chronological order
         # depending on when their last related event occurs
         active_orders = []
+        skipped = []
         for i in range(self.num_vp_obj):
             vwpnt_id = i+1
             temp = self.pd_df[self.pd_df['vwpnt_id'] == vwpnt_id]
-            start_time = temp.iloc[0,2]
+            try:
+                start_time = temp.iloc[0,2]
 
-            # Select the final event of the chosen type for marking the end time of the process
-            temp = temp[temp['type'] == self.path_dict['kpi_event']]
-            end_time = temp.iloc[-1, 2]
+                # Select the final event of the chosen type for marking the end time of the process
+                kpi_rows = temp[temp['type'] == self.path_dict['kpi_event']]
+                end_time = kpi_rows.iloc[-1, 2]
+            except IndexError:
+                # No rows for this trace, or none of the chosen kpi_event type within
+                # them — skip it (leave its rows untouched) instead of crashing the
+                # whole pipeline on one bad trace.
+                skipped.append(vwpnt_id)
+                continue
+
             active_orders.append([vwpnt_id, start_time, end_time])
 
             # Curtail the dataframe to avoid events that happen after our chosen end event
             del_index = self.pd_df[(self.pd_df['vwpnt_id'] == vwpnt_id) & (self.pd_df['timestamp'] > end_time)].index
             self.pd_df = self.pd_df.drop(del_index, inplace=False)
-            self.pd_df.to_csv(self.path_dict['ev_log_path'], index=False)
+
+        if skipped:
+            preview = skipped[:10]
+            print(f"  WARN [TrainTestBuilder]: skipped {len(skipped)} trace(s) with no rows or "
+                  f"no '{self.path_dict['kpi_event']}' event in window: {preview}"
+                  f"{', ...' if len(skipped) > 10 else ''}")
+
+        # Single write at the end, not once per trace — a failure partway through the
+        # loop above now never leaves ev_log.csv half-trimmed on disk.
+        self.pd_df.to_csv(self.path_dict['ev_log_path'], index=False)
 
         pd_active_orders = pd.DataFrame(active_orders)
         pd_active_orders.sort_values(by=2, inplace=True)
