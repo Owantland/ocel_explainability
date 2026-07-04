@@ -1,4 +1,5 @@
 import ast
+import time
 import torch
 import json
 import random
@@ -32,6 +33,10 @@ class Modelling:
         self.train_data = torch.load(f"{self.path_dict['pytorch_path']}/train_graphs_sg.pt", weights_only=False)
         self.val_data = torch.load(f"{self.path_dict['pytorch_path']}/val_graphs_sg.pt", weights_only=False)
         self.test_data = torch.load(f"{self.path_dict['pytorch_path']}/test_graphs_sg.pt", weights_only=False)
+
+        # Model parameters
+        self.max_epochs = 100
+        self.early_stop_patience = 10
 
         kpi_type = self.path_dict['kpi_type']
 
@@ -271,15 +276,16 @@ class Modelling:
             weight_decay=self.params['weight_decay'],
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=5
+            optimizer, mode="min", factor=0.5, patience=10
         )
 
-        max_epochs, early_stop_patience = 50, 5
+        max_epochs, early_stop_patience = self.max_epochs, self.early_stop_patience
         best_val_mae, best_state = float("inf"), None
         epochs_without_improvement = 0
         log = []
 
         pbar = tqdm(range(1, max_epochs + 1))
+        fit_start = time.time()  # fitting time, HOEG Table 7-style: loop only, not data loading
 
         for epoch in pbar:
             train_loss = self.het_train(model, train_loader, optimizer, criterion, self.device)
@@ -307,6 +313,8 @@ class Modelling:
                       f"(no val improvement for {early_stop_patience} epochs)")
                 break
         pbar.close()
+        fit_time_s = time.time() - fit_start
+        print(f"Fitting time: {fit_time_s:.4f}s")
 
         if best_state is not None:
             model.load_state_dict(best_state)
@@ -318,7 +326,8 @@ class Modelling:
         norm_path = self.model_path.replace(".pth", "_norm.json")
         with open(norm_path, "w") as f:
             json.dump({"target_mean": self.target_mean.item(),
-                       "target_std":  self.target_std.item()}, f)
+                       "target_std":  self.target_std.item(),
+                       "fit_time_s":  fit_time_s}, f)
 
         log_path = self.model_path.replace(".pth", "_training_log.csv")
         pd.DataFrame(log).to_csv(log_path, index=False)
@@ -378,6 +387,22 @@ class Modelling:
 
         study = optuna.create_study(direction='minimize',
                                     pruner=optuna.pruners.MedianPruner(n_warmup_steps=10))
+
+        # Seed with an informed prior from HOEG (Smit et al. 2024, Section 6.1): across
+        # their tuning experiment, lower learning rate (0.001) generally scored better,
+        # and larger hidden_dims (256) worked best on their more structured datasets
+        # while smaller hidden_dims (64) worked best on their messier real-world one.
+        # order_management (few object types, explicit attributes) is the "clean"
+        # analogue here; logistics (7 object types, added_depth=2 traversal) is the
+        # "messier" one. Enqueuing these as the first trials gives the sampler good
+        # early evidence instead of starting blind — directly targets the sweep's
+        # documented cost (a 30-trial run was observed taking >1h without a single
+        # completed trial on the logistics scale).
+        _hidden_prior = 256 if self.database == 'order_management' else 64
+        for _hd in dict.fromkeys([_hidden_prior, 64]):  # de-dupe, preserve order
+            study.enqueue_trial({'hidden_channels': _hd, 'num_heads': 2,
+                                 'num_layers': 2, 'lr': 1e-3})
+
         study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
         # ── Visualise top-3 trials ────────────────────────────────────────────
@@ -510,16 +535,17 @@ class Modelling:
             weight_decay = self.params['weight_decay'],
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=5
+            optimizer, mode="min", factor=0.5, patience=10
         )
 
-        max_epochs, early_stop_patience = 50, 5
+        max_epochs, early_stop_patience = self.max_epochs, self.early_stop_patience
         best_val_mae, best_state        = float("inf"), None
         epochs_without_improvement      = 0
         log = []
 
         # Model training loop
         pbar = tqdm(range(1, max_epochs + 1), desc="HomoGNN")
+        fit_start = time.time()  # fitting time, HOEG Table 7-style: loop only, not data loading
         for epoch in pbar:
             train_loss = self.homo_train_step(model, train_loader, optimizer, criterion, self.device)
             val_mae    = self.homo_eval(val_loader, model, criterion, self.device)
@@ -544,6 +570,8 @@ class Modelling:
                 print(f"\nEarly stopping at epoch {epoch}")
                 break
         pbar.close()
+        fit_time_s = time.time() - fit_start
+        print(f"Fitting time: {fit_time_s:.4f}s")
 
         if best_state is not None:
             model.load_state_dict(best_state)
@@ -554,6 +582,8 @@ class Modelling:
         pd.DataFrame(log).to_csv(
             homo_model_path.replace(".pth", "_training_log.csv"), index=False
         )
+        with open(homo_model_path.replace(".pth", "_meta.json"), "w") as f:
+            json.dump({"fit_time_s": fit_time_s}, f)
         print(f"HomoGNN checkpoint saved to {homo_model_path}")
 
     """
@@ -583,20 +613,27 @@ class Modelling:
         homo_model.load_state_dict(torch.load(homo_model_path, weights_only=False))
         homo_model.eval()
 
-        # ── Collect predictions ──────────────────────────────────────────────
+        # ── Collect predictions (timed separately per model, HOEG Table 7-style) ─
         denorm = lambda v: (v * self.target_std.item() + self.target_mean.item()) / 3600.0
         records = []
+        hgt_pred_time_s = 0.0
+        homo_pred_time_s = 0.0
         with torch.no_grad():
             for g_het, g_hom in zip(het_test, homo_test):
                 g_het = g_het.to(self.device)
                 g_hom = g_hom.to(self.device)
 
-                hgt_pred_n  = self.model(g_het.x_dict, g_het.edge_index_dict)[0].item()
+                _t0 = time.time()
+                hgt_pred_n = self.model(g_het.x_dict, g_het.edge_index_dict)[0].item()
+                hgt_pred_time_s += time.time() - _t0
+
+                _t0 = time.time()
                 homo_pred_n = homo_model(
                     g_hom.x.unsqueeze(0) if g_hom.x.dim() == 1 else g_hom.x,
                     g_hom.edge_index,
                     torch.zeros(g_hom.num_nodes, dtype=torch.long, device=self.device),
                 ).item()
+                homo_pred_time_s += time.time() - _t0
 
                 true_n = g_het[vp].y[0].item()
 
@@ -607,6 +644,24 @@ class Modelling:
                     'n_events':     g_het['Events'].num_nodes,
                     'last_event':   bool(g_het[vp].last_event[0].item()),
                 })
+
+        # ── Scalability: read back training-time fitting cost, report alongside
+        # the just-measured prediction cost — mirrors HOEG's Table 7 columns.
+        def _read_fit_time(meta_path):
+            if os.path.exists(meta_path):
+                with open(meta_path) as f:
+                    return json.load(f).get("fit_time_s")
+            return None
+
+        hgt_fit_time_s  = _read_fit_time(self.model_path.replace(".pth", "_norm.json"))
+        homo_fit_time_s = _read_fit_time(homo_model_path.replace(".pth", "_meta.json"))
+
+        def _fmt_time(v):
+            return f"{v:.4f}" if v is not None else "n/a"
+
+        print(f"\n{'Model':<18}  {'Fitting Time (s)':>18}  {'Prediction Time (s)':>20}")
+        print(f"{'HomoGNN (GCN)':<18}  {_fmt_time(homo_fit_time_s):>18}  {homo_pred_time_s:>20.4f}")
+        print(f"{'HGT (ours)':<18}  {_fmt_time(hgt_fit_time_s):>18}  {hgt_pred_time_s:>20.4f}")
 
         df        = pd.DataFrame(records)
         last_mask = df['last_event'].values

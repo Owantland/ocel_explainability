@@ -13,6 +13,8 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import os
+import json
+import time
 import torch
 import numpy as np
 import pandas as pd
@@ -120,16 +122,21 @@ class GBTPredictor:
 
 # ── HGT inference ──────────────────────────────────────────────────────────
 
-def hgt_predictions(m) -> pd.DataFrame:
-    """Run the trained HGT on m.test_data and return denormalised predictions."""
+def hgt_predictions(m) -> tuple[pd.DataFrame, float]:
+    """Run the trained HGT on m.test_data; return denormalised predictions plus the
+    wall-clock prediction time in seconds (model loading excluded, matching how
+    fitting/prediction time are measured separately elsewhere)."""
     m.model.load_state_dict(torch.load(m.model_path, weights_only=False))
     m.model.eval()
     vp = m.viewpoint_object
     records = []
+    pred_time_s = 0.0
     with torch.no_grad():
         for g in m.test_data:
+            _t0 = time.time()
             out = m.model(g.x_dict, g.edge_index_dict)
             pred_h = (out[0].item() * m.target_std.item() + m.target_mean.item()) / 3600.0
+            pred_time_s += time.time() - _t0
             true_h = (g[vp].y[0].item() * m.target_std.item() + m.target_mean.item()) / 3600.0
             records.append({
                 'order_id':   int(g[vp].id[0].item()),
@@ -138,7 +145,18 @@ def hgt_predictions(m) -> pd.DataFrame:
                 'true_h':     true_h,
                 'hgt_pred_h': pred_h,
             })
-    return pd.DataFrame(records)
+    return pd.DataFrame(records), pred_time_s
+
+
+def read_hgt_fit_time(m) -> float | None:
+    """Read back the fitting time recorded by training.Modelling.Het_Reg_Modelling's
+    _norm.json sidecar — baselines.py never retrains HGT, so its fit time has to come
+    from the actual training run instead of being measured here."""
+    norm_path = m.model_path.replace(".pth", "_norm.json")
+    if os.path.exists(norm_path):
+        with open(norm_path) as f:
+            return json.load(f).get("fit_time_s")
+    return None
 
 
 # ── printing helpers ───────────────────────────────────────────────────────
@@ -178,27 +196,45 @@ if __name__ == '__main__':
     y_test  = test_df['y_h'].values
     last_mask = test_df['last_event'].values
 
-    # ── 2. Fit baselines ──────────────────────────────────────────────────
+    # ── 2. Fit baselines (timed, HOEG Table 7-style) ────────────────────────
     print("Fitting Mean predictor...")
     mean_pred = MeanPredictor()
+    _t0 = time.time()
     mean_pred.fit(y_train)
+    mean_fit_time_s = time.time() - _t0
+    _t0 = time.time()
     mean_preds = mean_pred.predict(len(test_df))
+    mean_pred_time_s = time.time() - _t0
 
     print("Fitting GBT (n_estimators=300)...")
     gbt = GBTPredictor()
+    _t0 = time.time()
     gbt.fit(X_train, y_train)
+    gbt_fit_time_s = time.time() - _t0
+    _t0 = time.time()
     gbt_preds = gbt.predict(X_test)
+    gbt_pred_time_s = time.time() - _t0
 
     # ── 3. HGT predictions ────────────────────────────────────────────────
     print("Loading HGT model and running inference...")
     m = t.Modelling(DATABASE, CANT)
-    hgt_df = hgt_predictions(m)
+    hgt_fit_time_s = read_hgt_fit_time(m)  # from training.py's recorded fit time — never retrained here
+    hgt_df, hgt_pred_time_s = hgt_predictions(m)
     hgt_preds = hgt_df['hgt_pred_h'].values
 
     # sanity: test split order matches (same number of graphs)
     assert len(hgt_df) == len(test_df), (
         f"HGT ({len(hgt_df)}) and raw test ({len(test_df)}) have different lengths"
     )
+
+    # ── Scalability table (fitting/prediction time, seconds) ────────────────
+    def _fmt_time(v):
+        return f"{v:.4f}" if v is not None else "n/a"
+
+    print(f"\n{'Model':<18}  {'Fitting Time (s)':>18}  {'Prediction Time (s)':>20}")
+    print(f"{'Mean predictor':<18}  {_fmt_time(mean_fit_time_s):>18}  {mean_pred_time_s:>20.4f}")
+    print(f"{'GBT':<18}  {_fmt_time(gbt_fit_time_s):>18}  {gbt_pred_time_s:>20.4f}")
+    print(f"{'HGT (ours)':<18}  {_fmt_time(hgt_fit_time_s):>18}  {hgt_pred_time_s:>20.4f}")
 
     # ── 4. Compute metrics ────────────────────────────────────────────────
     results = {}
