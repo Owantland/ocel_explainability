@@ -90,8 +90,12 @@ def verify_process_generation(database='logistics', cant=2000):
     # ------------------------------------------------------------------
     # Check 3 — Completeness (R4)
     # ------------------------------------------------------------------
+    # Use viewpoint_id (the shared per-trace integer id, same as ev_log's vwpnt_id),
+    # not ob_id — all_kpis' ob_id is the kpi_viewpoint instance's own id (e.g. a
+    # Package/TransportDocument), which has no reason to number `cant` whenever
+    # viewpoint != kpi_viewpoint.
     print("\n[Check 3] Completeness...")
-    n_vp = all_kpis_df['ob_id'].nunique()
+    n_vp = all_kpis_df['viewpoint_id'].nunique()
     if n_vp != cant:
         errors.append(f"R4: expected {cant} unique viewpoint objects, got {n_vp}")
     else:
@@ -152,22 +156,35 @@ def verify_process_generation(database='logistics', cant=2000):
     # Check 6 — ev_log and all_kpis alignment
     # ------------------------------------------------------------------
     print("\n[Check 6] ev_log / all_kpis alignment...")
-    if len(ev_log_df) != len(all_kpis_df):
+    # ev_log.csv is allowed to have FEWER rows than all_kpis.csv: TrainTestBuilder
+    # trims each trace's trailing post-KPI-event rows from ev_log.csv, but
+    # all_kpis.csv (one row per original event) is never trimmed. It should never
+    # have MORE rows than all_kpis, though — that would mean events were duplicated
+    # or the two files came from different runs.
+    if len(ev_log_df) > len(all_kpis_df):
         errors.append(
-            f"Row count mismatch: ev_log={len(ev_log_df)}, all_kpis={len(all_kpis_df)}"
+            f"ev_log has more rows than all_kpis (ev_log={len(ev_log_df)}, "
+            f"all_kpis={len(all_kpis_df)}) — should never exceed the untrimmed source"
         )
     else:
-        print(f"  OK: both files have {len(ev_log_df)} rows")
+        print(f"  OK: ev_log={len(ev_log_df)} rows, all_kpis={len(all_kpis_df)} rows "
+              f"(ev_log may be trimmed by TrainTestBuilder)")
 
-    kpi_ids = set(all_kpis_df['ob_id'].unique())
-    ev_ids  = set(ev_log_df['ob_id'].unique())
-    if kpi_ids != ev_ids:
+    # Compare the shared per-trace integer id — ev_log's vwpnt_id and all_kpis'
+    # viewpoint_id are both set to the same `log_id` counter in get_ev_log. ob_id is
+    # NOT comparable across the two files: it names the viewpoint object in ev_log
+    # (e.g. an Order/CustomerOrder) but the kpi_viewpoint instance in all_kpis (e.g.
+    # a Package/TransportDocument) — different object types whenever
+    # viewpoint != kpi_viewpoint, which is true for every dataset in config.yml.
+    kpi_trace_ids = set(all_kpis_df['viewpoint_id'].unique())
+    ev_trace_ids  = set(ev_log_df['vwpnt_id'].unique())
+    if kpi_trace_ids != ev_trace_ids:
         errors.append(
-            f"Viewpoint ID mismatch — only in all_kpis: {kpi_ids - ev_ids}, "
-            f"only in ev_log: {ev_ids - kpi_ids}"
+            f"Trace ID mismatch — only in all_kpis: {kpi_trace_ids - ev_trace_ids}, "
+            f"only in ev_log: {ev_trace_ids - kpi_trace_ids}"
         )
     else:
-        print(f"  OK: viewpoint IDs match across both files")
+        print(f"  OK: trace IDs match across both files ({len(ev_trace_ids)} traces)")
 
     # ------------------------------------------------------------------
     # Summary
@@ -830,23 +847,20 @@ def compare_to_hoeg(database='logistics', cant=2000):
 cant = 2000
 database = 'logistics'
 
-# kpi_event changed (Depart → LoadToVehicle): ev_log/all_kpis/hetero graphs on disk are for
-# the old KPI and must be regenerated. verify_hetero_graphs and compare_to_hoeg remain
-# hardcoded to the order_management object schema and crash against `logistics` — still
-# skipped. verify_process_generation and verify_ocel_generator are schema-agnostic enough to run.
-verify_process_generation(database, cant)
-verify_ocel_generator(database, cant)
-# verify_hetero_graphs(database, cant)
+# Verification of data sources and generated results
 # compare_to_hoeg(database, cant)
 
 # Obtains all related nodes and arcs in the dataset and then generates the list of process executions
 p = pg.ProcessGeneration(database, cant)
 nodes = p.related_nodes()
 p.get_ev_log(nodes)
+verify_process_generation(database, cant)
 
 # # # # Generate the OCEL file with relevant attributes (required when role_encoding config changes)
 # # # g = og.Generator(database, cant)
 # # # g.generate_ocel(nodes)
+verify_ocel_generator(database, cant)
+
 
 # Apply the train test split to the set of process executions to obtain the relevant sets for learning set generation
 ttb = tb.TrainTestBuilder(database, cant)
@@ -856,97 +870,15 @@ train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps = ttb.
 hgg = hg.HeteroGraphsGenerator(database, cant, train_sampled_timestamps,
                                val_sampled_timestamps, test_sampled_timestamps)
 hgg.trace_kpi()
+verify_hetero_graphs(database, cant)
 
-m = t.Modelling(database, cant)
-# Sweep skipped: no saved hyperparameters exist yet for this new task_id
-# (TimeFrom_TransportDocument_to_LoadToVehicle), so Modelling() falls back to the regression
-# defaults (hidden=24, layers=2, heads=2, lr=1e-3). A 30-trial sweep was observed taking >1h
-# without finishing even trial 1 on this dataset scale, so it's skipped in favor of training
-# directly with defaults — consistent with the previous Depart run.
+# # Model training and testing
+# m = t.Modelling(database, cant)
+# m.Modelling()
+
+# Sweep
 # m.sweep()
-m.Modelling()
-m.Homo_Reg_Modelling()
-m.compare_models()
 
-# # ── Validation ────────────────────────────────────────────────────────────────
-# import torch
-# import pandas as pd
-# import os
-# import csv
-# from torch_geometric.loader import DataLoader
-# from model_classes import REG_GNN
-#
-# out_dir    = f"files/explainer_outputs/{database}/validation_2000"
-# os.makedirs(out_dir, exist_ok=True)
-# criterion  = torch.nn.L1Loss()
-# batch_size = m.path_dict.get('batch_size', 16)
-# vp         = m.viewpoint_object
-#
-# # 1. HGT test metrics (denormalised hours)
-# m.model.load_state_dict(torch.load(m.model_path, weights_only=False))
-# m.model.eval()
-# records = []
-# with torch.no_grad():
-#     for g in m.test_data:
-#         pred_h = (m.model(g.x_dict, g.edge_index_dict)[0].item()
-#                   * m.target_std.item() + m.target_mean.item()) / 3600.0
-#         true_h = (g[vp].y[0].item()
-#                   * m.target_std.item() + m.target_mean.item()) / 3600.0
-#         records.append({'true_h': true_h, 'pred_h': pred_h,
-#                         'abs_err_h': abs(true_h - pred_h),
-#                         'n_events': g['Events'].num_nodes,
-#                         'last_event': bool(g[vp].last_event[0].item())})
-# df   = pd.DataFrame(records)
-# last = df[df['last_event']]
-#
-# def _metrics(sub, label):
-#     mae  = sub['abs_err_h'].mean()
-#     rmse = np.sqrt((sub['abs_err_h']**2).mean())
-#     ss_r = ((sub['true_h'] - sub['pred_h'])**2).sum()
-#     ss_t = ((sub['true_h'] - sub['true_h'].mean())**2).sum()
-#     r2   = 1 - ss_r / ss_t
-#     print(f"\n{'='*55}\nTEST METRICS — {label}  (n={len(sub)})\n{'='*55}")
-#     print(f"  MAE  : {mae:.1f} h\n  RMSE : {rmse:.1f} h\n  R²   : {r2:.3f}")
-#     return mae, rmse, r2
-#
-# _metrics(df,   "ALL prefixes")
-# _metrics(last, "LAST-EVENT only")
-#
-# # 2. HomoGNN training + comparison plots
+# Baseline comparison
 # m.Homo_Reg_Modelling()
 # m.compare_models()
-# m.plot_training_curves()
-#
-# # 3. Compute normalised test MAEs for results log
-# test_loader = DataLoader(m.test_data, batch_size=batch_size, shuffle=False)
-# hgt_mae_n   = m.het_loss_test(test_loader, m.model, criterion, m.device)
-#
-# homo_graphs = m._hetero_to_homo(m.test_data)
-# homo_loader = DataLoader(homo_graphs, batch_size=batch_size, shuffle=False)
-# in_ch       = homo_graphs[0].x.size(-1)
-# homo_model  = REG_GNN.REG_GNN(in_channels=in_ch,
-#                                hidden_channels=m.params.get('hidden_channels', 48),
-#                                num_layers=m.params.get('num_layers', 3)).to(m.device)
-# homo_model.load_state_dict(
-#     torch.load(m.model_path.replace('.pth', '_homo.pth'), weights_only=False))
-# homo_mae_n = m.homo_eval(homo_loader, homo_model, criterion, m.device)
-#
-# # 4. Append to results.csv
-# results_path = m.path_dict['results_path']
-# write_header = not os.path.exists(results_path)
-# rows = [
-#     ['Heterogeneous', m.task_id, hgt_mae_n,
-#      m.target_mean.item(), m.target_std.item(), os.path.basename(m.model_path)],
-#     ['Homogeneous', m.task_id, homo_mae_n,
-#      m.target_mean.item(), m.target_std.item(),
-#      os.path.basename(m.model_path.replace('.pth', '_homo.pth'))],
-# ]
-# with open(results_path, 'a', newline='') as f:
-#     w = csv.writer(f)
-#     if write_header:
-#         w.writerow(['Graph Type', 'KPI', 'Metric', 'Mean', 'STD', 'Model'])
-#     w.writerows(rows)
-# print(f"\nResults appended to {results_path}")
-#
-# # e = exp.Explainer(database, cant)
-# # e.explain_feature_attribution()
