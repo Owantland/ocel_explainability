@@ -42,7 +42,7 @@ class Modelling:
 
         # Load model defaults if sweep is not succesful
         _DEFAULTS = {
-            0: {'hidden_channels': 24, 'num_layers': 2, 'num_heads': 2, 'lr': 0.001, 'weight_decay': 1e-5},
+            0: {'hidden_channels': 64, 'num_layers': 2, 'num_heads': 2, 'lr': 0.001, 'weight_decay': 1e-5},
             1: {'hidden_channels': 64, 'num_layers': 2, 'num_heads': 2, 'lr': 0.001, 'weight_decay': 1e-5},
         }
         if kpi_type == 0:  # Regression
@@ -332,10 +332,22 @@ class Modelling:
         log_path = self.model_path.replace(".pth", "_training_log.csv")
         pd.DataFrame(log).to_csv(log_path, index=False)
 
-    def sweep(self, n_trials=30):
+    def sweep(self, n_trials=None):
         """
-        Performs a training sweep of multiple hyperparameters to find the optimal model settings
-        :param n_trials: number of trials for sweep
+        Performs a training sweep to find the optimal hidden_channels/lr for this dataset.
+
+        num_layers and num_heads are fixed, not tuned (see TRAINING_VS_HOEG.md recs 5a/5b):
+        HOEG (Smit et al. 2024) fixes message-passing depth at 2 and has no attention-head
+        analogue at all, and this session found num_layers=1 makes any node type without a
+        direct edge to the viewpoint provably unreachable (EXPLAINABILITY_DEPTH.md) -- sweep()
+        was previously free to (and did) select it. hidden_channels excludes {128, 256} for
+        logistics specifically (rec 5d): HOEG's own Section 6.1 finding is that smaller
+        hidden_dims suit messier data, and this project separately measured ~285s/epoch at
+        hidden_channels=128 on logistics, so those two values are disproportionately expensive
+        there for a choice literature already argues against.
+
+        :param n_trials: number of trials; defaults to exactly the grid size (rec 5c) so a
+                         GridSampler run covers every combination once with no wasted repeats
         :return: Saves the best hyperparameters to a json file
         """
         import optuna
@@ -346,16 +358,21 @@ class Modelling:
         criterion = torch.nn.L1Loss()
         batch_size = self.path_dict.get('batch_size', 16)
 
-        def objective(trial):
-            hidden_channels = trial.suggest_categorical('hidden_channels', [8, 16, 24, 32, 48, 64, 128, 256])
-            num_heads = trial.suggest_categorical('num_heads', [1, 2])
-            if hidden_channels % num_heads != 0:
-                raise optuna.TrialPruned()
-            num_layers = trial.suggest_int('num_layers', 1, 2)
-            lr = trial.suggest_categorical('lr', [1e-3, 1e-2])
+        FIXED_NUM_LAYERS = 2  # matches HOEG's fixed message-passing depth
+        FIXED_NUM_HEADS = 2   # no HOEG analogue; fixed rather than tuned with no grounding
 
-            trial_params = {'hidden_channels': hidden_channels, 'num_layers': num_layers,
-                            'num_heads': num_heads, 'lr': lr}
+        hidden_choices = ([8, 16, 24, 32, 48, 64] if self.database == 'logistics'
+                          else [8, 16, 24, 32, 48, 64, 128, 256])
+        lr_choices = [1e-3, 1e-2]
+        n_combos = len(hidden_choices) * len(lr_choices)
+        n_trials = n_combos if n_trials is None else min(n_trials, n_combos)
+
+        def objective(trial):
+            hidden_channels = trial.suggest_categorical('hidden_channels', hidden_choices)
+            lr = trial.suggest_categorical('lr', lr_choices)
+
+            trial_params = {'hidden_channels': hidden_channels, 'num_layers': FIXED_NUM_LAYERS,
+                            'num_heads': FIXED_NUM_HEADS, 'lr': lr}
             model = self._build_model(trial_params).to(self.device)
 
             train_loader = DataLoader(self.train_data, batch_size=batch_size, shuffle=True)
@@ -364,16 +381,15 @@ class Modelling:
                 batch = next(iter(train_loader)).to(self.device)
                 model(batch.x_dict, batch.edge_index_dict)
 
+            # No LR scheduler here (rec 5e): a ReduceLROnPlateau(patience=10) can never
+            # actually fire within a trial that early-stops after patience_count reaches 4 --
+            # the trial always ends first, so the scheduler was dead weight, not a real effect.
             optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode="min", factor=0.5, patience=10
-            )
             best_val, patience_count = float('inf'), 0
 
             for epoch in range(1, 31):
                 self.het_train(model, train_loader, optimizer, criterion, self.device)
                 val_mae = self.het_loss_test(val_loader, model, criterion, self.device)
-                scheduler.step(val_mae)
                 trial.report(val_mae, epoch)
                 if trial.should_prune():
                     raise optuna.TrialPruned()
@@ -385,23 +401,23 @@ class Modelling:
                         break
             return best_val
 
-        study = optuna.create_study(direction='minimize',
-                                    pruner=optuna.pruners.MedianPruner(n_warmup_steps=10))
+        # GridSampler over the now fully-enumerable (hidden_channels x lr) space guarantees
+        # every combination is tried exactly once in n_combos trials — no wasted repeats from
+        # TPE re-sampling a space this small (rec 5c).
+        study = optuna.create_study(
+            direction='minimize',
+            sampler=optuna.samplers.GridSampler({'hidden_channels': hidden_choices, 'lr': lr_choices}),
+            pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
+        )
 
-        # Seed with an informed prior from HOEG (Smit et al. 2024, Section 6.1): across
-        # their tuning experiment, lower learning rate (0.001) generally scored better,
-        # and larger hidden_dims (256) worked best on their more structured datasets
-        # while smaller hidden_dims (64) worked best on their messier real-world one.
-        # order_management (few object types, explicit attributes) is the "clean"
-        # analogue here; logistics (7 object types, added_depth=2 traversal) is the
-        # "messier" one. Enqueuing these as the first trials gives the sampler good
-        # early evidence instead of starting blind — directly targets the sweep's
-        # documented cost (a 30-trial run was observed taking >1h without a single
-        # completed trial on the logistics scale).
+        # Seed with an informed prior from HOEG (Smit et al. 2024, Section 6.1): lower learning
+        # rate (0.001) generally scored better across their tuning experiment, and the
+        # dataset-conditional hidden_dims expectation from the same finding is now baked
+        # directly into hidden_choices above rather than only seeded here. Enqueuing this combo
+        # first just means the most-likely-good result is available early if the sweep is
+        # interrupted; GridSampler still covers the rest of the grid regardless.
         _hidden_prior = 256 if self.database == 'order_management' else 64
-        for _hd in dict.fromkeys([_hidden_prior, 64]):  # de-dupe, preserve order
-            study.enqueue_trial({'hidden_channels': _hd, 'num_heads': 2,
-                                 'num_layers': 2, 'lr': 1e-3})
+        study.enqueue_trial({'hidden_channels': _hidden_prior, 'lr': 1e-3})
 
         study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
@@ -419,8 +435,6 @@ class Modelling:
             epochs = sorted(trial_obj.intermediate_values)
             maes   = [trial_obj.intermediate_values[e] for e in epochs]
             label  = (f"#{rank}  h={trial_obj.params['hidden_channels']}  "
-                      f"L={trial_obj.params['num_layers']}  "
-                      f"heads={trial_obj.params['num_heads']}  "
                       f"lr={trial_obj.params['lr']:.1e}  "
                       f"(best={trial_obj.value:.4f})")
             ax.plot(epochs, maes, color=color, lw=1.8, label=label)
@@ -440,8 +454,8 @@ class Modelling:
         print(f"Sweep plot saved to {sweep_path}")
 
         best = study.best_params
-        best_params = {'hidden_channels': best['hidden_channels'], 'num_layers': best['num_layers'],
-                       'num_heads': best['num_heads'], 'lr': best['lr'], 'weight_decay': 1e-5}
+        best_params = {'hidden_channels': best['hidden_channels'], 'num_layers': FIXED_NUM_LAYERS,
+                       'num_heads': FIXED_NUM_HEADS, 'lr': best['lr'], 'weight_decay': 1e-5}
         print(f"Best params for {self.task_id}: {best_params}  (val MAE: {study.best_value:.4f})")
         self._save_params(best_params)
         self.params = best_params

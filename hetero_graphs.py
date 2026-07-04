@@ -123,7 +123,7 @@ class HeteroGraphsGenerator:
             active_df = self.ocel_df[self.ocel_df['vwpnt_id'] == process]
             full_event_ids = active_df['ev_id'].tolist()
             active_df = active_df[active_df['timestamp'] < end_time]
-            active_df = active_df[active_df['timestamp'] > start_time]
+            active_df = active_df[active_df['timestamp'] >= start_time]
 
             # events_idx_remap: absolute (pre-windowing) event position -> local position
             # within the filtered active_df. Needed because Events_to_Events/*_to_Events
@@ -137,7 +137,7 @@ class HeteroGraphsGenerator:
 
             edges = self.edges[self.edges['vwpnt_id'] == process]
             edges = edges[edges['timestamp'] <= end_time]
-            edges = edges[edges['timestamp'] > start_time]
+            edges = edges[edges['timestamp'] >= start_time]
             y_df    = self.all_kpis[self.all_kpis['viewpoint_id'] == process].reset_index(drop=True)
             evlog_t = self.ev_log[self.ev_log['vwpnt_id'] == process].reset_index(drop=True)
             # Map ev_id → kpi_val via positional alignment of ev_log and all_kpis.
