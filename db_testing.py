@@ -575,8 +575,8 @@ def verify_hetero_graphs(database='logistics', cant=2000):
                     f"Dim mismatch for {node_type}: expected {expected}, got {actual}"
                 )
     if len(errors) == dim_errors_before:
-        print(f"  OK: Events={td['Events']}D, Orders={td['Orders']}D, "
-              f"Employees={td['Employees']}D (first 10 graphs)")
+        dims_str = ", ".join(f"{t}={td[t]}D" for t in obj_order if t in td)
+        print(f"  OK: Events={td['Events']}D, {dims_str} (first 10 graphs)")
 
     # ------------------------------------------------------------------
     # Check 2 — C3 structural sanity: C3 sum at event position j = j+1
@@ -765,9 +765,13 @@ def compare_to_hoeg(database='logistics', cant=2000):
     obj_type_order = [c.replace('::ids', '') for c in ocel_df.columns if c.endswith('::ids')]
 
     ev_dim     = td_base['Events'] + 6 + n_ev_types + len(obj_type_order)
-    ord_dim    = td_base.get('Orders', 0) + 3 + 1
     obj_dims   = {k: v for k, v in td_base.items() if '_to_' not in k and k != 'Events'}
-    obj_dims['Orders'] = ord_dim
+    if 'Orders' in td_base:
+        # order_management-specific: hetero_graphs.py appends +3 aggregate features
+        # (n_items/total_weight/n_products) and +1 (n_packages) to the Orders viewpoint
+        # only (hetero_graphs.py:76-77,87-88) -- mirror that same guard here rather than
+        # assuming every dataset has an Orders type to adjust (logistics doesn't).
+        obj_dims['Orders'] = td_base['Orders'] + 3 + 1
     node_types = [k for k in td_base if '_to_' not in k]
     edge_types = [k for k in td_base if '_to_' in k]
     obj_to_obj = [e for e in edge_types if 'Events' not in e]
@@ -808,7 +812,7 @@ def compare_to_hoeg(database='logistics', cant=2000):
          "One graph per event prefix",
          "One graph per event prefix"),
         ("KPI target node",
-         "Viewpoint object (Orders) — multi-instance, masked",
+         f"Viewpoint object ({path_dict['kpi_viewpoint']}) — multi-instance, masked",
          "Case-level — one remaining-time value per execution"),
         ("XAI layer",
          "LOO + InputXGradient + Counterfactual",
@@ -844,12 +848,12 @@ def compare_to_hoeg(database='logistics', cant=2000):
 
 
 # MAIN
-cant = 2000
-database = 'order_management'
+cant = 1000
+database = 'logistics'
 
-# Verification of data sources and generated results
-# compare_to_hoeg(database, cant)
-
+# # # Verification of data sources and generated results
+# # # compare_to_hoeg(database, cant)
+# #
 # # Obtains all related nodes and arcs in the dataset and then generates the list of process executions
 # p = pg.ProcessGeneration(database, cant)
 # nodes = p.related_nodes()
@@ -870,11 +874,11 @@ database = 'order_management'
 #                                val_sampled_timestamps, test_sampled_timestamps)
 # hgg.trace_kpi()
 # verify_hetero_graphs(database, cant)
-#
+
 # # Model training and testing
 # m = t.Modelling(database, cant)
-# # Sweep
-# # m.sweep()
+# # # Sweep
+# # # m.sweep()
 # m.Modelling()
 
 # # Baseline comparison

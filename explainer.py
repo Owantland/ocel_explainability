@@ -763,6 +763,106 @@ class Explainer(Modelling):
             "save_dir": save_dir,
         }
 
+    def explain_trace_ig(self, order_id, methods=('InputXGradient', 'IntegratedGradients'),
+                         save_dir=None):
+        """Single-trace gradient-based feature attribution for one order (last-event
+        snapshot) — the per-order analogue of explain_feature_attribution()'s aggregate
+        computation, using the same _compute_attribution_for_graph() helper and the same
+        bar-chart style, just for one graph instead of averaged across the test set."""
+        import numpy as np
+        import pandas as pd
+        from matplotlib.patches import Patch
+
+        if save_dir is None:
+            save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}")
+        os.makedirs(save_dir, exist_ok=True)
+
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        explain_subgraph = None
+        for g in self.test_data:
+            if (g[self.viewpoint_object]['last_event'][0].item()
+                    and g[self.viewpoint_object]['id'][0].item() == order_id):
+                explain_subgraph = g
+                break
+        if explain_subgraph is None:
+            raise ValueError(f"Order ID {order_id} with last_event=True not found in test data.")
+
+        print(f"\n{'='*60}")
+        print(f"Feature attribution for {self.viewpoint_object} #{order_id}")
+        print(f"{'='*60}")
+
+        results = {}
+        for method in methods:
+            masks = self._compute_attribution_for_graph(explain_subgraph, method=method)
+            mean_signed = {nt: mask.mean(axis=0) for nt, mask in masks.items() if mask.shape[0] > 0}
+            mean_abs    = {nt: np.abs(mask).mean(axis=0) for nt, mask in masks.items() if mask.shape[0] > 0}
+            results[method] = {'signed': mean_signed, 'abs': mean_abs}
+
+            print(f"\n[{method}]")
+            for nt in sorted(mean_abs):
+                scores = mean_abs[nt]
+                fnames = self.feature_names.get(nt, [f"feat_{j}" for j in range(len(scores))])
+                top_idx = np.argsort(scores)[::-1][:3]
+                top_str = ", ".join(
+                    f"{fnames[j] if j < len(fnames) else f'feat_{j}'}={scores[j]:.4f}"
+                    for j in top_idx
+                )
+                print(f"  {nt:12s}  top-3: {top_str}")
+
+            suffix = method.lower()
+            rows = []
+            for nt in sorted(mean_abs):
+                scores_abs = mean_abs[nt]
+                scores_sgn = mean_signed[nt]
+                fnames = self.feature_names.get(nt, [f"feat_{j}" for j in range(len(scores_abs))])
+                labels = [fnames[j] if j < len(fnames) else f"feat_{j}" for j in range(len(scores_abs))]
+                order = np.argsort(scores_abs)[::-1]
+                colors = ['#4C72B0' if scores_sgn[j] >= 0 else '#DD8452' for j in order]
+
+                fig, ax = plt.subplots(figsize=(max(6, len(scores_abs) * 0.45 + 2), 4))
+                ax.barh([labels[j] for j in order], scores_abs[order], color=colors, alpha=0.85)
+                ax.set_xlabel(f"|{method}| attribution")
+                ax.set_title(f"Feature attribution — {nt} nodes ({method}), order #{order_id}")
+                ax.grid(True, axis='x', alpha=0.3)
+                ax.legend(handles=[Patch(color='#4C72B0', label='+ (raises prediction)'),
+                                    Patch(color='#DD8452', label='− (lowers prediction)')],
+                          fontsize=8)
+                plt.tight_layout()
+                plt.savefig(os.path.join(save_dir, f"ig_attribution_{nt.lower()}_{suffix}.png"), dpi=150)
+                plt.close()
+
+                for dim, (s, a) in enumerate(zip(scores_sgn, scores_abs)):
+                    fname = fnames[dim] if dim < len(fnames) else f"feat_{dim}"
+                    rows.append({'node_type': nt, 'feature_dim': dim, 'feature_name': fname,
+                                 'signed': round(float(s), 6), 'abs': round(float(a), 6)})
+            pd.DataFrame(rows).to_csv(os.path.join(save_dir, f"ig_attribution_{suffix}.csv"), index=False)
+
+            # Node-type x feature-dim heatmap -- per-trace analogue of
+            # explain_feature_attribution()'s aggregate ig_heatmap.
+            all_types = sorted(mean_abs)
+            max_dims  = max(len(v) for v in mean_abs.values())
+            heat = np.zeros((len(all_types), max_dims))
+            for i, nt in enumerate(all_types):
+                arr = mean_abs[nt]
+                heat[i, :len(arr)] = arr
+
+            fig, ax = plt.subplots(figsize=(max(8, max_dims * 0.5 + 2), len(all_types) + 1))
+            im = ax.imshow(heat, aspect='auto', cmap='YlOrRd')
+            ax.set_yticks(range(len(all_types)))
+            ax.set_yticklabels(all_types)
+            ax.set_xlabel("Feature dimension index")
+            ax.set_title(f"Feature attribution heatmap (|{method}|), order #{order_id}")
+            plt.colorbar(im, ax=ax, shrink=0.8)
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, f"ig_heatmap_{suffix}.png"), dpi=150)
+            plt.close()
+
+        print(f"\nOutputs saved to: {save_dir}")
+        print('='*60)
+        return results
+
     def explain_aggregate(self, n_traces=50, top_k=5, save_dir=None):
         """Run LOO explanation on n_traces test graphs and aggregate results."""
         if save_dir is None:
@@ -1081,6 +1181,17 @@ class Explainer(Modelling):
         os.makedirs(save_dir, exist_ok=True)
         self._plot_cf_node_comparison(query_graph, results[0]['graph'], order_id,
                                       results[0]['order_id'], save_dir)
+        self._plot_cf_dissimilarity_breakdown(results[0], order_id, save_dir)
+
+        import pandas as pd
+        pd.DataFrame([
+            {'rank': i, 'order_id': r['order_id'], 'predicted_hours': r['predicted_hours'],
+             'feat': r['components']['feat'], 'type': r['components']['type'],
+             'edge': r['components']['edge'], 'struct': r['components']['struct'],
+             'total': r['dissimilarity']}
+            for i, r in enumerate(results, 1)
+        ]).to_csv(os.path.join(save_dir, "cf_dissimilarity.csv"), index=False)
+
         print(f"\n  Plot saved to: {save_dir}")
         print('=' * 60)
         return results
@@ -1110,6 +1221,27 @@ class Explainer(Modelling):
         plt.savefig(os.path.join(save_dir, "cf_node_type_comparison.png"), dpi=150)
         plt.close()
         print(f"Saved CF node-type comparison to {save_dir}")
+
+    def _plot_cf_dissimilarity_breakdown(self, top_result, query_id, save_dir):
+        """Bar chart of the top counterfactual's 4-component dissimilarity score
+        (feat/type/edge/struct) -- shows where the structural vs. feature differences
+        between query and CF actually lie, rather than just the total scalar score."""
+        comps = top_result['components']
+        labels = ['feat', 'type', 'edge', 'struct']
+        values = [comps[k] for k in labels]
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.bar(labels, values, color="#4C72B0", alpha=0.85)
+        for i, v in enumerate(values):
+            ax.text(i, v, f"{v:.3f}", ha='center', va='bottom', fontsize=9)
+        ax.set_ylabel("Dissimilarity component score")
+        ax.set_title(f"CF dissimilarity breakdown: Query #{query_id} vs. "
+                     f"CF #{top_result['order_id']} (total={top_result['dissimilarity']:.3f})")
+        ax.grid(True, axis='y', alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "cf_dissimilarity_breakdown.png"), dpi=150)
+        plt.close()
+        print(f"Saved CF dissimilarity breakdown to {save_dir}")
 
     # ── Feature attribution (PyG Explainer + CaptumExplainer) ───────────────────
     # Verified against the previous hand-rolled `captum.attr.InputXGradient(forward_func)`
@@ -1315,9 +1447,15 @@ class Explainer(Modelling):
         print("=" * 60 + "\n")
 
         # ── Depth-stratified attribution (OCEL analogue of Zhai et al.'s time-of-day
-        #    heatmap), computed across ALL test prefixes, not just last-event graphs ───
+        #    heatmap), computed across ALL test prefixes, not just last-event graphs.
+        #    Covers both the viewpoint type and Events -- the only two node types that
+        #    carry non-zero attribution (see EXPLAINABILITY_DEPTH.md) ───
         if depth_stratify:
-            self._explain_attribution_by_depth(methods=methods, n_traces=n_traces)
+            self._explain_attribution_by_depth(methods=methods, n_traces=n_traces,
+                                                node_type=self.viewpoint_object)
+            if 'Events' != self.viewpoint_object:
+                self._explain_attribution_by_depth(methods=methods, n_traces=n_traces,
+                                                    node_type='Events')
 
     def _explain_attribution_by_depth(self, methods=('InputXGradient',), n_traces=None,
                                        node_type=None):
@@ -1360,14 +1498,15 @@ class Explainer(Modelling):
             fnames = self.feature_names.get(node_type, [])
             heat = np.stack([np.stack(bin_accum[lbl]).mean(axis=0) for lbl in labels])
 
-            fig, ax = plt.subplots(figsize=(max(8, heat.shape[1] * 0.5 + 2), len(labels) + 1.5))
-            im = ax.imshow(heat, aspect='auto', cmap='YlOrRd')
-            ax.set_yticks(range(len(labels)))
-            ax.set_yticklabels(labels)
-            ax.set_xticks(range(heat.shape[1]))
-            feat_labels = [fnames[j] if j < len(fnames) else f"feat_{j}" for j in range(heat.shape[1])]
-            ax.set_xticklabels(feat_labels, rotation=45, ha='right', fontsize=8)
-            ax.set_ylabel("Prefix depth (n events seen)")
+            heat_t = heat.T  # rows=feature dims, cols=prefix-depth bins
+            fig, ax = plt.subplots(figsize=(max(6, len(labels) * 0.9 + 2), heat_t.shape[0] * 0.4 + 2))
+            im = ax.imshow(heat_t, aspect='auto', cmap='YlOrRd')
+            ax.set_xticks(range(len(labels)))
+            ax.set_xticklabels(labels)
+            ax.set_yticks(range(heat_t.shape[0]))
+            feat_labels = [fnames[j] if j < len(fnames) else f"feat_{j}" for j in range(heat_t.shape[0])]
+            ax.set_yticklabels(feat_labels, fontsize=8)
+            ax.set_xlabel("Prefix depth (n events seen)")
             ax.set_title(f"{node_type} feature attribution by prefix depth (mean |{method}|)")
             plt.colorbar(im, ax=ax, shrink=0.8)
             plt.tight_layout()

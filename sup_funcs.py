@@ -39,6 +39,13 @@ class SupportFunctions:
             os.makedirs(path_dict['graph_output_path'])
         path_dict['ev_log_path'] = f"{path_dict['graph_output_path']}/ev_log.csv"
 
+        # Namespace hetero-graph and model artifacts by cant too, so rerunning at a
+        # different dataset size doesn't silently overwrite a previous size's outputs.
+        path_dict['pytorch_path'] = f"{path_dict['pytorch_path']}{self.cant}/"
+        if not os.path.exists(path_dict['pytorch_path']):
+            os.makedirs(path_dict['pytorch_path'])
+        path_dict['model_path'] = f"{path_dict['model_path']}{self.cant}/"
+
         # Validate that explainer path exists
         if not os.path.exists(path_dict['explainer_path']):
             os.makedirs(path_dict['explainer_path'])

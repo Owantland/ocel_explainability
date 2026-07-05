@@ -113,12 +113,59 @@ class Modelling:
             _ocel      = pd.read_csv(f"{self.path_dict['graph_output_path']}ocel.csv")
             _n_types   = len(ast.literal_eval(_ocel['ev_type'].iloc[0]))
             _obj_types = [c.replace('::ids', '') for c in _ocel.columns if c.endswith('::ids')]
+
+            # Real event-type names, via the same alphabetical query ocel_generator.py's
+            # _build_ev_encodings used to build the one-hot encoding -- index i here matches
+            # the one-hot/C3 index i there exactly, so this is a pure label lookup, not a
+            # recomputation.
+            self.funcs.cursor.execute("SELECT DISTINCT OCEL_TYPE_MAP FROM EVENT_MAP_TYPE ORDER BY 1")
+            _ev_names = [r[0] for r in self.funcs.cursor.fetchall()]
+            if len(_ev_names) == _n_types:
+                _type_names = _ev_names
+                _c3_names = [f'c3_{name}' for name in _ev_names]
+            else:
+                _type_names = [f'type_{i}' for i in range(_n_types)]
+                _c3_names = [f'c3_{i}' for i in range(_n_types)]
+
             self.feature_names['Events'] = (
-                [f'type_{i}' for i in range(_n_types)]
-                + _temporal_names
-                + [f'c3_{i}' for i in range(_n_types)]
+                _type_names + _temporal_names + _c3_names
                 + [f'o1_{ot}' for ot in _obj_types]
             )
+
+        # Real names for encoding/role_encoding node types (e.g. Customers/Employees for
+        # order_management, HandlingUnit/Truck/Forklift/Vehicle for logistics) -- config
+        # driven, not hardcoded to a specific dataset's type names. Mirrors the exact
+        # queries ocel_generator.py used to build these encodings (_build_role_encodings,
+        # get_1h_encoding), including its >50-distinct-entities -> 1D fallback.
+        _role_encoding = self.path_dict.get('role_encoding') or {}
+        for _ob_type in (self.path_dict.get('encoding') or []):
+            # Search beyond graph 0 -- unlike Events/the viewpoint, an encoded type like
+            # Employees may have zero nodes in early/short prefixes even though it's
+            # populated later, so graph 0 alone isn't a reliable presence check.
+            _graph_with_type = next(
+                (g for g in self.train_data if g[_ob_type].num_nodes > 0), None
+            ) if self.train_data else None
+            if _graph_with_type is None:
+                continue
+            _n_dims = _graph_with_type[_ob_type].x.shape[1]
+            _table = f'object_{_ob_type}'
+            if not self.funcs.col_names(_table):
+                _table = f'event_{_ob_type}'
+
+            if _ob_type in _role_encoding:
+                _role_col = _role_encoding[_ob_type]
+                self.funcs.cursor.execute(
+                    f"SELECT DISTINCT {_role_col} FROM {_table} WHERE {_role_col} IS NOT NULL ORDER BY 1"
+                )
+                _names = [r[0] for r in self.funcs.cursor.fetchall()]
+            else:
+                self.funcs.cursor.execute(f"SELECT DISTINCT OCEL_ID FROM {_table} ORDER BY 1")
+                _ids = [r[0] for r in self.funcs.cursor.fetchall()]
+                _names = [f'{_ob_type}_present'] if len(_ids) > 50 else _ids
+
+            if len(_names) == _n_dims:
+                self.feature_names[_ob_type] = _names
+
         if self.train_data and self.train_data[0][self.viewpoint_object].num_nodes > 0:
             vp = self.viewpoint_object
             n_vp = self.train_data[0][vp].x.shape[1]
