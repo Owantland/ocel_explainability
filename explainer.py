@@ -1036,8 +1036,10 @@ class Explainer(Modelling):
     def find_counterfactuals(self, order_id, target_band='opposite', n_results=3, min_candidates=5):
         """Find the n_results most similar test traces with a contrasting predicted outcome.
 
-        target_band: 'opposite' (default) — traces predicted below Q1 if query is above Q2,
-                     or above Q3 if query is below Q2; or a (low_s, high_s) tuple in seconds.
+        target_band: 'opposite' (default) — always traces with a LOWER predicted time than
+                     the query: below Q1 normally, or below the query's own value if the
+                     query itself is already in the fastest quartile; or a (low_s, high_s)
+                     tuple in seconds.
         min_candidates: minimum pool size before the length window is widened.
         """
         import json
@@ -1074,21 +1076,27 @@ class Explainer(Modelling):
         q1, _q2, q3 = quartiles
         query_pred = self._predict_value_for_graph(query_graph, 0)
 
-        # Target band bounds in seconds
+        # Target band bounds in seconds -- 'opposite' always means a LOWER predicted
+        # time than the query, never a symmetric quartile contrast. Normally that's
+        # the fastest population quartile (below Q1); if the query itself is already
+        # in the fastest quartile, there's no faster quartile left to contrast
+        # against, so fall back to "anything faster than the query itself."
         if target_band == 'opposite':
-            if query_pred <= _q2:
-                low, high = q3, float('inf')
-            else:
-                low, high = float('-inf'), q1
+            low = float('-inf')
+            high = q1 if query_pred > q1 else query_pred
         else:
             low, high = target_band
 
-        # Build initial candidate pool (correct band, excluding query)
+        # Build initial candidate pool (correct band, excluding query). For 'opposite'
+        # the pred < query_pred guard guarantees a strictly-faster match even in the
+        # fallback branch above (where high == query_pred, which would otherwise admit
+        # a tie).
         query_oid = order_id
         candidates_all = [
             (g, pred)
             for g, pred in zip(last_event_graphs, all_preds)
             if g[self.viewpoint_object]['id'][0].item() != query_oid and low <= pred <= high
+            and (target_band != 'opposite' or pred < query_pred)
         ]
 
         # Prefix-length stratification with progressive fallback
