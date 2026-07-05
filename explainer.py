@@ -592,8 +592,12 @@ class Explainer(Modelling):
     # Explainability — visualizations and entry points
     # ------------------------------------------------------------------
 
-    def plot_feature_importances(self, node_type, feature_importances, save_path):
-        """Horizontal bar chart of per-feature value shifts for one node."""
+    def plot_feature_importances(self, node_type, feature_importances, save_path, order_id=None):
+        """Horizontal bar chart of per-feature value shifts for one node. Uses the
+        same blue/orange palette as the feature-attribution bar charts
+        (ig_attribution_{nt}_{method}.png) for visual consistency across the
+        explainability layer -- here repurposed for magnitude (>1 std shift) rather
+        than attribution's signed (+/-) direction, since LOO shift is unsigned."""
         names = self.feature_names.get(node_type, [])
         feats, shifts, larges = [], [], []
         for f, shift, large in feature_importances:
@@ -606,19 +610,22 @@ class Explainer(Modelling):
             return
 
         fig, ax = plt.subplots(figsize=(7, max(3, len(feats) * 0.45)))
-        colors = ["#e74c3c" if l else "#7f8c8d" for l in larges]
+        colors = ["#DD8452" if l else "#4C72B0" for l in larges]
         bars = ax.barh(range(len(feats)), shifts, color=colors)
         ax.set_yticks(range(len(feats)))
         ax.set_yticklabels(feats, fontsize=9)
         ax.invert_yaxis()
         ax.set_xlabel("Value shift if removed (hours)")
-        ax.set_title(f"Feature importance — {node_type} node")
+        title = f"Feature importance — {node_type} node"
+        if order_id is not None:
+            title += f", order #{order_id}"
+        ax.set_title(title)
         for bar, val in zip(bars, shifts):
             ax.text(bar.get_width() + 0.02, bar.get_y() + bar.get_height() / 2,
                     f"{val:.2f}h", va="center", fontsize=8)
         from matplotlib.patches import Patch
-        ax.legend(handles=[Patch(color="#e74c3c", label=">1 std shift"),
-                            Patch(color="#7f8c8d", label="≤1 std shift")],
+        ax.legend(handles=[Patch(color="#DD8452", label=">1 std shift"),
+                            Patch(color="#4C72B0", label="≤1 std shift")],
                   fontsize=8, loc="lower right")
         ax.grid(True, axis="x", alpha=0.3)
         plt.tight_layout()
@@ -689,13 +696,15 @@ class Explainer(Modelling):
 
         self.plot_feature_importances(
             self.viewpoint_object, seed_feats,
-            os.path.join(save_dir, f"feat_importance_{self.viewpoint_object}.png")
+            os.path.join(save_dir, f"feat_importance_{self.viewpoint_object}.png"),
+            order_id=order_id
         )
         if node_importances:
             top_nt, top_ni, _, _ = node_importances[0]
             self.plot_feature_importances(
                 top_nt, top_neighbor_feats,
-                os.path.join(save_dir, f"feat_importance_{top_nt}.png")
+                os.path.join(save_dir, f"feat_importance_{top_nt}.png"),
+                order_id=order_id
             )
 
         self.plot_node_type_summary(
@@ -922,7 +931,7 @@ class Explainer(Modelling):
             if not feats:
                 continue
             fig, ax = plt.subplots(figsize=(7, max(3, len(feats) * 0.45)))
-            ax.barh(range(len(feats)), means, color="#DD8452", alpha=0.85)
+            ax.barh(range(len(feats)), means, color="#4C72B0", alpha=0.85)
             ax.set_yticks(range(len(feats)))
             ax.set_yticklabels(feats, fontsize=9)
             ax.invert_yaxis()
@@ -1026,14 +1035,41 @@ class Explainer(Modelling):
         total = d_feat + d_type + d_edge + d_struct
         return total, {'feat': d_feat, 'type': d_type, 'edge': d_edge, 'struct': d_struct}
 
-    @torch.no_grad()
-    def _outcome_bands(self, last_event_graphs):
-        """Compute quartile boundaries (Q1, Q2, Q3) in seconds over the given graphs."""
-        import numpy as np
-        preds = [self._predict_value_for_graph(g, 0) for g in last_event_graphs]
-        return np.percentile(preds, [25, 50, 75]).tolist(), preds
+    def _locate_test_graph(self, order_id, n_events=None):
+        """Locate a single test graph for order_id.
 
-    def find_counterfactuals(self, order_id, target_band='opposite', n_results=3, min_candidates=5):
+        n_events=None: match the last recorded prefix (last_event==True) -- today's
+            default query point.
+        n_events=<int>: match the prefix with exactly that many Events nodes, so a
+            counterfactual analysis can be run on an earlier, non-last-event stage.
+        Raises ValueError (with the order's actually-available prefix lengths, for
+        the n_events=<int> case) rather than returning None on no match.
+        """
+        vp = self.viewpoint_object
+
+        if n_events is None:
+            for g in self.test_data:
+                if g[vp]['last_event'][0].item() and g[vp]['id'][0].item() == order_id:
+                    return g
+            raise ValueError(f"Order ID {order_id} with last_event=True not found in test data.")
+
+        available = []
+        for g in self.test_data:
+            if g[vp]['id'][0].item() != order_id:
+                continue
+            n = g['Events'].x.size(0) if 'Events' in g.node_types else 0
+            available.append(n)
+            if n == n_events:
+                return g
+        if available:
+            raise ValueError(
+                f"Order ID {order_id} has no prefix with exactly {n_events} events. "
+                f"Available prefix lengths: {sorted(available)}"
+            )
+        raise ValueError(f"Order ID {order_id} not found in test data.")
+
+    def find_counterfactuals(self, order_id, target_band='opposite', n_results=3,
+                              min_candidates=5, n_events=None):
         """Find the n_results most similar test traces with a contrasting predicted outcome.
 
         target_band: 'opposite' (default) — always traces with a LOWER predicted time than
@@ -1041,6 +1077,12 @@ class Explainer(Modelling):
                      query itself is already in the fastest quartile; or a (low_s, high_s)
                      tuple in seconds.
         min_candidates: minimum pool size before the length window is widened.
+        n_events: None (default) queries the order's last recorded prefix, exactly as
+                     before. An int queries the prefix with exactly that many Events
+                     nodes -- the reference/candidate population is then depth-matched
+                     by absolute event count instead of by last_event status, so an
+                     early partial prefix is never compared against a population
+                     dominated by fully-recorded (last-event) traces.
         """
         import json
 
@@ -1059,69 +1101,83 @@ class Explainer(Modelling):
         self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
         self.model.eval()
 
-        # Locate query trace
-        query_graph = None
-        for g in self.test_data:
-            if (g[self.viewpoint_object]['last_event'][0].item()
-                    and g[self.viewpoint_object]['id'][0].item() == order_id):
-                query_graph = g
-                break
-        if query_graph is None:
-            raise ValueError(f"Order ID {order_id} with last_event=True not found in test data.")
-
-        last_event_graphs = [g for g in self.test_data
-                             if g[self.viewpoint_object]['last_event'][0].item()]
-
-        quartiles, all_preds = self._outcome_bands(last_event_graphs)
-        q1, _q2, q3 = quartiles
+        vp = self.viewpoint_object
+        query_graph = self._locate_test_graph(order_id, n_events)
         query_pred = self._predict_value_for_graph(query_graph, 0)
-
-        # Target band bounds in seconds -- 'opposite' always means a LOWER predicted
-        # time than the query, never a symmetric quartile contrast. Normally that's
-        # the fastest population quartile (below Q1); if the query itself is already
-        # in the fastest quartile, there's no faster quartile left to contrast
-        # against, so fall back to "anything faster than the query itself."
-        if target_band == 'opposite':
-            low = float('-inf')
-            high = q1 if query_pred > q1 else query_pred
-        else:
-            low, high = target_band
-
-        # Build initial candidate pool (correct band, excluding query). For 'opposite'
-        # the pred < query_pred guard guarantees a strictly-faster match even in the
-        # fallback branch above (where high == query_pred, which would otherwise admit
-        # a tie).
         query_oid = order_id
-        candidates_all = [
-            (g, pred)
-            for g, pred in zip(last_event_graphs, all_preds)
-            if g[self.viewpoint_object]['id'][0].item() != query_oid and low <= pred <= high
-            and (target_band != 'opposite' or pred < query_pred)
-        ]
 
-        # Prefix-length stratification with progressive fallback
-        n_q = query_graph['Events'].x.size(0) if 'Events' in query_graph.node_types else 1
-        window = max(2.0, 0.2 * n_q)
-        filtered = []
-        for _ in range(4):   # initial attempt + 3 doublings
-            filtered = [
-                (g, pred) for g, pred in candidates_all
-                if abs((g['Events'].x.size(0) if 'Events' in g.node_types else 1) - n_q) <= window
+        def depth(g):
+            return g['Events'].x.size(0) if 'Events' in g.node_types else 1
+
+        n_q = depth(query_graph)
+
+        def band_and_candidates(pool, preds):
+            """Given a candidate pool + its predictions, compute the 'opposite' band
+            over that pool and return the filtered (graph, pred) candidates."""
+            import numpy as np
+            q1, _q2, q3 = np.percentile(preds, [25, 50, 75]).tolist()
+            if target_band == 'opposite':
+                low = float('-inf')
+                high = q1 if query_pred > q1 else query_pred
+            else:
+                low, high = target_band
+            return [
+                (g, p) for g, p in zip(pool, preds)
+                if g[vp]['id'][0].item() != query_oid and low <= p <= high
+                and (target_band != 'opposite' or p < query_pred)
             ]
-            if len(filtered) >= min_candidates:
-                break
-            window *= 2
 
-        if not filtered:
-            filtered = candidates_all  # last-resort: skip length gate entirely
-            window = float('inf')
+        if n_events is None:
+            # ---- Unchanged: identical to the original last-event-only algorithm ----
+            last_event_graphs = [g for g in self.test_data if g[vp]['last_event'][0].item()]
+            all_preds = [self._predict_value_for_graph(g, 0) for g in last_event_graphs]
+            candidates_all = band_and_candidates(last_event_graphs, all_preds)
 
-        # Rank by graph dissimilarity
-        results = []
+            window = max(2.0, 0.2 * n_q)
+            filtered = []
+            for _ in range(4):   # initial attempt + 3 doublings
+                filtered = [(g, pred) for g, pred in candidates_all
+                            if abs(depth(g) - n_q) <= window]
+                if len(filtered) >= min_candidates:
+                    break
+                window *= 2
+
+            if not filtered:
+                filtered = candidates_all  # last-resort: skip length gate entirely
+                window = float('inf')
+        else:
+            # ---- Depth-first pass: build the window-matched pool FIRST (from ALL
+            # prefixes, any last_event status), then compute quartiles/band WITHIN
+            # that same pool -- never against a depth-mismatched population. ----
+            min_pool_for_quantiles = max(20, 4 * min_candidates)
+            window = max(2.0, 0.2 * n_q)
+            filtered = []
+            for _ in range(4):
+                pool = [g for g in self.test_data if abs(depth(g) - n_q) <= window]
+                if len(pool) >= min_pool_for_quantiles:
+                    preds = [self._predict_value_for_graph(g, 0) for g in pool]
+                    filtered = band_and_candidates(pool, preds)
+                    if len(filtered) >= min_candidates:
+                        break
+                window *= 2
+
+            if not filtered:
+                # Give up the length gate entirely -- but "everyone" here must mean
+                # every prefix of every other order (any depth), never last-event-only,
+                # or we reintroduce the depth-mismatch bug this feature exists to fix.
+                all_preds = [self._predict_value_for_graph(g, 0) for g in self.test_data]
+                filtered = band_and_candidates(self.test_data, all_preds)
+                window = float('inf')
+
+        # Rank by graph dissimilarity, then dedupe to each candidate order's single
+        # best (lowest-dissimilarity) prefix -- a no-op when n_events is None (exactly
+        # one graph per order there already), but necessary once candidates can be
+        # drawn from multiple prefixes of the same other order.
+        scored = []
         for g, pred in filtered:
             total, comps = self._graph_dissimilarity(query_graph, g)
-            results.append({
-                'order_id': int(g[self.viewpoint_object]['id'][0].item()),
+            scored.append({
+                'order_id': int(g[vp]['id'][0].item()),
                 'predicted_hours': pred / 3600.0,
                 'dissimilarity': total,
                 'n_events': g['Events'].x.size(0) if 'Events' in g.node_types else 0,
@@ -1129,21 +1185,26 @@ class Explainer(Modelling):
                 'components': comps,
                 'graph': g,
             })
+        scored.sort(key=lambda r: r['dissimilarity'])
 
-        results.sort(key=lambda r: r['dissimilarity'])
+        best_per_order = {}
+        for r in scored:
+            best_per_order.setdefault(r['order_id'], r)
+        results = sorted(best_per_order.values(), key=lambda r: r['dissimilarity'])
+
         return results[:n_results]
 
-    def explain_counterfactual(self, order_id, target_band='opposite', n_results=3, min_candidates=5):
-        """Print counterfactual comparison for a given order and save a node-type bar chart."""
-        results = self.find_counterfactuals(order_id, target_band, n_results, min_candidates)
+    def explain_counterfactual(self, order_id, target_band='opposite', n_results=3,
+                                min_candidates=5, n_events=None):
+        """Print counterfactual comparison for a given order and save a node-type bar chart.
 
-        # Re-fetch query for display (model already loaded by find_counterfactuals)
-        query_graph = None
-        for g in self.test_data:
-            if (g[self.viewpoint_object]['last_event'][0].item()
-                    and g[self.viewpoint_object]['id'][0].item() == order_id):
-                query_graph = g
-                break
+        n_events: None (default) explains the order's last recorded prefix; an int
+                     explains the prefix with exactly that many Events nodes.
+        """
+        results = self.find_counterfactuals(order_id, target_band, n_results,
+                                             min_candidates, n_events)
+
+        query_graph = self._locate_test_graph(order_id, n_events)
         query_pred = self._predict_value_for_graph(query_graph, 0)
         n_q = query_graph['Events'].x.size(0) if 'Events' in query_graph.node_types else '?'
 
@@ -1184,8 +1245,10 @@ class Explainer(Modelling):
             print("    Node counts (query → CF):")
             print('\n'.join(rows))
 
-        # Save bar chart for top CF
-        save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}_cf")
+        # Save bar chart for top CF. Namespace partial-prefix runs by n_events so they
+        # never clobber an existing last-event run's output directory for this order.
+        suffix = f"_ev{n_events}" if n_events is not None else ""
+        save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}{suffix}_cf")
         os.makedirs(save_dir, exist_ok=True)
         self._plot_cf_node_comparison(query_graph, results[0]['graph'], order_id,
                                       results[0]['order_id'], save_dir)
@@ -1193,6 +1256,8 @@ class Explainer(Modelling):
         self._plot_cf_graph_structures(query_graph, results[0]['graph'], order_id,
                                        results[0]['order_id'], query_pred / 3600.0,
                                        results[0]['predicted_hours'], save_dir)
+        self._plot_cf_event_type_diff(query_graph, results[0]['graph'], order_id,
+                                      results[0]['order_id'], save_dir)
 
         import pandas as pd
         pd.DataFrame([
@@ -1332,6 +1397,81 @@ class Explainer(Modelling):
                     dpi=150, bbox_inches='tight')
         plt.close()
         print(f"Saved CF graph structure comparison to {save_dir}")
+
+    def _decode_event_types(self, graph):
+        """Decode each Events node's activity type from the one-hot block of its
+        feature vector (layout: [ev_type one-hot | temporal | C3 counts | O1-ext
+        counts], see training.py's feature_names['Events'] construction). Features
+        are z-score normalized, so this uses argmax over the one-hot block rather
+        than an exact ==1 check -- exactly one column is the "hot" one pre-
+        normalization, so its per-row argmax location survives normalization.
+        Returns a collections.Counter of activity name -> count."""
+        from collections import Counter
+        counts = Counter()
+        if 'Events' not in graph.node_types or graph['Events'].x.size(0) == 0:
+            return counts
+        fnames = self.feature_names.get('Events', [])
+        n_types = fnames.index('elapsed_h') if 'elapsed_h' in fnames else 0
+        if n_types == 0:
+            return counts
+        type_names = fnames[:n_types]
+        idx = graph['Events'].x[:, :n_types].argmax(dim=1)
+        for i in idx.tolist():
+            counts[type_names[i]] += 1
+        return counts
+
+    def _plot_cf_event_type_diff(self, query_graph, cf_graph, query_id, cf_id, save_dir):
+        """Table of Events activity types whose count DIFFERS between query and
+        counterfactual -- types both graphs agree on are omitted entirely. Complements
+        _plot_cf_node_comparison (which only compares the total Events COUNT) by
+        showing which specific activities differ -- e.g. a PaymentReminder present
+        in one graph but absent in the other, even when both graphs have the same
+        total number of events."""
+        counts_q = self._decode_event_types(query_graph)
+        counts_cf = self._decode_event_types(cf_graph)
+        all_types = sorted(set(counts_q) | set(counts_cf))
+        differing = [t for t in all_types if counts_q.get(t, 0) != counts_cf.get(t, 0)]
+
+        col_labels = ["Activity", f"Query (#{query_id})", f"CF (#{cf_id})", "Δ"]
+        header_colors = ["#EAEAEA", "#4C72B0", "#DD8452", "#EAEAEA"]
+
+        if not differing:
+            fig, ax = plt.subplots(figsize=(6, 1.6))
+            ax.axis('off')
+            ax.set_title(f"Event-type differences: Query #{query_id} vs. CF #{cf_id}",
+                         fontsize=10)
+            ax.text(0.5, 0.5, "No activity-type differences", ha='center', va='center',
+                    fontsize=10, transform=ax.transAxes)
+        else:
+            rows = []
+            for t in differing:
+                qv, cv = counts_q.get(t, 0), counts_cf.get(t, 0)
+                rows.append([t, str(qv), str(cv), f"{cv - qv:+d}"])
+
+            fig, ax = plt.subplots(figsize=(7, 0.55 * len(rows) + 1.2))
+            ax.axis('off')
+            ax.set_title(f"Event-type differences: Query #{query_id} vs. CF #{cf_id}",
+                         fontsize=10)
+            table = ax.table(cellText=rows, colLabels=col_labels, loc='center',
+                              cellLoc='center')
+            table.auto_set_font_size(False)
+            table.set_fontsize(9)
+            table.scale(1, 1.6)
+
+            for col in range(len(col_labels)):
+                header_cell = table[0, col]
+                header_cell.set_facecolor(header_colors[col])
+                header_cell.set_text_props(weight='bold',
+                                           color='white' if col in (1, 2) else 'black')
+            for r, row in enumerate(rows, start=1):
+                delta_cell = table[r, 3]
+                delta_cell.set_text_props(color="#A5443A", weight='bold')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "cf_event_type_diff.png"), dpi=150,
+                    bbox_inches='tight')
+        plt.close()
+        print(f"Saved CF event-type diff to {save_dir}")
 
     # ── Feature attribution (PyG Explainer + CaptumExplainer) ───────────────────
     # Verified against the previous hand-rolled `captum.attr.InputXGradient(forward_func)`
