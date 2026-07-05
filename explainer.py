@@ -1182,6 +1182,9 @@ class Explainer(Modelling):
         self._plot_cf_node_comparison(query_graph, results[0]['graph'], order_id,
                                       results[0]['order_id'], save_dir)
         self._plot_cf_dissimilarity_breakdown(results[0], order_id, save_dir)
+        self._plot_cf_graph_structures(query_graph, results[0]['graph'], order_id,
+                                       results[0]['order_id'], query_pred / 3600.0,
+                                       results[0]['predicted_hours'], save_dir)
 
         import pandas as pd
         pd.DataFrame([
@@ -1242,6 +1245,85 @@ class Explainer(Modelling):
         plt.savefig(os.path.join(save_dir, "cf_dissimilarity_breakdown.png"), dpi=150)
         plt.close()
         print(f"Saved CF dissimilarity breakdown to {save_dir}")
+
+    def _hetero_to_nx(self, graph):
+        """Convert a full (unpruned) HeteroData into a plain nx.MultiDiGraph for
+        structural visualization only -- no importance weighting, no pruning."""
+        import networkx as nx
+        G = nx.MultiDiGraph()
+        for node_type in graph.node_types:
+            num_nodes = graph[node_type].x.size(0)
+            for idx in range(num_nodes):
+                G.add_node((node_type, idx), node_type=node_type)
+        for edge_type in graph.edge_types:
+            src_type, rel, dst_type = edge_type
+            edge_index = graph[edge_type].edge_index
+            for e in range(edge_index.size(1)):
+                src, dst = edge_index[:, e].tolist()
+                G.add_edge((src_type, src), (dst_type, dst), edge_type=rel)
+        return G
+
+    def _draw_hetero_nx(self, G, ax, type_colors, seed_key=None, title=""):
+        """Draw one full hetero graph onto a given axis -- plain structural view,
+        no importance weighting. Independent axes/layouts per subplot (not meant
+        to overlay one graph onto the other)."""
+        import networkx as nx
+        try:
+            pos = nx.kamada_kawai_layout(G)
+        except Exception:
+            pos = nx.spring_layout(G, seed=42, k=0.9)
+
+        node_colors = [type_colors.get(attrs['node_type'], 'gray') for _, attrs in G.nodes(data=True)]
+        node_sizes = [420 if node == seed_key else 180 for node in G.nodes]
+        edgecolors = ['black' if node == seed_key else 'none' for node in G.nodes]
+        linewidths = [1.8 if node == seed_key else 0 for node in G.nodes]
+
+        nx.draw_networkx_nodes(G, pos, ax=ax, node_color=node_colors, node_size=node_sizes,
+                                edgecolors=edgecolors, linewidths=linewidths, alpha=0.9)
+        nx.draw_networkx_edges(G, pos, ax=ax, edge_color="gray", width=1.0, alpha=0.5,
+                                arrows=True, connectionstyle="arc3,rad=0.1")
+
+        if G.number_of_nodes() <= 20:  # keep dense graphs (e.g. #1812) readable
+            labels = {node: f"{node[0]}[{node[1]}]" for node in G.nodes}
+            nx.draw_networkx_labels(G, pos, ax=ax, labels=labels, font_size=6)
+
+        ax.set_title(title, fontsize=10)
+        ax.axis("off")
+
+    def _plot_cf_graph_structures(self, query_graph, cf_graph, query_id, cf_id,
+                                   query_hours, cf_hours, save_dir):
+        """Side-by-side node-link diagrams of the FULL query and CF graphs --
+        complementary to the aggregate bar charts, shows actual topology."""
+        palette = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2",
+                   "#937860", "#DA8BC3", "#8C8C8C", "#CCB974", "#64B5CD"]
+        G_q = self._hetero_to_nx(query_graph)
+        G_cf = self._hetero_to_nx(cf_graph)
+        all_types = sorted({a['node_type'] for _, a in G_q.nodes(data=True)} |
+                            {a['node_type'] for _, a in G_cf.nodes(data=True)})
+        type_colors = {nt: palette[i % len(palette)] for i, nt in enumerate(all_types)}
+
+        n_q = query_graph['Events'].x.size(0) if 'Events' in query_graph.node_types else 0
+        n_cf = cf_graph['Events'].x.size(0) if 'Events' in cf_graph.node_types else 0
+
+        fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+        seed_key_q = (self.viewpoint_object, 0)
+        seed_key_cf = (self.viewpoint_object, 0)
+        self._draw_hetero_nx(G_q, axes[0], type_colors, seed_key=seed_key_q,
+                              title=f"Query #{query_id}\n{n_q} events, {query_hours:.1f}h predicted")
+        self._draw_hetero_nx(G_cf, axes[1], type_colors, seed_key=seed_key_cf,
+                              title=f"CF #{cf_id}\n{n_cf} events, {cf_hours:.1f}h predicted")
+
+        legend_handles = [plt.Line2D([0], [0], marker="o", color="w", label=nt,
+                                      markerfacecolor=c, markersize=10)
+                          for nt, c in type_colors.items()]
+        fig.legend(handles=legend_handles, loc="lower center",
+                   ncol=min(len(all_types), 7), fontsize=9, bbox_to_anchor=(0.5, -0.02))
+        fig.suptitle(f"Graph structure comparison: Query #{query_id} vs. CF #{cf_id}", fontsize=12)
+        plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+        plt.savefig(os.path.join(save_dir, "cf_graph_structure_comparison.png"),
+                    dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Saved CF graph structure comparison to {save_dir}")
 
     # ── Feature attribution (PyG Explainer + CaptumExplainer) ───────────────────
     # Verified against the previous hand-rolled `captum.attr.InputXGradient(forward_func)`
