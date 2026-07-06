@@ -77,6 +77,23 @@ def metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     return {'mae': mae, 'rmse': rmse, 'r2': r2}
 
 
+def mae_bootstrap_ci(y_true: np.ndarray, y_pred: np.ndarray,
+                      n_boot: int = 2000, ci: float = 0.95,
+                      seed: int = 42) -> tuple[float, float]:
+    """Bootstrap percentile CI for MAE: resample the per-sample absolute errors
+    with replacement n_boot times, take the ci-level percentiles of the resampled
+    means. Avoids assuming the sampling distribution of the mean is normal, which
+    matters since abs-error distributions are typically right-skewed."""
+    ae = np.abs(y_true - y_pred)
+    n = len(ae)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n, size=(n_boot, n))
+    boot_means = ae[idx].mean(axis=1)
+    alpha = (1.0 - ci) / 2.0
+    lo, hi = np.percentile(boot_means, [100 * alpha, 100 * (1 - alpha)])
+    return float(lo), float(hi)
+
+
 def depth_mae(y_true: np.ndarray, y_pred: np.ndarray,
               n_events: np.ndarray) -> dict:
     """MAE broken down by prefix-depth bins (1-3, 4-6, 7-9, 10+)."""

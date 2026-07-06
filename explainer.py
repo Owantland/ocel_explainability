@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import os
 from model_classes import HGT
 from training import Modelling
-from torch_geometric.explain import Explainer as PyGExplainer, CaptumExplainer
+from torch_geometric.explain import Explainer as PyGExplainer, CaptumExplainer, GNNExplainer
 
 
 class Explainer(Modelling):
@@ -320,9 +320,10 @@ class Explainer(Modelling):
             perturbed = graph.clone()
             perturbed[node_type].x[node_idx, f] = 0.0
             pred = self._predict_value_for_graph(graph, target_object_idx, perturbed_graph=perturbed)
-            shift = abs(baseline_value - pred)
+            signed_shift = baseline_value - pred
+            shift = abs(signed_shift)
             large_shift = shift > self.target_std.item()
-            feature_importances.append((f, shift, large_shift))
+            feature_importances.append((f, shift, large_shift, signed_shift))
         feature_importances.sort(key=lambda t: t[1], reverse=True)
         return feature_importances[:top_k]
 
@@ -334,12 +335,13 @@ class Explainer(Modelling):
         seed_key = (self.viewpoint_object, seed_paper_idx)
         G = nx.MultiDiGraph()
         G.add_node(seed_key, node_type=self.viewpoint_object, importance=1.0,
-                   is_seed=True, large_shift=False, is_connector=False)
+                   signed_importance=0.0, is_seed=True, large_shift=False, is_connector=False)
 
         included = {seed_key}
-        for nt, i, shift, large in node_importances[:node_top_k]:
+        for nt, i, shift, large, signed_shift in node_importances[:node_top_k]:
             key = (nt, i)
-            G.add_node(key, node_type=nt, importance=shift, is_seed=False,
+            G.add_node(key, node_type=nt, importance=shift / 3600.0,
+                       signed_importance=signed_shift / 3600.0, is_seed=False,
                        large_shift=large, is_connector=False)
             included.add(key)
 
@@ -352,16 +354,17 @@ class Explainer(Modelling):
                 all_edges.append((edge_type, (src_type, src), (dst_type, dst)))
 
         edge_importance_lookup = {}
-        for edge_type, e, shift, large in edge_importances:
+        for edge_type, e, shift, large, signed_shift in edge_importances:
             edge_index = graph[edge_type].edge_index
             src, dst = edge_index[:, e].tolist()
-            edge_importance_lookup[(edge_type, src, dst)] = (shift, large)
+            edge_importance_lookup[(edge_type, src, dst)] = (shift, large, signed_shift)
 
         def add_real_edge(edge_type, src_key, dst_key):
-            shift, large = edge_importance_lookup.get(
-                (edge_type, src_key[1], dst_key[1]), (0.0, False)
+            shift, large, signed_shift = edge_importance_lookup.get(
+                (edge_type, src_key[1], dst_key[1]), (0.0, False, 0.0)
             )
-            G.add_edge(src_key, dst_key, edge_type=edge_type[1], importance=shift, large_shift=large)
+            G.add_edge(src_key, dst_key, edge_type=edge_type[1], importance=shift / 3600.0,
+                       signed_importance=signed_shift / 3600.0, large_shift=large)
 
         # Pass 1: induced subgraph on the selected nodes
         for edge_type, src_key, dst_key in all_edges:
@@ -382,18 +385,19 @@ class Explainer(Modelling):
 
             for n in path:
                 if n not in G.nodes:
-                    G.add_node(n, node_type=n[0], importance=0.0, is_seed=False,
-                               large_shift=False, is_connector=True)
+                    G.add_node(n, node_type=n[0], importance=0.0, signed_importance=0.0,
+                               is_seed=False, large_shift=False, is_connector=True)
 
             for a, b in zip(path[:-1], path[1:]):
                 if G.has_edge(a, b) or G.has_edge(b, a):
                     continue
                 edge_type = full_nx[a][b]["edge_type"]
-                shift, large = edge_importance_lookup.get(
+                shift, large, signed_shift = edge_importance_lookup.get(
                     (edge_type, a[1], b[1]),
-                    edge_importance_lookup.get((edge_type, b[1], a[1]), (0.0, False)),
+                    edge_importance_lookup.get((edge_type, b[1], a[1]), (0.0, False, 0.0)),
                 )
-                G.add_edge(a, b, edge_type=edge_type[1], importance=shift, large_shift=large)
+                G.add_edge(a, b, edge_type=edge_type[1], importance=shift / 3600.0,
+                           signed_importance=signed_shift / 3600.0, large_shift=large)
 
         return G
 
@@ -412,7 +416,24 @@ class Explainer(Modelling):
         except Exception:
             pos = nx.spring_layout(G, seed=42, k=0.9)
 
-        node_colors, node_sizes, edge_colors_outline, alphas = [], [], [], []
+        # Sign color: green = this element's actual value pushed the prediction toward a
+        # LONGER remaining time than the population-mean substitute would; red = toward
+        # SHORTER. Neutral gray for the seed/connector nodes, where signed_importance isn't
+        # meaningful. Kept on a separate visual channel (border color) from large_shift
+        # (border linewidth, below) rather than overloading one color for both.
+        POS_COLOR, NEG_COLOR, NEUTRAL_COLOR = "#2ca02c", "#d62728", "#888888"
+
+        def sign_color(attrs):
+            if attrs.get("is_seed") or attrs.get("is_connector"):
+                return NEUTRAL_COLOR
+            signed = attrs.get("signed_importance", 0.0)
+            if signed > 0:
+                return POS_COLOR
+            elif signed < 0:
+                return NEG_COLOR
+            return NEUTRAL_COLOR
+
+        node_colors, node_sizes, edge_colors_outline, node_linewidths, alphas = [], [], [], [], []
         for node, attrs in G.nodes(data=True):
             node_colors.append(type_colors.get(attrs["node_type"], "gray"))
             if attrs.get("is_seed"):
@@ -420,19 +441,26 @@ class Explainer(Modelling):
             elif attrs.get("is_connector"):
                 node_sizes.append(150)
             else:
-                node_sizes.append(250 + max(attrs.get("importance", 0), 0) * 1500)
-            edge_colors_outline.append("red" if attrs.get("large_shift") else "black")
+                # sqrt scaling (not linear+cap): LOO shifts span orders of magnitude
+                # (sub-1h to 280+h in the same trace) -- a linear map either saturates
+                # almost everything to one size or needs a cap so high it makes small
+                # differences invisible. sqrt compresses large values gracefully while
+                # still separating them, so e.g. a 283h and a 75h node stay visually
+                # distinct instead of both hitting the same ceiling.
+                node_sizes.append(min(250 + 300 * max(attrs.get("importance", 0), 0) ** 0.5, 6000))
+            edge_colors_outline.append(sign_color(attrs))
+            node_linewidths.append(3.0 if attrs.get("large_shift") else 1.2)
             alphas.append(0.4 if attrs.get("is_connector") else 0.9)
 
         edge_colors, edge_widths = [], []
         for _, _, attrs in G.edges(data=True):
-            edge_colors.append("red" if attrs.get("large_shift") else "gray")
-            edge_widths.append(1 + max(attrs.get("importance", 0), 0) * 8)
+            edge_colors.append(sign_color(attrs))
+            edge_widths.append(min(1 + 1.2 * max(attrs.get("importance", 0), 0) ** 0.5, 14))
 
         plt.figure(figsize=(10, 8))
         nx.draw_networkx_nodes(
             G, pos, node_color=node_colors, node_size=node_sizes,
-            edgecolors=edge_colors_outline, linewidths=1.5, alpha=alphas,
+            edgecolors=edge_colors_outline, linewidths=node_linewidths, alpha=alphas,
         )
         nx.draw_networkx_edges(
             G, pos, edge_color=edge_colors, width=edge_widths,
@@ -446,12 +474,17 @@ class Explainer(Modelling):
                        markerfacecolor=color, markersize=10)
             for nt, color in type_colors.items()
         ]
-        legend_handles.append(plt.Line2D([0], [0], color="red", lw=2, label="large shift (>1 std)"))
+        legend_handles.append(plt.Line2D([0], [0], color=POS_COLOR, lw=2,
+                                         label="border: increases predicted time"))
+        legend_handles.append(plt.Line2D([0], [0], color=NEG_COLOR, lw=2,
+                                         label="border: decreases predicted time"))
+        legend_handles.append(plt.Line2D([0], [0], color="black", lw=3,
+                                         label="thick border: large shift (>1 std)"))
         legend_handles.append(plt.Line2D([0], [0], marker="o", color="w", label="connector (faded)",
                                          markerfacecolor="gray", alpha=0.4, markersize=8))
         plt.legend(handles=legend_handles, loc="best", fontsize=8)
 
-        plt.title("Counterfactual Explanation Subgraph (Regression)")
+        plt.title("LOO Explanation Subgraph (Regression)")
         plt.axis("off")
         plt.tight_layout()
         plt.savefig(save_path, dpi=150)
@@ -464,12 +497,12 @@ class Explainer(Modelling):
         baseline_value = self._predict_value_for_graph(graph, paper_idx)
 
         explanation_nodes_by_type = {}
-        for nt, i, _shift, _large in node_importances[:node_top_k]:
+        for nt, i, _shift, _large, _signed in node_importances[:node_top_k]:
             explanation_nodes_by_type.setdefault(nt, set()).add(i)
         explanation_nodes_by_type.setdefault(self.viewpoint_object, set()).add(paper_idx)
 
         explanation_edges_by_type = {}
-        for et, e, _shift, _large in edge_importances[:edge_top_k]:
+        for et, e, _shift, _large, _signed in edge_importances[:edge_top_k]:
             explanation_edges_by_type.setdefault(et, set()).add(e)
 
         # Fidelity+: remove the explanation, keep everything else
@@ -539,6 +572,19 @@ class Explainer(Modelling):
 
         return metrics
 
+    def top_nodes_per_type(self, node_importances, top_n=3):
+        """Group LOO node_importances by node_type, keeping each type's top_n
+        highest-shift instances. Assumes node_importances is already sorted
+        descending by shift (as reg_explanation() returns it) -- the viewpoint
+        object type will be absent here since its only instance is the seed
+        node, which reg_explanation() excludes from node_importances entirely."""
+        grouped = {}
+        for nt, idx, shift, large, signed_shift in node_importances:
+            grouped.setdefault(nt, [])
+            if len(grouped[nt]) < top_n:
+                grouped[nt].append((idx, shift, large, signed_shift))
+        return grouped
+
     def reg_explanation(self, explain_subgraph, object_idx, graph_id, top_k):
         baseline_value = self._predict_value_for_graph(explain_subgraph, object_idx)
 
@@ -551,9 +597,10 @@ class Explainer(Modelling):
                 perturbed = explain_subgraph.clone()
                 perturbed[node_type].x[idx] = 0.0
                 pred = self._predict_value_for_graph(explain_subgraph, object_idx, perturbed_graph=perturbed)
-                shift = abs(baseline_value - pred)
+                signed_shift = baseline_value - pred
+                shift = abs(signed_shift)
                 large_shift = shift > self.target_std.item()
-                node_importances.append((node_type, idx, shift, large_shift))
+                node_importances.append((node_type, idx, shift, large_shift, signed_shift))
 
         edge_importances = []
         for edge_type in explain_subgraph.edge_types:
@@ -565,9 +612,10 @@ class Explainer(Modelling):
                 keep[e] = False
                 perturbed[edge_type].edge_index = edge_index[:, keep]
                 pred = self._predict_value_for_graph(explain_subgraph, object_idx, perturbed_graph=perturbed)
-                shift = abs(baseline_value - pred)
+                signed_shift = baseline_value - pred
+                shift = abs(signed_shift)
                 large_shift = shift > self.target_std.item()
-                edge_importances.append((edge_type, e, shift, large_shift))
+                edge_importances.append((edge_type, e, shift, large_shift, signed_shift))
 
         node_importances.sort(key=lambda t: t[2], reverse=True)
         edge_importances.sort(key=lambda t: t[2], reverse=True)
@@ -577,7 +625,7 @@ class Explainer(Modelling):
         )
 
         if node_importances:
-            top_node_type, top_node_idx, _, _ = node_importances[0]
+            top_node_type, top_node_idx, _, _, _ = node_importances[0]
             top_node_feature_importances = self.reg_feature_importance_for_node_in_graph(
                 explain_subgraph, top_node_type, top_node_idx, baseline_value, object_idx, top_k=top_k
             )
@@ -593,25 +641,29 @@ class Explainer(Modelling):
     # ------------------------------------------------------------------
 
     def plot_feature_importances(self, node_type, feature_importances, save_path, order_id=None):
-        """Horizontal bar chart of per-feature value shifts for one node. Uses the
-        same blue/orange palette as the feature-attribution bar charts
-        (ig_attribution_{nt}_{method}.png) for visual consistency across the
-        explainability layer -- here repurposed for magnitude (>1 std shift) rather
-        than attribution's signed (+/-) direction, since LOO shift is unsigned."""
+        """Horizontal bar chart of per-feature value shifts for one node. Bar color
+        encodes sign (green = this feature's real value pushed the prediction toward
+        a longer remaining time than the population-mean substitute would; red =
+        toward shorter -- see explain_trace()'s signed_shift docs for the full
+        caveat), bar edge (black, thick) flags a >1 std ('large') shift."""
         names = self.feature_names.get(node_type, [])
-        feats, shifts, larges = [], [], []
-        for f, shift, large in feature_importances:
+        feats, shifts, larges, signs = [], [], [], []
+        for f, shift, large, signed_shift in feature_importances:
             label = names[f] if f < len(names) else f"feat_{f}"
             feats.append(label)
             shifts.append(shift / 3600)
             larges.append(large)
+            signs.append(signed_shift)
 
         if not feats:
             return
 
         fig, ax = plt.subplots(figsize=(7, max(3, len(feats) * 0.45)))
-        colors = ["#DD8452" if l else "#4C72B0" for l in larges]
-        bars = ax.barh(range(len(feats)), shifts, color=colors)
+        colors = ["#2ca02c" if s > 0 else ("#d62728" if s < 0 else "#888888") for s in signs]
+        edgecolors = ["black" if l else "none" for l in larges]
+        linewidths = [2.0 if l else 0 for l in larges]
+        bars = ax.barh(range(len(feats)), shifts, color=colors,
+                       edgecolor=edgecolors, linewidth=linewidths)
         ax.set_yticks(range(len(feats)))
         ax.set_yticklabels(feats, fontsize=9)
         ax.invert_yaxis()
@@ -624,8 +676,10 @@ class Explainer(Modelling):
             ax.text(bar.get_width() + 0.02, bar.get_y() + bar.get_height() / 2,
                     f"{val:.2f}h", va="center", fontsize=8)
         from matplotlib.patches import Patch
-        ax.legend(handles=[Patch(color="#DD8452", label=">1 std shift"),
-                            Patch(color="#4C72B0", label="≤1 std shift")],
+        ax.legend(handles=[Patch(color="#2ca02c", label="increases predicted time"),
+                            Patch(color="#d62728", label="decreases predicted time"),
+                            Patch(facecolor="white", edgecolor="black", linewidth=2,
+                                  label=">1 std shift (thick edge)")],
                   fontsize=8, loc="lower right")
         ax.grid(True, axis="x", alpha=0.3)
         plt.tight_layout()
@@ -633,21 +687,28 @@ class Explainer(Modelling):
         plt.close()
 
     def plot_node_type_summary(self, node_importances, save_path):
-        """Bar chart of total influence per node type across the whole trace."""
+        """Bar chart of total influence per node type across the whole trace. Bar
+        height is the magnitude sum (total impact); bar color reflects the sign of
+        that type's NET signed sum (its dominant direction across instances)."""
         from collections import defaultdict
         type_shift = defaultdict(float)
+        type_signed_shift = defaultdict(float)
         type_count = defaultdict(int)
-        for node_type, idx, shift, _ in node_importances:
+        for node_type, idx, shift, _, signed_shift in node_importances:
             type_shift[node_type] += shift / 3600
+            type_signed_shift[node_type] += signed_shift / 3600
             type_count[node_type] += 1
 
         types = sorted(type_shift, key=lambda t: type_shift[t], reverse=True)
         total_shifts = [type_shift[t] for t in types]
         counts = [type_count[t] for t in types]
+        bar_colors = ["#2ca02c" if type_signed_shift[t] > 0
+                      else ("#d62728" if type_signed_shift[t] < 0 else "#888888")
+                      for t in types]
 
         fig, ax1 = plt.subplots(figsize=(8, 4))
         x = range(len(types))
-        bars = ax1.bar(x, total_shifts, color="#4C72B0", alpha=0.8, label="Total shift (hours)")
+        bars = ax1.bar(x, total_shifts, color=bar_colors, alpha=0.8, label="Total shift (hours)")
         ax1.set_xticks(x)
         ax1.set_xticklabels(types, rotation=30, ha="right", fontsize=9)
         ax1.set_ylabel("Cumulative value shift if type removed (hours)")
@@ -658,9 +719,13 @@ class Explainer(Modelling):
         ax2.set_ylabel("Number of nodes of this type", color="#e74c3c")
         ax2.tick_params(axis="y", labelcolor="#e74c3c")
 
+        from matplotlib.patches import Patch
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc="upper right")
+        sign_handles = [Patch(color="#2ca02c", label="net: increases predicted time"),
+                        Patch(color="#d62728", label="net: decreases predicted time")]
+        ax1.legend(lines1 + lines2 + sign_handles, labels1 + labels2 +
+                   [h.get_label() for h in sign_handles], fontsize=8, loc="upper right")
         ax1.grid(True, axis="y", alpha=0.3)
         plt.tight_layout()
         plt.savefig(save_path, dpi=150)
@@ -700,7 +765,7 @@ class Explainer(Modelling):
             order_id=order_id
         )
         if node_importances:
-            top_nt, top_ni, _, _ = node_importances[0]
+            top_nt, top_ni, _, _, _ = node_importances[0]
             self.plot_feature_importances(
                 top_nt, top_neighbor_feats,
                 os.path.join(save_dir, f"feat_importance_{top_nt}.png"),
@@ -725,8 +790,11 @@ class Explainer(Modelling):
         print(f"  Predicted remaining time : {round(baseline_value / 3600)} hours")
         print(f"  Graph size : " +
               ", ".join(f"{nt}={explain_subgraph[nt].num_nodes}" for nt in explain_subgraph.node_types))
-        print(f"\nTop {top_k} nodes by influence (value shift if removed):")
-        for rank, (nt, idx, shift, large) in enumerate(node_importances[:top_k], 1):
+        print(f"\nTop {top_k} nodes by influence (signed value shift if removed -- "
+              f"positive = this element's real value pushed the prediction toward a "
+              f"LONGER remaining time than the population-mean substitute would; "
+              f"negative = toward SHORTER):")
+        for rank, (nt, idx, shift, large, signed_shift) in enumerate(node_importances[:top_k], 1):
             feat_vals = ""
             if explain_subgraph[nt].x.size(0) > idx:
                 node_names = names.get(nt, [])
@@ -737,20 +805,38 @@ class Explainer(Modelling):
                 if non_zero:
                     feat_vals = "  [" + ", ".join(f"{n}={v:.2f}" for n, v in non_zero) + "]"
             flag = "  [LARGE SHIFT]" if large else ""
-            print(f"  {rank}. {nt}[{idx}]{feat_vals}: shift={shift/3600:+.2f}h{flag}")
+            print(f"  {rank}. {nt}[{idx}]{feat_vals}: shift={signed_shift/3600:+.2f}h{flag}")
+
+        top_per_type = self.top_nodes_per_type(node_importances, top_n=3)
+        print(f"\nTop 3 nodes per type:")
+        for nt in sorted(top_per_type):
+            entries = ", ".join(
+                f"[{idx}]={signed_shift/3600:+.2f}h" + (" [LARGE]" if large else "")
+                for idx, shift, large, signed_shift in top_per_type[nt]
+            )
+            print(f"  {nt:<12}: {entries}")
+
+        import pandas as pd
+        pd.DataFrame([
+            {'node_type': nt, 'rank': rank, 'node_idx': idx,
+             'shift_hours': shift / 3600, 'signed_shift_hours': signed_shift / 3600,
+             'large_shift': large}
+            for nt, entries in top_per_type.items()
+            for rank, (idx, shift, large, signed_shift) in enumerate(entries, 1)
+        ]).to_csv(os.path.join(save_dir, "top_nodes_per_type.csv"), index=False)
 
         print(f"\nTop {top_k} edges by influence:")
-        for rank, (et, e, shift, large) in enumerate(edge_importances[:top_k], 1):
+        for rank, (et, e, shift, large, signed_shift) in enumerate(edge_importances[:top_k], 1):
             src, dst = explain_subgraph[et].edge_index[:, e].tolist()
             flag = "  [LARGE SHIFT]" if large else ""
-            print(f"  {rank}. {et[0]}→{et[2]} ({src}→{dst}): shift={shift/3600:+.2f}h{flag}")
+            print(f"  {rank}. {et[0]}→{et[2]} ({src}→{dst}): shift={signed_shift/3600:+.2f}h{flag}")
 
         print(f"\nTop {top_k} features on seed {self.viewpoint_object} node:")
         seed_names = names.get(self.viewpoint_object, [])
-        for rank, (f, shift, large) in enumerate(seed_feats[:top_k], 1):
+        for rank, (f, shift, large, signed_shift) in enumerate(seed_feats[:top_k], 1):
             fname = seed_names[f] if f < len(seed_names) else f"feat_{f}"
             flag = "  [LARGE SHIFT]" if large else ""
-            print(f"  {rank}. {fname}: shift={shift/3600:+.2f}h{flag}")
+            print(f"  {rank}. {fname}: shift={signed_shift/3600:+.2f}h{flag}")
 
         print(f"\nExplanation quality metrics:")
         print(f"  Fidelity+       : {metrics['fidelity_plus']:.4f}  (↑ better)")
@@ -768,6 +854,7 @@ class Explainer(Modelling):
             "edge_importances": edge_importances,
             "seed_feature_importances": seed_feats,
             "top_neighbor_feature_importances": top_neighbor_feats,
+            "top_nodes_per_type": top_per_type,
             "metrics": metrics,
             "save_dir": save_dir,
         }
@@ -897,10 +984,10 @@ class Explainer(Modelling):
             except Exception:
                 continue
 
-            for nt, idx, shift, _ in node_imp:
+            for nt, idx, shift, _, _ in node_imp:
                 type_shifts[nt].append(shift / 3600)
 
-            for f, shift, _ in seed_feats:
+            for f, shift, _, _ in seed_feats:
                 feat_shifts[self.viewpoint_object][f].append(shift / 3600)
 
             m = self.evaluate_explanation_quality(g, 0, node_imp, edge_imp,
@@ -1781,9 +1868,11 @@ class Explainer(Modelling):
         import baselines as bl
         import pandas as pd
 
-        def _flatten(m_all, m_last):
+        def _flatten(m_all, m_last, ci_all, ci_last):
             return {'MAE_all': m_all['mae'], 'RMSE_all': m_all['rmse'], 'R2_all': m_all['r2'],
-                    'MAE_last': m_last['mae'], 'RMSE_last': m_last['rmse'], 'R2_last': m_last['r2']}
+                    'MAE_all_ci_low': ci_all[0], 'MAE_all_ci_high': ci_all[1],
+                    'MAE_last': m_last['mae'], 'RMSE_last': m_last['rmse'], 'R2_last': m_last['r2'],
+                    'MAE_last_ci_low': ci_last[0], 'MAE_last_ci_high': ci_last[1]}
 
         if save_dir is None:
             save_dir = f"files/explainer_outputs/{self.database}/validation_{self.cant}"
@@ -1798,7 +1887,10 @@ class Explainer(Modelling):
         m_all = bl.metrics(hgt_df['true_h'].values, hgt_df['hgt_pred_h'].values)
         m_last = bl.metrics(hgt_df['true_h'].values[last_mask],
                              hgt_df['hgt_pred_h'].values[last_mask])
-        rows.append({'Model': 'HGT (ours)', **_flatten(m_all, m_last),
+        ci_all = bl.mae_bootstrap_ci(hgt_df['true_h'].values, hgt_df['hgt_pred_h'].values)
+        ci_last = bl.mae_bootstrap_ci(hgt_df['true_h'].values[last_mask],
+                                       hgt_df['hgt_pred_h'].values[last_mask])
+        rows.append({'Model': 'HGT (ours)', **_flatten(m_all, m_last, ci_all, ci_last),
                      'fit_time_s': hgt_fit_time_s, 'pred_time_s': hgt_pred_time_s})
 
         # ── HomoGNN, if a checkpoint exists for this database/cant/task ──────
@@ -1810,7 +1902,10 @@ class Explainer(Modelling):
             m_all = bl.metrics(homo_df['true_h'].values, homo_df['homo_pred_h'].values)
             m_last = bl.metrics(homo_df['true_h'].values[last_mask_h],
                                  homo_df['homo_pred_h'].values[last_mask_h])
-            rows.append({'Model': 'HomoGNN (GCN)', **_flatten(m_all, m_last),
+            ci_all = bl.mae_bootstrap_ci(homo_df['true_h'].values, homo_df['homo_pred_h'].values)
+            ci_last = bl.mae_bootstrap_ci(homo_df['true_h'].values[last_mask_h],
+                                           homo_df['homo_pred_h'].values[last_mask_h])
+            rows.append({'Model': 'HomoGNN (GCN)', **_flatten(m_all, m_last, ci_all, ci_last),
                          'fit_time_s': homo_fit_time_s, 'pred_time_s': homo_pred_time_s})
         else:
             print(f"No HomoGNN checkpoint found at {homo_model_path} -- omitting from table")
@@ -1836,7 +1931,9 @@ class Explainer(Modelling):
         mean_pred_time_s = _time.time() - _t0
         m_all = bl.metrics(y_test, mean_preds)
         m_last = bl.metrics(y_test[last_mask_t], mean_preds[last_mask_t])
-        rows.append({'Model': 'Mean predictor', **_flatten(m_all, m_last),
+        ci_all = bl.mae_bootstrap_ci(y_test, mean_preds)
+        ci_last = bl.mae_bootstrap_ci(y_test[last_mask_t], mean_preds[last_mask_t])
+        rows.append({'Model': 'Mean predictor', **_flatten(m_all, m_last, ci_all, ci_last),
                      'fit_time_s': mean_fit_time_s, 'pred_time_s': mean_pred_time_s})
 
         gbt = bl.GBTPredictor()
@@ -1848,7 +1945,9 @@ class Explainer(Modelling):
         gbt_pred_time_s = _time.time() - _t0
         m_all = bl.metrics(y_test, gbt_preds)
         m_last = bl.metrics(y_test[last_mask_t], gbt_preds[last_mask_t])
-        rows.append({'Model': 'GBT', **_flatten(m_all, m_last),
+        ci_all = bl.mae_bootstrap_ci(y_test, gbt_preds)
+        ci_last = bl.mae_bootstrap_ci(y_test[last_mask_t], gbt_preds[last_mask_t])
+        rows.append({'Model': 'GBT', **_flatten(m_all, m_last, ci_all, ci_last),
                      'fit_time_s': gbt_fit_time_s, 'pred_time_s': gbt_pred_time_s})
 
         # ── Assemble, save CSV ────────────────────────────────────────────────
@@ -1858,19 +1957,22 @@ class Explainer(Modelling):
         print(f"Saved model comparison table to {csv_path}")
 
         # ── Render table image ────────────────────────────────────────────────
-        col_labels = ["Model", "MAE (all)", "RMSE (all)", "R² (all)",
-                      "MAE (last)", "RMSE (last)", "R² (last)",
+        col_labels = ["Model", "MAE (all) [95% CI]", "RMSE (all)", "R² (all)",
+                      "MAE (last) [95% CI]", "RMSE (last)", "R² (last)",
                       "Fit (s)", "Pred (s)"]
         cell_rows = []
         for _, r in df.iterrows():
             cell_rows.append([
-                r['Model'], f"{r['MAE_all']:.1f}", f"{r['RMSE_all']:.1f}", f"{r['R2_all']:.3f}",
-                f"{r['MAE_last']:.1f}", f"{r['RMSE_last']:.1f}", f"{r['R2_last']:.3f}",
+                r['Model'],
+                f"{r['MAE_all']:.1f} [{r['MAE_all_ci_low']:.1f}, {r['MAE_all_ci_high']:.1f}]",
+                f"{r['RMSE_all']:.1f}", f"{r['R2_all']:.3f}",
+                f"{r['MAE_last']:.1f} [{r['MAE_last_ci_low']:.1f}, {r['MAE_last_ci_high']:.1f}]",
+                f"{r['RMSE_last']:.1f}", f"{r['R2_last']:.3f}",
                 f"{r['fit_time_s']:.3f}" if pd.notna(r['fit_time_s']) else "n/a",
                 f"{r['pred_time_s']:.3f}" if pd.notna(r['pred_time_s']) else "n/a",
             ])
 
-        fig, ax = plt.subplots(figsize=(11, 0.6 * len(cell_rows) + 1.4))
+        fig, ax = plt.subplots(figsize=(13, 0.6 * len(cell_rows) + 1.4))
         ax.axis('off')
         ax.set_title(f"Model comparison — {self.database} (cant={self.cant})", fontsize=10)
         table = ax.table(cellText=cell_rows, colLabels=col_labels, loc='center', cellLoc='center')
@@ -1894,3 +1996,253 @@ class Explainer(Modelling):
         print(f"Saved model comparison table image to {img_path}")
 
         return df
+
+    # ── GNNExplainer-based subgraph explanation ─────────────────────────────────
+    # Distinct from the CaptumExplainer path above: GNNExplainer LEARNS a soft node-
+    # feature mask and an edge mask via a small per-trace optimization loop (not a
+    # one-shot gradient computation), and natively produces edge importance -- which
+    # the Captum path never computes (its edge_mask_type is left None).
+
+    def _get_gnn_explainer(self, epochs=200, lr=0.01):
+        """Build (and cache) a PyG Explainer wrapping GNNExplainer, keyed by
+        (epochs, lr). Mirrors _get_pyg_explainer()'s caching pattern.
+
+        edge_mask_type is deliberately None, not 'object': PyG's set_hetero_masks
+        (the mechanism GNNExplainer uses to inject edge masks) walks model.modules()
+        looking for an nn.ModuleDict of per-relation MessagePassing submodules to
+        patch -- the layout used by a HeteroConv-wrapped model. HGTConv (this
+        project's conv layer, model_classes/HGT.py) isn't built that way: it's a
+        single MessagePassing whose forward() fuses all relations into one
+        propagate() call over a manually-constructed unified bipartite edge index
+        (construct_bipartite_edge_index in hgt_conv.py), with per-relation params
+        folded into edge_attr via self.p_rel (a ParameterDict), not separate
+        submodules. So set_hetero_masks finds nothing to patch for any edge type,
+        and GNNExplainer's edge_mask parameters end up disconnected from the
+        forward computation -- confirmed empirically: with edge_mask_type='object'
+        this raises "Could not compute gradients for edge masks" on the first
+        edge type it tries, regardless of which relation that is. Node masking
+        works fine because it intercepts x_dict directly rather than relying on
+        this per-relation-submodule mechanism. Getting real edge importance out of
+        GNNExplainer here would need a custom monkeypatch of HGTConv.message()
+        (this project already did exactly that once, to inspect attention weights
+        directly -- see EXPLAINABILITY_DEPTH.md) rather than PyG's built-in hook."""
+        if not hasattr(self, '_gnn_explainer_cache'):
+            self._gnn_explainer_cache = {}
+        key = (epochs, lr)
+        if key not in self._gnn_explainer_cache:
+            self._gnn_explainer_cache[key] = PyGExplainer(
+                model=self.model,
+                algorithm=GNNExplainer(epochs=epochs, lr=lr),
+                explanation_type='model',
+                node_mask_type='attributes',
+                edge_mask_type=None,
+                model_config=dict(mode='regression', task_level='node', return_type='raw'),
+            )
+        return self._gnn_explainer_cache[key]
+
+    def explain_gnn_subgraph(self, order_id, epochs=200, lr=0.01, top_k=5,
+                             n_events=None, save_dir=None):
+        """Explain a single trace via GNNExplainer's learned node-feature and edge
+        masks. n_events=None explains the order's last recorded prefix; an int
+        explains the prefix with exactly that many Events nodes (see
+        _locate_test_graph), matching explain_counterfactual()'s convention."""
+        if save_dir is None:
+            suffix = f"_ev{n_events}" if n_events is not None else ""
+            save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}{suffix}_gnn")
+        os.makedirs(save_dir, exist_ok=True)
+
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        graph = self._locate_test_graph(order_id, n_events)
+        x_dict = {nt: graph[nt].x for nt in graph.node_types}
+        baseline_value = self._predict_value_for_graph(graph, 0)
+
+        explainer = self._get_gnn_explainer(epochs, lr)
+        explanation = explainer(x_dict, graph.edge_index_dict, index=0)
+
+        node_mask_dict = {nt: explanation.node_mask_dict[nt].detach().cpu().numpy()
+                          for nt in graph.node_types if nt in explanation.node_mask_dict}
+        try:
+            raw_edge_mask_dict = explanation.edge_mask_dict
+        except KeyError:
+            raw_edge_mask_dict = {}
+        edge_mask_dict = {et: raw_edge_mask_dict[et].detach().cpu().numpy()
+                          for et in graph.edge_types if et in raw_edge_mask_dict}
+
+        import numpy as np
+        import pandas as pd
+
+        node_type_importance = {nt: float(np.abs(mask).mean()) for nt, mask in node_mask_dict.items()}
+        ranked_types = sorted(node_type_importance.items(), key=lambda kv: kv[1], reverse=True)
+
+        edge_rows = []
+        for et, mask in edge_mask_dict.items():
+            for e_idx, val in enumerate(mask):
+                edge_rows.append((et, e_idx, float(val)))
+        edge_rows.sort(key=lambda r: abs(r[2]), reverse=True)
+
+        n_q = graph['Events'].x.size(0) if 'Events' in graph.node_types else '?'
+        print(f"\n{'='*60}")
+        print(f"GNNExplainer subgraph explanation for {self.viewpoint_object} #{order_id}")
+        print(f"  Predicted remaining time : {round(baseline_value / 3600)} hours "
+              f"| prefix length: {n_q} events")
+        print(f"\nTop node types by mean |mask|:")
+        for rank, (nt, val) in enumerate(ranked_types[:top_k], 1):
+            print(f"  {rank}. {nt}: {val:.4f}")
+
+        if edge_rows:
+            print(f"\nTop {top_k} edges by |mask|:")
+            for rank, (et, e_idx, val) in enumerate(edge_rows[:top_k], 1):
+                src, dst = graph[et].edge_index[:, e_idx].tolist()
+                print(f"  {rank}. {et[0]}→{et[2]} ({src}→{dst}): mask={val:+.4f}")
+        else:
+            print(f"\nEdge importance: not available -- HGTConv fuses all relations into a "
+                  f"single MessagePassing call, so PyG's set_hetero_masks has no per-relation "
+                  f"submodule to inject an edge mask into (see _get_gnn_explainer docstring).")
+
+        node_rows = []
+        for nt, mask in node_mask_dict.items():
+            per_feat = np.abs(mask).mean(axis=0)
+            names = self.feature_names.get(nt, [])
+            for f_idx, val in enumerate(per_feat):
+                fname = names[f_idx] if f_idx < len(names) else f"feat_{f_idx}"
+                node_rows.append({'node_type': nt, 'feature_idx': f_idx,
+                                  'feature_name': fname, 'mean_abs_mask': float(val)})
+        node_df = pd.DataFrame(node_rows).sort_values('mean_abs_mask', ascending=False)
+        node_csv = os.path.join(save_dir, "gnn_node_attribution.csv")
+        node_df.to_csv(node_csv, index=False)
+
+        edge_df = pd.DataFrame(
+            [{'edge_type': f"{et[0]}->{et[2]}", 'edge_index': e_idx, 'mask_value': val}
+             for et, e_idx, val in edge_rows],
+            columns=['edge_type', 'edge_index', 'mask_value'],
+        )
+        edge_csv = os.path.join(save_dir, "gnn_edge_importance.csv")
+        edge_df.to_csv(edge_csv, index=False)
+
+        print(f"\nOutputs saved to: {save_dir}")
+        print('='*60)
+
+        return {
+            "order_id": order_id,
+            "predicted_hours": baseline_value / 3600,
+            "node_mask_dict": node_mask_dict,
+            "edge_mask_dict": edge_mask_dict,
+            "save_dir": save_dir,
+        }
+
+    # ── EXPERIMENTAL: real edge importance via GNNExplainer + HGTConv ───────────
+    # explain_gnn_subgraph() above disables edge masking because PyG's
+    # set_hetero_masks can't discover HGTConv's fused-relation structure (see
+    # _get_gnn_explainer's docstring). This attempts real edge importance anyway,
+    # by calling PyG's own set_masks() directly on each HGTConv layer -- reusing
+    # the proven MessagePassing.explain_message() hook, not a hand-written
+    # message() monkeypatch -- plus a hand-rolled training loop mirroring PyG's
+    # own GNNExplainer loss/coefficients. This relies on undocumented internal
+    # PyG behavior (construct_bipartite_edge_index's flattened edge ordering) and
+    # mutates shared model state (conv.explain/_edge_mask) mid-call, so it is kept
+    # separate from the production explain_gnn_subgraph() path pending validation
+    # against reg_explanation()'s LOO edge ranking. NOTE: the resulting importance
+    # is not directly comparable to LOO's -- this hook fires AFTER message()'s
+    # internal softmax, so it reweights an edge's already-normalized contribution
+    # rather than triggering the attention renormalization a true ablation (LOO's
+    # edge-removal loop) would cause.
+
+    def explain_gnn_edge_importance_experimental(self, order_id, epochs=100, lr=0.01,
+                                                  top_k=5, n_events=None):
+        """EXPERIMENTAL. See module-level comment above and the plan doc for
+        the full rationale, caveats, and validation approach."""
+        from torch_geometric.explain.algorithm.utils import set_masks, clear_masks
+
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        graph = self._locate_test_graph(order_id, n_events)
+        x_dict = {nt: graph[nt].x for nt in graph.node_types}
+        edge_index_dict = graph.edge_index_dict
+
+        # Replicate HGTConv.forward()'s flattened bipartite edge ordering
+        # (hgt_conv.py's _construct_src_node_feat + construct_bipartite_edge_index):
+        # iterate edge_index_dict.keys() in order, each edge type contributing a
+        # contiguous block of its own edges, unchanged internal ordering -- verified
+        # directly against the installed PyG 2.8.0 source, not assumed.
+        offset_map = []
+        for edge_type, eidx in edge_index_dict.items():
+            for local_idx in range(eidx.size(1)):
+                offset_map.append((edge_type, local_idx))
+        total_edges = len(offset_map)
+        true_total_edges = sum(eidx.size(1) for eidx in edge_index_dict.values())
+        assert total_edges == true_total_edges, (
+            f"offset_map size {total_edges} != actual edge count {true_total_edges} "
+            f"-- edge_index_dict iteration order changed unexpectedly"
+        )
+
+        # Baseline: real unmasked prediction, computed BEFORE any masks are installed.
+        baseline_value = self._predict_value_for_graph(graph, 0)
+
+        std = torch.nn.init.calculate_gain('relu') * (2.0 / (2 * total_edges)) ** 0.5
+        edge_mask = torch.nn.Parameter(torch.randn(total_edges) * std)
+        dummy_edge_index = torch.zeros((2, total_edges), dtype=torch.long)
+
+        convs = list(self.model.convs)
+        try:
+            for conv in convs:
+                set_masks(conv, edge_mask, dummy_edge_index, apply_sigmoid=True)
+
+            # Sanity check (mitigates the "silent misalignment" risk flagged in the
+            # plan): with the mask forced near 1.0 (a no-op), the masked prediction
+            # should closely match the true unmasked baseline. A large discrepancy
+            # here means the offset/ordering replica above is wrong, and the run
+            # should abort loudly rather than proceed to train and report bogus
+            # importances.
+            with torch.no_grad():
+                edge_mask.data.fill_(10.0)  # sigmoid(10) ~= 0.99995, effectively a no-op
+                sanity_out = self.model(x_dict, edge_index_dict)
+                sanity_pred = (sanity_out[0] * self.target_std + self.target_mean).item()
+            rel_err = abs(sanity_pred - baseline_value) / max(abs(baseline_value), 1.0)
+            assert rel_err < 0.01, (
+                f"Sanity check failed: near-no-op mask changed prediction by "
+                f"{rel_err:.1%} ({sanity_pred:.1f} vs baseline {baseline_value:.1f}) -- "
+                f"edge mask is likely misaligned with the model's internal edge ordering."
+            )
+
+            edge_mask.data = torch.randn(total_edges) * std
+            optimizer = torch.optim.Adam([edge_mask], lr=lr)
+            EPS = 1e-15
+            for _ in range(epochs):
+                optimizer.zero_grad()
+                out = self.model(x_dict, edge_index_dict)
+                pred = out[0] * self.target_std + self.target_mean
+                loss = (pred - baseline_value).pow(2).squeeze()
+                m = edge_mask.sigmoid()
+                loss = loss + 0.005 * m.sum()           # PyG default edge_size coeff
+                ent = -m * torch.log(m + EPS) - (1 - m) * torch.log(1 - m + EPS)
+                loss = loss + 1.0 * ent.mean()          # PyG default edge_ent coeff
+                loss.backward()
+                optimizer.step()
+
+            final_mask = edge_mask.sigmoid().detach().cpu().numpy()
+        finally:
+            for conv in convs:
+                clear_masks(conv)
+
+        edge_rows = [(et, local_idx, float(final_mask[flat_idx]))
+                     for flat_idx, (et, local_idx) in enumerate(offset_map)]
+        edge_rows.sort(key=lambda r: abs(r[2] - 0.5), reverse=True)
+
+        print(f"\n{'='*60}")
+        print(f"[EXPERIMENTAL] GNNExplainer edge importance for "
+              f"{self.viewpoint_object} #{order_id}")
+        print(f"  Predicted remaining time : {round(baseline_value / 3600)} hours")
+        print(f"\nTop {top_k} edges by |mask - 0.5| (distance from a no-op mask):")
+        for rank, (et, local_idx, val) in enumerate(edge_rows[:top_k], 1):
+            src, dst = graph[et].edge_index[:, local_idx].tolist()
+            print(f"  {rank}. {et[0]}→{et[2]} ({src}→{dst}): mask={val:.4f}")
+        print('='*60)
+
+        return {
+            "order_id": order_id,
+            "predicted_hours": baseline_value / 3600,
+            "edge_importance": edge_rows,
+        }
