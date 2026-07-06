@@ -29,7 +29,7 @@ DATABASE = 'order_management'
 CANT     = 2000
 OUT_DIR  = f"files/explainer_outputs/{DATABASE}/validation_2000"
 FEAT_COLS = ['n_events', 'elapsed_h', 'waiting_h',
-             'order_f0', 'n_items', 'total_weight', 'n_products']
+             'vp_feat_0', 'vp_feat_1', 'vp_feat_2', 'vp_feat_3']
 
 # temporal feature indices in Events.x (after 11 one-hot event-type dims)
 _ELAPSED_IDX = 11
@@ -37,8 +37,11 @@ _WAITING_IDX = 12
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
-def load_raw_split(path: str) -> pd.DataFrame:
-    """Load a raw (un-normalised) .pt graph file and return a feature DataFrame."""
+def load_raw_split(path: str, viewpoint: str = 'Orders') -> pd.DataFrame:
+    """Load a raw (un-normalised) .pt graph file and return a feature DataFrame.
+    Viewpoint raw features are read generically (vp_feat_0..k-1) since different
+    databases' viewpoint node types carry different numbers of raw attributes
+    (e.g. order_management's Orders has 4, logistics' TransportDocument has 1)."""
     graphs = torch.load(path, weights_only=False)
     rows = []
     for g in graphs:
@@ -48,19 +51,18 @@ def load_raw_split(path: str) -> pd.DataFrame:
             waiting_h = g['Events'].x[-1, _WAITING_IDX].item()
         else:
             elapsed_h = waiting_h = 0.0
-        o = g['Orders'].x[0]          # shape [4]
-        rows.append({
-            'n_events':     n_ev,
-            'elapsed_h':    elapsed_h,
-            'waiting_h':    waiting_h,
-            'order_f0':     o[0].item(),
-            'n_items':      o[1].item(),
-            'total_weight': o[2].item(),
-            'n_products':   o[3].item(),
-            'y_h':          g['Orders'].y[0].item() / 3600.0,
-            'order_id':     int(g['Orders'].id[0].item()),
-            'last_event':   bool(g['Orders'].last_event[0].item()),
-        })
+        vp_x = g[viewpoint].x[0]
+        row = {
+            'n_events':   n_ev,
+            'elapsed_h':  elapsed_h,
+            'waiting_h':  waiting_h,
+            'y_h':        g[viewpoint].y[0].item() / 3600.0,
+            'order_id':   int(g[viewpoint].id[0].item()),
+            'last_event': bool(g[viewpoint].last_event[0].item()),
+        }
+        for i in range(vp_x.shape[0]):
+            row[f'vp_feat_{i}'] = vp_x[i].item()
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -155,6 +157,67 @@ def read_hgt_fit_time(m) -> float | None:
     norm_path = m.model_path.replace(".pth", "_norm.json")
     if os.path.exists(norm_path):
         with open(norm_path) as f:
+            return json.load(f).get("fit_time_s")
+    return None
+
+
+# ── HomoGNN inference ────────────────────────────────────────────────────────
+# Extracted from training.Modelling.compare_models()'s inline logic so it can be
+# reused elsewhere (e.g. a full model-vs-all-baselines table) without duplicating
+# the loading/prediction loop -- compare_models() itself is untouched.
+
+def homo_predictions(m) -> "tuple[pd.DataFrame, float]":
+    """Run the persisted HomoGNN (REG_GNN) checkpoint on m.test_data; return
+    denormalised predictions plus the wall-clock prediction time in seconds."""
+    from model_classes import REG_GNN
+
+    vp = m.viewpoint_object
+    het_test = [g for g in m.test_data if g[vp].y.shape[0] > 0]
+    homo_test = m._hetero_to_homo(m.test_data)
+    homo_model_path = m.model_path.replace(".pth", "_homo.pth")
+
+    in_ch = homo_test[0].x.size(-1)
+    homo_model = REG_GNN.REG_GNN(
+        in_channels=in_ch,
+        hidden_channels=m.params.get('hidden_channels', 48),
+        num_layers=m.params.get('num_layers', 3),
+    ).to(m.device)
+    homo_model.load_state_dict(torch.load(homo_model_path, weights_only=False))
+    homo_model.eval()
+
+    denorm = lambda v: (v * m.target_std.item() + m.target_mean.item()) / 3600.0
+    records = []
+    pred_time_s = 0.0
+    with torch.no_grad():
+        for g_het, g_hom in zip(het_test, homo_test):
+            g_het = g_het.to(m.device)
+            g_hom = g_hom.to(m.device)
+
+            _t0 = time.time()
+            pred_n = homo_model(
+                g_hom.x.unsqueeze(0) if g_hom.x.dim() == 1 else g_hom.x,
+                g_hom.edge_index,
+                torch.zeros(g_hom.num_nodes, dtype=torch.long, device=m.device),
+            ).item()
+            pred_time_s += time.time() - _t0
+
+            records.append({
+                'order_id':      int(g_het[vp].id[0].item()),
+                'true_h':        denorm(g_het[vp].y[0].item()),
+                'homo_pred_h':   denorm(pred_n),
+                'n_events':      g_het['Events'].num_nodes,
+                'last_event':    bool(g_het[vp].last_event[0].item()),
+            })
+    return pd.DataFrame(records), pred_time_s
+
+
+def read_homo_fit_time(m) -> float | None:
+    """Read back the fitting time recorded by training.Modelling.Homo_Reg_Modelling's
+    _homo_meta.json sidecar, mirroring read_hgt_fit_time(m)."""
+    homo_model_path = m.model_path.replace(".pth", "_homo.pth")
+    meta_path = homo_model_path.replace(".pth", "_meta.json")
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
             return json.load(f).get("fit_time_s")
     return None
 

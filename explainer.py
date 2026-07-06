@@ -1771,3 +1771,126 @@ class Explainer(Modelling):
             self.reg_explanation(explain_subgraph, 0, object_idx, top_k)
         elif self.path_dict['kpi_type'] == 1:
             self.class_explanation(explain_subgraph, object_idx, top_k)
+
+    def compare_to_baselines(self, save_dir=None):
+        """Table comparing the currently selected HGT model against every baseline
+        this project has (HomoGNN, Mean predictor, GBT) -- CSV + a rendered table
+        image, styled like _plot_cf_event_type_diff's table. Each model's metrics
+        come from its own already-correct pipeline (hgt_predictions/homo_predictions/
+        fresh Mean+GBT fit) rather than a forced per-example merge across models."""
+        import baselines as bl
+        import pandas as pd
+
+        def _flatten(m_all, m_last):
+            return {'MAE_all': m_all['mae'], 'RMSE_all': m_all['rmse'], 'R2_all': m_all['r2'],
+                    'MAE_last': m_last['mae'], 'RMSE_last': m_last['rmse'], 'R2_last': m_last['r2']}
+
+        if save_dir is None:
+            save_dir = f"files/explainer_outputs/{self.database}/validation_{self.cant}"
+        os.makedirs(save_dir, exist_ok=True)
+
+        rows = []
+
+        # ── HGT (the currently selected model) ───────────────────────────────
+        hgt_df, hgt_pred_time_s = bl.hgt_predictions(self)
+        hgt_fit_time_s = bl.read_hgt_fit_time(self)
+        last_mask = hgt_df['last_event'].values
+        m_all = bl.metrics(hgt_df['true_h'].values, hgt_df['hgt_pred_h'].values)
+        m_last = bl.metrics(hgt_df['true_h'].values[last_mask],
+                             hgt_df['hgt_pred_h'].values[last_mask])
+        rows.append({'Model': 'HGT (ours)', **_flatten(m_all, m_last),
+                     'fit_time_s': hgt_fit_time_s, 'pred_time_s': hgt_pred_time_s})
+
+        # ── HomoGNN, if a checkpoint exists for this database/cant/task ──────
+        homo_model_path = self.model_path.replace(".pth", "_homo.pth")
+        if os.path.exists(homo_model_path):
+            homo_df, homo_pred_time_s = bl.homo_predictions(self)
+            homo_fit_time_s = bl.read_homo_fit_time(self)
+            last_mask_h = homo_df['last_event'].values
+            m_all = bl.metrics(homo_df['true_h'].values, homo_df['homo_pred_h'].values)
+            m_last = bl.metrics(homo_df['true_h'].values[last_mask_h],
+                                 homo_df['homo_pred_h'].values[last_mask_h])
+            rows.append({'Model': 'HomoGNN (GCN)', **_flatten(m_all, m_last),
+                         'fit_time_s': homo_fit_time_s, 'pred_time_s': homo_pred_time_s})
+        else:
+            print(f"No HomoGNN checkpoint found at {homo_model_path} -- omitting from table")
+
+        # ── Mean / GBT (refit fresh, as baselines.py's script already does) ──
+        pt_path = self.path_dict['pytorch_path']
+        train_df = bl.load_raw_split(f"{pt_path}/train_graphs_sg.pt", self.viewpoint_object)
+        test_df = bl.load_raw_split(f"{pt_path}/test_graphs_sg.pt", self.viewpoint_object)
+        # feature columns derived dynamically, not bl.FEAT_COLS -- the viewpoint's raw
+        # feature count varies by database (e.g. Orders has 4, TransportDocument has 1)
+        feat_cols = [c for c in train_df.columns if c not in ('y_h', 'order_id', 'last_event')]
+        X_train, y_train = train_df[feat_cols].values, train_df['y_h'].values
+        X_test, y_test = test_df[feat_cols].values, test_df['y_h'].values
+        last_mask_t = test_df['last_event'].values
+
+        import time as _time
+        mean_pred = bl.MeanPredictor()
+        _t0 = _time.time()
+        mean_pred.fit(y_train)
+        mean_fit_time_s = _time.time() - _t0
+        _t0 = _time.time()
+        mean_preds = mean_pred.predict(len(test_df))
+        mean_pred_time_s = _time.time() - _t0
+        m_all = bl.metrics(y_test, mean_preds)
+        m_last = bl.metrics(y_test[last_mask_t], mean_preds[last_mask_t])
+        rows.append({'Model': 'Mean predictor', **_flatten(m_all, m_last),
+                     'fit_time_s': mean_fit_time_s, 'pred_time_s': mean_pred_time_s})
+
+        gbt = bl.GBTPredictor()
+        _t0 = _time.time()
+        gbt.fit(X_train, y_train)
+        gbt_fit_time_s = _time.time() - _t0
+        _t0 = _time.time()
+        gbt_preds = gbt.predict(X_test)
+        gbt_pred_time_s = _time.time() - _t0
+        m_all = bl.metrics(y_test, gbt_preds)
+        m_last = bl.metrics(y_test[last_mask_t], gbt_preds[last_mask_t])
+        rows.append({'Model': 'GBT', **_flatten(m_all, m_last),
+                     'fit_time_s': gbt_fit_time_s, 'pred_time_s': gbt_pred_time_s})
+
+        # ── Assemble, save CSV ────────────────────────────────────────────────
+        df = pd.DataFrame(rows)
+        csv_path = os.path.join(save_dir, "model_comparison.csv")
+        df.to_csv(csv_path, index=False)
+        print(f"Saved model comparison table to {csv_path}")
+
+        # ── Render table image ────────────────────────────────────────────────
+        col_labels = ["Model", "MAE (all)", "RMSE (all)", "R² (all)",
+                      "MAE (last)", "RMSE (last)", "R² (last)",
+                      "Fit (s)", "Pred (s)"]
+        cell_rows = []
+        for _, r in df.iterrows():
+            cell_rows.append([
+                r['Model'], f"{r['MAE_all']:.1f}", f"{r['RMSE_all']:.1f}", f"{r['R2_all']:.3f}",
+                f"{r['MAE_last']:.1f}", f"{r['RMSE_last']:.1f}", f"{r['R2_last']:.3f}",
+                f"{r['fit_time_s']:.3f}" if pd.notna(r['fit_time_s']) else "n/a",
+                f"{r['pred_time_s']:.3f}" if pd.notna(r['pred_time_s']) else "n/a",
+            ])
+
+        fig, ax = plt.subplots(figsize=(11, 0.6 * len(cell_rows) + 1.4))
+        ax.axis('off')
+        ax.set_title(f"Model comparison — {self.database} (cant={self.cant})", fontsize=10)
+        table = ax.table(cellText=cell_rows, colLabels=col_labels, loc='center', cellLoc='center')
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1, 1.6)
+
+        for col in range(len(col_labels)):
+            table[0, col].set_facecolor("#EAEAEA")
+            table[0, col].set_text_props(weight='bold')
+        for r_idx, r in enumerate(df.itertuples(), start=1):
+            if r.Model == 'HGT (ours)':
+                for col in range(len(col_labels)):
+                    table[r_idx, col].set_facecolor("#DCE6F1")
+                    table[r_idx, col].set_text_props(weight='bold')
+
+        plt.tight_layout()
+        img_path = os.path.join(save_dir, "model_comparison_table.png")
+        plt.savefig(img_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Saved model comparison table image to {img_path}")
+
+        return df

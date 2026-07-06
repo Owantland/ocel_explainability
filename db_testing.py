@@ -848,8 +848,8 @@ def compare_to_hoeg(database='logistics', cant=2000):
 
 
 # MAIN
-cant = 1000
-database = 'logistics'
+cant = 2000
+database = 'order_management'
 
 # # # Verification of data sources and generated results
 # # # compare_to_hoeg(database, cant)
@@ -875,12 +875,12 @@ database = 'logistics'
 # hgg.trace_kpi()
 # verify_hetero_graphs(database, cant)
 
-# # Model training and testing
-# m = t.Modelling(database, cant)
-# # # Sweep
-# # # m.sweep()
-# m.Modelling()
+# Model training and testing
+m = t.Modelling(database, cant)
+# # Sweep
+# # m.sweep()
+m.Modelling()
 
-# # Baseline comparison
-# m.Homo_Reg_Modelling()
-# m.compare_models()
+# Baseline comparison
+m.Homo_Reg_Modelling()
+m.compare_models()

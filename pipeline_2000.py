@@ -106,20 +106,33 @@ plt.savefig(f'{out_dir}/residuals.png', dpi=150)
 plt.close()
 print(f"\nResidual plot saved to {out_dir}/residuals.png")
 
-# ── 5. Feature attribution ────────────────────────────────────────────────────
+# ── 5. Model comparison (HGT vs. HomoGNN vs. Mean vs. GBT) ───────────────────
+print("\n" + "=" * 60)
+print("MODEL COMPARISON — HGT vs. baselines")
+print("=" * 60)
+e = exp.Explainer(DATABASE, CANT)
+homo_model_path = e.model_path.replace(".pth", "_homo.pth")
+homo_params_path = homo_model_path.replace(".pth", "_meta.json")
+homo_is_stale = os.path.exists(homo_model_path) and not os.path.exists(homo_params_path)
+if not os.path.exists(homo_model_path) or homo_is_stale:
+    print("Training HomoGNN baseline (missing or stale for current hyperparameters)...")
+    e.Homo_Reg_Modelling()
+comparison_df = e.compare_to_baselines()
+print(comparison_df.to_string(index=False))
+
+# ── 6. Feature attribution ────────────────────────────────────────────────────
 print("\n" + "=" * 60)
 print("FEATURE ATTRIBUTION (InputXGradient)")
 print("=" * 60)
-e = exp.Explainer(DATABASE, CANT)
 e.explain_feature_attribution()
 
-# ── 6. Aggregate LOO ──────────────────────────────────────────────────────────
+# ── 7. Aggregate LOO ──────────────────────────────────────────────────────────
 print("\n" + "=" * 60)
 print("AGGREGATE LOO EXPLANATION (n=50 traces)")
 print("=" * 60)
 e.explain_aggregate(n_traces=50, top_k=5)
 
-# ── 7. Per-trace explanations ─────────────────────────────────────────────────
+# ── 8. Per-trace explanations ─────────────────────────────────────────────────
 last_sorted = last.sort_values('true_h')
 fast_id = int(last_sorted.iloc[len(last_sorted) // 5]['order_id'])
 slow_id = int(last_sorted.iloc[-len(last_sorted) // 5]['order_id'])
