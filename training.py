@@ -36,9 +36,21 @@ class Modelling:
 
         # Model parameters
         # Matches sweep()'s budget and HOEG's Table 5/7 (single unified
-        # epoch/patience regime for both tuning and final reported results).
-        self.max_epochs = 30
-        self.early_stop_patience = 4
+        # epoch/patience regime for both tuning and final reported results)
+        # for order_management, where this budget trains cleanly. logistics'
+        # last-event class is far rarer (138 of 8651 test prefixes) and the
+        # model needs materially more epochs to learn it -- under 30/4 it
+        # collapsed to a near-constant predictor (last-event R2 = -1700.6,
+        # zero feature attribution on every non-viewpoint node type) after
+        # early-stopping at epoch 6. Kept on a longer, pre-existing budget
+        # here as a deliberate, documented deviation from HOEG parity for
+        # this one dataset -- see TRAINING_VS_HOEG.md recommendation 1.
+        if self.database == 'logistics':
+            self.max_epochs = 100
+            self.early_stop_patience = 10
+        else:
+            self.max_epochs = 30
+            self.early_stop_patience = 4
 
         kpi_type = self.path_dict['kpi_type']
 
