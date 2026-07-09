@@ -507,6 +507,16 @@ class Modelling:
             load_if_exists=True,
         )
 
+        # A killed process leaves its in-flight trial stuck at RUNNING forever (Optuna has no
+        # liveness check without heartbeat monitoring configured), and GridSampler treats RUNNING
+        # trials as claiming their grid cell -- so on resume it would otherwise skip that
+        # combination forever. Since sweep() only ever runs one trial at a time in this project,
+        # any RUNNING trial found here on (re)start must be stale from an earlier kill, not an
+        # actual concurrent run -- fail it so GridSampler retries that grid cell.
+        for _stale in study.trials:
+            if _stale.state == optuna.trial.TrialState.RUNNING:
+                study.tell(_stale.number, state=optuna.trial.TrialState.FAIL)
+
         # Seed with an informed prior from HOEG (Smit et al. 2024, Section 6.1): lower learning
         # rate (0.001) generally scored better across their tuning experiment, and the
         # dataset-conditional hidden_dims expectation from the same finding is now baked
