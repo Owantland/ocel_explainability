@@ -1,0 +1,359 @@
+Presentation plan
+
+1) OCEL structure
+	Mention OCEL standard 2.0
+	Databases used (order_management, logistics)
+	OCEL generation
+	KPI definition
+
+2) Graph structure
+	Explain how the heterogeneous graphs were created
+	Explain features chosen based on Adams et al.
+
+3) Modeling
+	Explain train/test split used and justify with literature
+		- HOEG's temporally-non-overlapping split (train_test_builder.py) is the specific
+		  literature basis, not a generic citation
+	Explain model architecture - present HOEG as an inspiration for model decision
+	Explain the use of a sweep for identifying best hyperparameters
+	Explain choice of baseline models, both homogeneous and non-graph-based - again based on HOEG
+		- Name them explicitly: Mean, GBT, and HomoGNN (baselines.py/compare_models()) - 3 of
+		  HOEG's 4 baseline categories (missing only an EFG_ss-style subgraph-sampling variant)
+	Present results
+		- Decide scope: order_management as the primary worked dataset (clean, fully-fixed
+		  checkpoint); logistics as a secondary/robustness mention, honestly flagged as having
+		  an open issue (Forklift/HandlingUnit/Truck node types are provably unreachable under
+		  num_layers=1 - fixed in the sweep going forward, but the existing checkpoint hasn't
+		  been re-swept yet)
+		- Pull fresh numbers from the current checkpoints/training logs, not files/results.csv
+		  (confirmed stale - mixes old and current checkpoint names from accumulated runs)
+		- Include R^2, depth-stratified MAE (1-3/4-6/7-9/10+ events), and wall-clock fit/predict
+		  time - all already implemented and genuine strengths vs. HOEG's more limited reporting
+		- Fresh order_management/PayOrder/cant=2000 comparison (2026-07-06 retrain): HGT MAE=
+		  102.7h/R^2=0.097 (last-event), HomoGNN MAE=100.8h/R^2=0.105 - HomoGNN edges out HGT
+		  very slightly here; both clearly beat Mean (150.0h) and GBT (134.4h). Worth an honest
+		  one-line acknowledgement rather than overclaiming HGT's advantage on this target.
+
+4) Explainability layer - Most important part
+	Present the layer as a FOUR-component approach (not three): LOO, Fidelity metrics,
+	Feature attribution, and Counterfactual explanation. Use
+	Hetero_GNNs_with_Post_Hoc_Explanations (Zhai et al. 2025) as the template followed
+	Explain LOO methodology and benefits
+		- LOO now reports a SIGNED shift alongside the existing magnitude (2026-07-06
+		  addition): signed_shift = baseline_value - perturbed_value. Positive means
+		  the element's real value pushed the prediction toward a LONGER remaining
+		  time than the substitute used when "removing" it; negative means SHORTER.
+		  Methodological caveat to state explicitly when presenting this: node
+		  features are z-score normalized (training.py), so "removing" a value means
+		  replacing it with the training-set MEAN, not a neutral/absent baseline -
+		  the sign should be framed as "this element's value, relative to the
+		  population average, pushed the prediction up or down," not as an absolute
+		  causal claim. Ranking, the >1 std "large shift" flag, and Fidelity+/-/
+		  Characterization all deliberately continue using the unsigned magnitude
+		  (direction-agnostic by design - a -283h effect is exactly as important as a
+		  +283h one); only the per-trace display (console, CSVs, and the subgraph/
+		  bar-chart colors) is signed. Aggregate LOO (n=50 traces) also stays
+		  magnitude-only, since averaging signed values across differently-behaved
+		  orders would risk cancellation masking real impact.
+	Explain Fidelity metrics (Fidelity+/Fidelity-/Characterization/sparsity) as their own item
+		- Grounds the "are these explanations trustworthy" question in Stevens et al. (2022)'s
+		  faithfulness framework - likely to be asked directly, deserves explicit treatment
+		  rather than being folded silently into the LOO section
+	Explain feature attribution based on the original paper's design (InputXGradient /
+	IntegratedGradients via Captum)
+		- Show the depth-stratified heatmap (prefix-depth-bin x feature-dim) as this
+		  project's OCEL analogue of Zhai et al.'s time-of-day heatmap - now covers both
+		  Orders (viewpoint) and Events, the two node types that actually carry non-zero
+		  attribution (files/explainer_outputs/order_management/attribution/
+		  ig_depth_heatmap_orders_{method}.png, ig_depth_heatmap_events_{method}.png)
+	Explain our adoption of the proposed counterfactual methodology and the changes done to
+	bring it in line with the project task
+		- Concrete example of a change made: d_feat was corrected (2026-07-04) to be
+		  seed-centric, matching Zhai et al.'s actual formula, replacing an earlier
+		  mean-pooled approximation
+		- Show the 4-component dissimilarity breakdown (feat/type/edge/struct) per retrieved
+		  counterfactual, not just the total score - proves concretely where the
+		  structural vs. feature differences between query and CF lie, rather than
+		  asserting "structurally similar" without evidence
+	Provide 2 clear, validated examples of the explainability layer being used end-to-end
+	(all four components, same order, same checkpoint), plus a third example demonstrating
+	counterfactual explanation on a genuine mid-trace (non-final) prefix on the logistics
+	dataset:
+
+	  NOTE (2026-07-06): kpi_event was switched PayOrder -> PackageDelivered -> back to
+	  PayOrder (PayOrder is the real target; PackageDelivered was a same-day experiment).
+	  Switching back required rebuilding the kpi-event-specific hetero graph cache and a full
+	  retrain, so this is a freshly-trained PayOrder checkpoint, not the exact one shown to
+	  Alessandro - all numbers below are regenerated against it. Reassuringly, the
+	  counterfactual dissimilarity scores are computed from graph structure alone (model-
+	  independent), so several numbers below reproduce Alessandro's exactly (noted per-example
+	  below) even though this is a new checkpoint.
+
+	  Example A - Order #1781 (order_management, cant=2000): simple/short prefix (7 events,
+	  1 Item, 1 Package, 1 Packages-to-Items edge) but a SLOW outcome (401h actual, 566h
+	  predicted, 41.1% error) - an EXTREME structure-driven story.
+	    - LOO now reports a SIGNED shift, not just magnitude (positive = this element's
+	      real value pushed the prediction toward a LONGER remaining time than the
+	      population-mean substitute would, since node features are z-normalized and
+	      "removing" a value means replacing it with the training-set mean, not a
+	      neutral/absent baseline - see the LOO methodology note above; negative =
+	      toward SHORTER): two events dominate by magnitude, and both happen to be INCREASES -
+	      Events[6] +283.4h and Events[1] +75.7h - together ~63.4% of the 566h
+	      prediction. Orders-level features are non-trivial but still secondary and
+	      mixed in direction: total_weight +31.3h and price +6.8h/n_products +4.6h/
+	      n_items +2.8h all increase the prediction, but n_packages is actually -15.8h
+	      (DECREASES it) - a sign that was invisible before this change, when only the
+	      15.8h magnitude was reported. Characterization 0.9999 (essentially perfect,
+	      well above the fresh aggregate 0.737+-0.242 band - a near-degenerate case
+	      where nearly the whole prediction traces to one node, worth a one-line caveat
+	      rather than presenting as typical).
+	    - Top 3 nodes per type (beyond the combined top-5 above, every type gets its own
+	      visibility rather than being crowded out by Events; signed values now shown):
+	        Node type    Rank 1               Rank 2       Rank 3
+	        Events       [6]=+283.4h [LARGE]  [1]=+75.7h   [0]=-9.2h
+	        Customers    [0]=+5.7h
+	        Products     [0]=-3.8h            [1]=+0.0h    [2]=+0.0h
+	        Items        [0]=+0.5h
+	        Employees    [4]=+0.0h            [0]=+0.0h    [1]=+0.0h
+	        Packages     [0]=+0.0h
+	      (Orders itself is absent by design here - its single instance is the seed node,
+	      already covered under "Orders-level features" above. Employees' near-zero values
+	      across the board match the already-documented Employees zero-attribution
+	      limitation, not a new finding specific to this order. Note both Events[0] and
+	      Products[0] are negative here - DECREASING the prediction - unlike the two
+	      dominant Events nodes above; the two Events->Orders edges feeding the seed tell
+	      the same story directionally: +75.2h and -34.8h, opposite signs on the same
+	      edge type.)
+	    - Top 5 edges by influence (signed, same convention as nodes):
+	        1. Events->Orders (1->0): +75.2h
+	        2. Orders->Events (0->6): +66.1h
+	        3. Events->Events (6->1): +60.1h
+	        4. Events->Orders (0->0): -34.8h
+	        5. Customers->Orders (0->0): -30.5h
+	      (The top edge feeds Events[1] into the seed - consistent with Events[1] being
+	      the #2 node above. Note the two Events->Orders edges, ranked #1 and #4, have
+	      opposite signs - the same "different node instances of the same relation type
+	      can pull in opposite directions" pattern already seen at the node level.)
+	    - Feature attribution (both InputXGradient and IntegratedGradients): Events'
+	      PaymentReminder dominates (0.116/0.126), but Orders' price (0.081/0.036) and
+	      n_packages (0.063/0.041) are meaningfully non-zero too - broadly consistent with
+	      LOO: Events leads, but Orders features are not negligible here.
+	    - Aggregate LOO comparison (n=50 traces, files/explainer_outputs/order_management/
+	      aggregate/): on average across the dataset, Events (~9.3h mean shift) clearly leads,
+	      then Customers (~5.1h), Items (~2.6h), Products (~0.4h), Packages/Employees (~0) -
+	      aggregate_node_type_importance.png. Order #1781's Events shift (+283.4h/+75.7h) is a
+	      dramatic outlier against this ~9.3h average - useful to show side by side:
+	      Events-dominance IS the norm in this dataset, this order is just an extreme instance
+	      of it. Orders' own aggregate feature importance (n_packages ~9.7h, n_products ~8.3h,
+	      total_weight ~3.4h, price ~3.1h, n_items ~2.8h - aggregate_feat_importance_
+	      Orders.png) is comparable in scale to what #1781 itself shows (31.3h/15.8h/etc.),
+	      unlike the Events-side gap - i.e. this order's Orders-feature behavior is fairly
+	      typical, it's specifically the Events-node concentration that is extreme.
+	    - Counterfactual: order #1852 (75.9h predicted), same 7-event prefix length,
+	      dissimilarity 0.5874 (feat=0.302 largest, edge=0.180, type=0.087, struct=0.018) -
+	      query and CF differ by +1 Item/-1 Product only. These dissimilarity-component values
+	      are IDENTICAL to what was shown to Alessandro (graph-structure comparison is
+	      model-independent) - only the predicted-hours values differ (75.9h now vs. 37.5h
+	      then, reflecting the retrain).
+	    - NEW (2026-07-06): the counterfactual output now also includes a table comparing
+	      the Orders node's OWN feature values, query vs. CF (cf_orders_feature_diff.png).
+	      For #1781 vs. #1852, the two largest deltas are n_items +0.489 and n_products
+	      -0.276 - directly corroborating the +1 Item/-1 Product structural difference
+	      already known from the node-count comparison; total_weight/price/n_packages are
+	      all much smaller (<=0.06). A useful concrete demonstration that this order's
+	      feature-level and structural differences tell the same story.
+	    - Robustness check: reran the counterfactual retrieval on the SAME order's 6-event
+	      prefix (one event before last, via explain_counterfactual(1781, n_events=6) -
+	      depth-matched against other orders' 6-event prefixes, not just last-event traces)
+	      to confirm the retrieval method still works at a non-final decision point. Query:
+	      301h predicted. Top CF: order #1967 (108.6h predicted, structurally near-identical -
+	      only Employees-1), dissimilarity feat=0.290 the largest component of total=0.413
+	      (type=0.048, edge=0.038, struct=0.038 all small) - again identical dissimilarity
+	      numbers to the pre-retrain run. Artifacts: order_1781_ev6_cf/ (not a new headline
+	      example, just a validation of the method).
+
+	  Example B - Order #1812 (order_management, cant=2000): structurally rich prefix (15
+	  events, 6 Items, 2 Packages, 6 Packages-to-Items edges), FASTER outcome (151h actual,
+	  124h predicted, 17.4% error) - a genuinely BALANCED story: structure and features
+	  contribute comparably, unlike Example A's extreme structural concentration.
+	    - LOO (signed, same convention as Example A): a near three-way tie by magnitude
+	      between two events and one feature - Events[1] 23.1h, Events[13] 21.9h, and
+	      Orders' own n_packages 22.6h (the single largest individual contributor on the
+	      seed node) - but ALL THREE ARE NEGATIVE (-23.1h, -21.9h, -22.6h): unlike
+	      Example A, where the dominant contributors increased the prediction, this
+	      order's biggest drivers all push it toward a SHORTER remaining time. This only
+	      became visible with the signed value - the magnitude-only view made #1781 and
+	      #1812 look like they had similarly-shaped "big shift, big shift, big feature"
+	      stories, when actually they point in opposite directions. Characterization
+	      0.751 (within the fresh aggregate 0.737+-0.242 band, unlike #1781's
+	      near-degenerate 0.9999).
+	    - Top 3 nodes per type (beyond the combined top-5 above; signed values now shown):
+	        Node type    Rank 1       Rank 2       Rank 3
+	        Events       [1]=-23.1h   [13]=-21.9h  [10]=-8.0h
+	        Items        [5]=+6.1h    [0]=+3.9h    [4]=+1.5h
+	        Customers    [0]=-2.0h
+	        Products     [5]=+0.8h    [3]=+0.7h    [6]=-0.3h
+	        Packages     [0]=-0.3h    [1]=-0.0h
+	        Employees    [5]=+0.0h    [0]=+0.0h    [1]=+0.0h
+	      (Same caveats as Example A: Orders absent by design - seed node, covered above;
+	      Employees near-zero matches the known limitation. Note Items shows real, non-trivial
+	      importance here (up to +6.1h, INCREASING the prediction) unlike #1781, where it
+	      barely registered (+0.5h) - one of the ways this order's "balanced" story differs
+	      from #1781's Events-only extremity: here Events pulls the prediction down while
+	      Items pulls it up, a genuine directional tug-of-war, not just two large-magnitude
+	      contributors happening to coexist.)
+	    - Top 5 edges by influence (signed):
+	        1. Orders->Events (0->0): -15.7h
+	        2. Items->Orders (1->0): -11.5h
+	        3. Orders->Events (0->1): -10.4h
+	        4. Items->Orders (4->0): +9.6h
+	        5. Events->Items (13->5): -9.5h
+	      (Unlike Example A, the top edges here are a genuine mix of signs across
+	      different relation types (Orders->Events negative, Items->Orders split -11.5h/
+	      +9.6h across two different Item instances) - consistent with this order's
+	      "balanced tug-of-war" story rather than one relation type dominating.)
+	    - Feature attribution: n_packages clearly dominates on Orders (0.097/0.097) - actually
+	      exceeding Events' top feature (FailedDelivery, 0.011/0.017) here, and matching the
+	      dataset-wide aggregate top feature (n_packages) exactly - #1812 is a good
+	      representative "typical" example in this respect, contrasting with #1781's atypical
+	      Events-concentration.
+	    - Counterfactual: order #1867 (70.1h predicted), same 15-event prefix length,
+	      dissimilarity 0.6245 (feat=0.416 largest, edge=0.135, type=0.068, struct=0.006 -
+	      near-identical structurally: -1 Item/+2 Products). Note: this CF pairing differs
+	      from what was shown to Alessandro (#1923 then) - not a retrain artifact (dissimilarity
+	      is model-independent) but a consequence of the documented d_feat formula correction
+	      (2026-07-04, made seed-centric) changing the ranking after that presentation.
+	    - NEW (2026-07-06): Orders feature diff (cf_orders_feature_diff.png) for #1812 vs.
+	      #1867 tells a DIFFERENT story than #1781's: the single largest delta is price
+	      -0.946 - bigger than either structural-adjacent feature (n_products +0.551,
+	      n_items -0.489) and not something the node-count comparison alone would surface
+	      at all. Worth flagging explicitly: unlike #1781, where the feature-level and
+	      structural stories matched, #1812's biggest Order-level difference (price) is
+	      orthogonal to its structural difference (-1 Item/+2 Products) - a second
+	      concrete way this order's "balanced" character shows up.
+
+	  Both examples: Employees feature attribution is ~zero in both cases (re-confirmed under
+	  the current checkpoint too) - this matches a known, already-documented limitation (the
+	  "Employees zero-attribution" finding, not a new issue), so it doesn't undermine trust in
+	  these two examples.
+
+	  Example C - TransportDocument #865 (logistics, cant=1000): a genuine mid-trace
+	  counterfactual, not a "one-before-last" check like #1781's ev6 robustness pass above.
+	  This case runs to 67 events at completion (the median full-trace length across the 138
+	  logistics test cases); we explain it at its 33-event prefix - roughly the case's
+	  temporal midpoint, via explain_counterfactual(865, n_events=33) - to show the method
+	  explaining an in-process trace on a second dataset, not just order_management.
+	  Query graph at that prefix: TransportDocument=1, Vehicle=1, HandlingUnit=11,
+	  CustomerOrder=1, Container=4, Truck=1, Forklift=2, Events=33.
+	    - Prediction: 286.3h remaining predicted vs. 501.6h true remaining (42.9% error, a
+	      significant under-prediction) - worth an honest callout rather than cherry-picking
+	      only well-fit examples.
+	    - Counterfactual: order #947, same 33-event prefix length, predicted 282.1h,
+	      dissimilarity 0.1988 - ENTIRELY feat-driven (feat=0.199, type=0.000, edge=0.000,
+	      struct=0.000): query and CF have identical node-type and edge-type counts at this
+	      depth, so every bit of the (small) predicted-hours gap traces to feature-level
+	      differences alone, not structure. A useful contrast with Examples A/B, where the
+	      top CF always differed by at least one node (+-1 Item/Product/Employee).
+	    - NEW (2026-07-06): the TransportDocument feature diff (cf_transportdocument_
+	      feature_diff.png) adds an important clarification here - the viewpoint node's
+	      OWN feature (AmountofContainers, TransportDocument's only raw attribute) is
+	      IDENTICAL between query and CF (delta = 0.000). So "entirely feat-driven"
+	      does NOT mean the query/CF orders differ in their own attributes - it means the
+	      d_feat component (seed-centric, averaged across ALL node types present, not just
+	      the viewpoint) picks up differences elsewhere in the graph, e.g. Events' temporal/
+	      activity features or HandlingUnit's own attributes. Worth stating this precisely
+	      rather than letting "feat-driven" be misread as "the two orders themselves differ."
+	    - Depth-window gating (the mechanism that makes n_events safe to use at all) worked
+	      as intended: all 3 retrieved counterfactuals are at 32-33 events, never compared
+	      against last-event (up to 94-event) traces from the wider pool.
+	    - Caveat: this query graph includes 2 Forklift nodes, but Forklift is the one
+	      logistics node type with definitively-dead gradient attribution (lin_dict collapsed,
+	      see Limitations) - so while Forklift is structurally present and counted correctly
+	      here, no feature-attribution claim should be made about it specifically.
+
+	  Example D - Orders #1781 and #1812, ONE EVENT BEFORE their last event (2026-07-06
+	  addition): explain_trace()/explain_trace_ig() gained an n_events parameter this
+	  session (previously only explain_counterfactual() supported explaining a non-final
+	  prefix) - so the full four-component treatment, not just counterfactual retrieval,
+	  can now be run at a non-final decision point. Same two orders as Examples A/B,
+	  same checkpoint, one event short of completion in each case.
+	    - Order #1781 at 6 of 7 events (explain_trace(1781, n_events=6)): predicted 301h
+	      (vs. 566h at the 7-event last-event snapshot in Example A). The dominant nodes
+	      are now Events[2] +60.8h and Events[1] +57.1h - Events[6] (the +283.4h outlier
+	      that drove ~50% of Example A's prediction alone) doesn't exist yet at this
+	      prefix. This is the headline finding of Example D: #1781's "extreme,
+	      one-node-dominates" story in Example A is NOT a stable property of the trace -
+	      it crystallizes specifically once that final event occurs. One event earlier,
+	      the explanation is far more measured (top shift 60.8h vs. 283.4h), demonstrating
+	      concretely why explaining a trace only at completion can miss how the
+	      explanation evolves. Characterization 0.9939 (still near-perfect, but the
+	      magnitude behind it is far less extreme than Example A's 0.9999).
+	      Top 5 edges by influence:
+	        1. Events->Orders (1->0): +60.8h
+	        2. Events->Events (2->1): +53.8h
+	        3. Items->Orders (0->0): -18.4h
+	        4. Events->Orders (0->0): -18.3h
+	        5. Customers->Orders (0->0): -10.6h
+	      Notably, the SAME top relation type (Events->Orders, feeding the seed) leads
+	      here as in Example A, just via a different Events instance and roughly a
+	      quarter the magnitude (+60.8h vs. +75.2h) - the relation that matters is
+	      stable, the specific event and its weight are not.
+	      Counterfactual: order #1967, 108.6h predicted, dissimilarity 0.4128 (feat=0.290,
+	      type=0.048, edge=0.038, struct=0.038) - identical CF partner and dissimilarity
+	      numbers to the ev6 robustness check already run this session (expected: same
+	      query prefix, same model-independent dissimilarity metric), now presented as
+	      part of the full example rather than a validation aside. Orders feature diff
+	      here is small across the board (largest: total_weight +0.066) - a different,
+	      more feature-similar CF partner than Example A's last-event #1852.
+	    - Order #1812 at 14 of 15 events (explain_trace(1812, n_events=14)): predicted
+	      127h (vs. 124h at last-event). Unlike #1781, the "balanced tug-of-war" story
+	      from Example B persists here: Events[13] -37.4h and Events[1] -23.1h still pull
+	      the prediction DOWN, Items[5] +9.3h still pulls it UP - the same directional
+	      structure as the last-event snapshot, just with somewhat different magnitudes.
+	      This is the contrast with #1781: #1812's explanation is stable across the
+	      trace's final stretch, #1781's is fragile/last-event-specific.
+	      Characterization 0.8024 (up from Example B's 0.7509, still within the healthy
+	      band). Top 5 edges by influence:
+	        1. Orders->Events (0->0): -15.9h
+	        2. Events->Items (13->5): -13.1h
+	        3. Items->Orders (1->0): -12.3h
+	        4. Orders->Events (0->1): -10.5h
+	        5. Events->Items (13->0): -10.4h
+	      Same mixed-relation-type pattern as Example B (no single relation dominates), reinforcing that
+	      #1812's balanced story holds at both prefixes, not just at last-event.
+	      Counterfactual: order #1867 (same CF partner as Example B), 70.0h
+	      predicted, dissimilarity 0.6382 (feat=0.416, type=0.070, edge=0.132,
+	      struct=0.020) - close to but not identical to Example B's 0.6245, since the
+	      query graph itself differs by one event (14 vs. 15 events) even though the
+	      same CF partner is retrieved. Orders feature diff is essentially IDENTICAL to
+	      Example B's (price -0.946, n_products +0.551, n_items -0.489) - expected,
+	      since Orders/viewpoint attributes are static per case and don't change across
+	      prefixes of the same order, unlike Events-derived values.
+	    - Implementation note: explain_trace()/explain_trace_ig() now accept the same
+	      n_events convention as explain_counterfactual(), reusing _locate_test_graph()
+	      and the same _ev{n} output-directory suffix so partial-prefix runs never
+	      overwrite the last-event directories used by Examples A/B.
+
+	  Artifacts: files/explainer_outputs/order_management/order_1781/,
+	  order_1781_cf/, order_1812/, order_1812_cf/ (LOO plots, feature-attribution plots +
+	  per-trace node-type x feature-dim heatmap via explain_trace_ig(), top_nodes_per_type.csv
+	  (per-type top-3 LOO breakdown, new), and counterfactual comparison plot + dissimilarity
+	  breakdown chart/CSV for both orders, now also including cf_orders_feature_diff.png
+	  (new, 2026-07-06 - viewpoint node's own feature values, query vs. CF, sorted by
+	  |delta|) alongside the existing cf_event_type_diff.png). Aggregate LOO
+	  (n=50): files/explainer_outputs/order_management/aggregate/ (aggregate_node_type_
+	  importance.png, aggregate_feat_importance_Orders.png, aggregate_metrics.csv). Aggregate
+	  depth-stratified heatmap (Orders + Events) at
+	  files/explainer_outputs/order_management/attribution/ig_depth_heatmap_{orders,events}_
+	  {method}.png. Example C (logistics mid-trace CF):
+	  files/explainer_outputs/logistics/order_865_ev33_cf/, generated by
+	  pipeline_1000_logistics_cf.py (repo root). Example D (non-final-prefix full
+	  treatment): order_1781_ev6/, order_1781_ev6_cf/, order_1812_ev14/,
+	  order_1812_ev14_cf/.
+
+5) Limitations / future work (short closing note)
+	- Employees zero-attribution mechanism (order_management/PayOrder) - identified, not yet
+	  root-caused
+	- logistics: Forklift/HandlingUnit/Truck node types unreachable under the old sweep
+	  (num_layers=1) - fixed in sweep() going forward, existing checkpoint not yet re-swept
+	- Binary classification path intentionally left half-migrated / out of scope for this thesis

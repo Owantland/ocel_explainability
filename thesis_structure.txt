@@ -1,0 +1,60 @@
+Introduction
+	* Explain OCELS and Predictive process monitoring
+	* Explain graphs, heterogeneous graphs, and their use for preserving OCEL shapes and information
+	* Explain how Graph Neural Networks leverage the graph shape to obtain more information for use in proper predictions
+	* Explain how Graph Neural Networks, although good, are normally treated as black boxes which can hinder their adoption
+	* Explain the purpose of the thesis: Providing an overview of explainability methods available for predictive process monitoring making sure to note the difficulty of obtaining proper heterogeneous implementations. Explain the three explainability methods chosen for the project:
+		-- LOO - Perturbation analysis: assesses the significance of individual input features or components by systematically removing or altering them and observing the impact on the model’s predictions.
+		-- Counterfactual explanation: demonstrate which changes are needed in the factual input to achieve a different output prediction
+		-- Feature attribution with integrated gradients
+	All of this probably also encompasses Related Works
+Dataset
+	Preliminaries
+		Explain the essential components of the OCEL
+		Definitions
+			Single-ID Event Log
+			KPI Function
+				Examples: Remaining Time, Event occurrence
+			Prediction Problem on Single-id Event Logs
+		Provide an example of a single trace
+		Object Centric Event Log
+			Explanation
+			Example
+			Definition of the OCEL
+		Predictive analytics in object-centric processes
+			Explain how the graph structure is maintained
+			Graph Based Neural Networks
+		Explanation of process predictions
+			Give a rundown of existing explainability methods
+			Provide a rundown of explainability methods for graphs
+			Explain how these methods exist but are not properly implemented for heterogeneous graphs as most are focused on homogeneous structures.
+	Order Management and Logistics datasets
+		Explain what the OCEL 2.0 standard is and how these datasets are organized
+		Give a general idea of what each dataset is meant to represent and make sure to say that they're both synthetic representations used for predictive process monitoring tasks
+	Probably here we have to provide more information on how the dataset was processed. 
+		* Explain how SQL queries were used and generalized to take advantage of the 2.0 standard to ensure they could be run on any standard data set
+		* Explain the basic ideas behind OCELs
+			- How the OCEL is generated using the objects and events described in the original dataset
+			- How arcs between objects can be expressed directly in the dataset (such as object to object) or can be inferred (such as event to event)
+			- Explain what attributes are chosen and which are generated to provide more information to the training model
+			- Explain the choice to standardize both features and output to mitigate the effect of distinctly different sized values
+			- Explain that the en result of the graph transformation is a series of graph prefixes as opposed to a global schema of all events occurring at the same time although that could be future work
+Models
+	For this part we probably have to describe the entire modelling process
+	Discuss how the train/test split was performed ensuring temporal distinction between each set
+	Discuss how the Graph Neural Network model was chosen and explain that a sweep was performed for each regression type to ensure that the model was working on the best hyperparameters.
+	Discuss how the training and validation process was performed, noting the optimizer and loss function chosen. 
+	Explain the design of the explainability layer of the model:
+		Explain how LOO was chosen as a model agnostic perturbation method to easily identify the important elements of the graph
+		Explain how Feature attribution with integrated gradients was chosen as a way to complement LOO, providing a deeper insight into the features that drive the important elements highlighted
+		Explain how the Counterfactual explanation provides a structural analysis aimed explicitly at the end user which can help answer a common question such as "What can be done to bring process X more in line with process Y which took less time to finish?"
+Results
+	Show a comparison against homogeneous models trained on the data or a different heterogeneous model to validate that the chosen representation is correct.
+	Show the final loss values for the model applied to the different KPIs chosen
+	Show an example of the aggregate explainability layer for LOO and Feature attribution:
+		Showcase the structural elements most important for the test set and a heatmap of the important attributes in the most important nodes to highlight what's driving the prediction
+	Show an example of the counterfactual analysis answering a real world question such as "Why did trace X take longer to go from PlaceOrder to PackageDelivered than trace Y?"
+
+Conclusion
+	Talk about the model values - where they high or low MAE? If so, explain what may be driving either result.
+	Talk about the possibilities provided by explainability methods. What can the current implementation provide to the end user and what more can be done? Ensure that the explanation notes that while using more established frameworks like GNNExplainer of PGExplainer would be ideal there is currently no proper implementation for our setup and as such were outside the scope of the research.
