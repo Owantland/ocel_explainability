@@ -731,23 +731,19 @@ class Explainer(Modelling):
         plt.savefig(save_path, dpi=150)
         plt.close()
 
-    def explain_trace(self, order_id, top_k=5, save_dir=None):
-        """Full LOO explanation for a single order trace (last-event snapshot)."""
+    def explain_trace(self, order_id, top_k=5, save_dir=None, n_events=None):
+        """Full LOO explanation for a single order trace. n_events=None (default)
+        explains the order's last recorded prefix; an int explains the prefix with
+        exactly that many Events nodes, matching explain_counterfactual()'s convention."""
         if save_dir is None:
-            save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}")
+            suffix = f"_ev{n_events}" if n_events is not None else ""
+            save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}{suffix}")
         os.makedirs(save_dir, exist_ok=True)
 
         self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
         self.model.eval()
 
-        explain_subgraph = None
-        for g in self.test_data:
-            if (g[self.viewpoint_object]['last_event'][0].item()
-                    and g[self.viewpoint_object]['id'][0].item() == order_id):
-                explain_subgraph = g
-                break
-        if explain_subgraph is None:
-            raise ValueError(f"Order ID {order_id} with last_event=True not found in test data.")
+        explain_subgraph = self._locate_test_graph(order_id, n_events)
 
         (node_importances, edge_importances,
          seed_feats, top_neighbor_feats, baseline_value) = self.reg_explanation(
@@ -860,30 +856,30 @@ class Explainer(Modelling):
         }
 
     def explain_trace_ig(self, order_id, methods=('InputXGradient', 'IntegratedGradients'),
-                         save_dir=None):
-        """Single-trace gradient-based feature attribution for one order (last-event
-        snapshot) — the per-order analogue of explain_feature_attribution()'s aggregate
-        computation, using the same _compute_attribution_for_graph() helper and the same
-        bar-chart style, just for one graph instead of averaged across the test set."""
+                         save_dir=None, n_events=None, top_k_display=10):
+        """Single-trace gradient-based feature attribution for one order — the
+        per-order analogue of explain_feature_attribution()'s aggregate computation,
+        using the same _compute_attribution_for_graph() helper and the same bar-chart
+        style, just for one graph instead of averaged across the test set. n_events=None
+        (default) explains the order's last recorded prefix; an int explains the prefix
+        with exactly that many Events nodes, matching explain_counterfactual()'s
+        convention. top_k_display caps the number of features shown on each bar
+        chart's Y axis (node types like Events/Customers have far more feature
+        dimensions than are readable on one axis; this only affects the plot, not
+        the full per-feature CSV, which still records every dimension)."""
         import numpy as np
         import pandas as pd
         from matplotlib.patches import Patch
 
         if save_dir is None:
-            save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}")
+            suffix = f"_ev{n_events}" if n_events is not None else ""
+            save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}{suffix}")
         os.makedirs(save_dir, exist_ok=True)
 
         self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
         self.model.eval()
 
-        explain_subgraph = None
-        for g in self.test_data:
-            if (g[self.viewpoint_object]['last_event'][0].item()
-                    and g[self.viewpoint_object]['id'][0].item() == order_id):
-                explain_subgraph = g
-                break
-        if explain_subgraph is None:
-            raise ValueError(f"Order ID {order_id} with last_event=True not found in test data.")
+        explain_subgraph = self._locate_test_graph(order_id, n_events)
 
         print(f"\n{'='*60}")
         print(f"Feature attribution for {self.viewpoint_object} #{order_id}")
@@ -914,10 +910,10 @@ class Explainer(Modelling):
                 scores_sgn = mean_signed[nt]
                 fnames = self.feature_names.get(nt, [f"feat_{j}" for j in range(len(scores_abs))])
                 labels = [fnames[j] if j < len(fnames) else f"feat_{j}" for j in range(len(scores_abs))]
-                order = np.argsort(scores_abs)[::-1]
+                order = np.argsort(scores_abs)[::-1][:top_k_display]
                 colors = ['#4C72B0' if scores_sgn[j] >= 0 else '#DD8452' for j in order]
 
-                fig, ax = plt.subplots(figsize=(max(6, len(scores_abs) * 0.45 + 2), 4))
+                fig, ax = plt.subplots(figsize=(max(6, len(order) * 0.45 + 2), 4))
                 ax.barh([labels[j] for j in order], scores_abs[order], color=colors, alpha=0.85)
                 ax.set_xlabel(f"|{method}| attribution")
                 ax.set_title(f"Feature attribution — {nt} nodes ({method}), order #{order_id}")
@@ -978,10 +974,14 @@ class Explainer(Modelling):
         feat_shifts = defaultdict(lambda: defaultdict(list))
         all_metrics = []
 
+        n_failed = 0
         for g in sample:
             try:
                 (node_imp, edge_imp, seed_feats, _, _) = self.reg_explanation(g, 0, None, top_k)
-            except Exception:
+            except Exception as ex:
+                n_failed += 1
+                oid = g[self.viewpoint_object]['id'][0].item() if self.viewpoint_object in g.node_types else '?'
+                print(f"  [trace failed] order={oid}: {type(ex).__name__}: {ex}")
                 continue
 
             for nt, idx, shift, _, _ in node_imp:
@@ -1345,6 +1345,8 @@ class Explainer(Modelling):
                                        results[0]['predicted_hours'], save_dir)
         self._plot_cf_event_type_diff(query_graph, results[0]['graph'], order_id,
                                       results[0]['order_id'], save_dir)
+        self._plot_cf_viewpoint_feature_diff(query_graph, results[0]['graph'], order_id,
+                                             results[0]['order_id'], save_dir)
 
         import pandas as pd
         pd.DataFrame([
@@ -1507,20 +1509,61 @@ class Explainer(Modelling):
             counts[type_names[i]] += 1
         return counts
 
+    def _decode_event_types_with_indices(self, graph):
+        """Same decoding as _decode_event_types(), but returns the Events node
+        INDICES belonging to each activity type instead of just counts -- needed to
+        zero the right rows for a group-LOO ablation of a specific activity type."""
+        from collections import defaultdict
+        idx_by_type = defaultdict(list)
+        if 'Events' not in graph.node_types or graph['Events'].x.size(0) == 0:
+            return idx_by_type
+        fnames = self.feature_names.get('Events', [])
+        n_types = fnames.index('elapsed_h') if 'elapsed_h' in fnames else 0
+        if n_types == 0:
+            return idx_by_type
+        type_names = fnames[:n_types]
+        type_idx = graph['Events'].x[:, :n_types].argmax(dim=1)
+        for node_idx, t in enumerate(type_idx.tolist()):
+            idx_by_type[type_names[t]].append(node_idx)
+        return idx_by_type
+
     def _plot_cf_event_type_diff(self, query_graph, cf_graph, query_id, cf_id, save_dir):
         """Table of Events activity types whose count DIFFERS between query and
         counterfactual -- types both graphs agree on are omitted entirely. Complements
         _plot_cf_node_comparison (which only compares the total Events COUNT) by
         showing which specific activities differ -- e.g. a PaymentReminder present
         in one graph but absent in the other, even when both graphs have the same
-        total number of events."""
+        total number of events.
+
+        Also reports, per differing activity type, the LOO predicted-value shift
+        from zeroing ONLY that type's one-hot activity-flag feature (not the whole
+        node -- feature-level LOO, same mechanism as
+        reg_feature_importance_for_node_in_graph(), narrowed to a single named
+        feature) across every Events node of that type in the QUERY graph. This is
+        deliberately narrower than a whole-node ablation: per the interaction-effect
+        finding for order #1781 (whole-node shift +233.13h vs. the one-hot feature
+        alone contributing +87.82h, only ~38%), the one-hot-only number isolates
+        "how much does the model rely on knowing THIS SPECIFIC activity happened"
+        from the rest of that node's features (elapsed_h, waiting_h, C3 counts,
+        etc.), which the whole-node number conflates together. Only computable for
+        types present in the query graph (nothing to zero out otherwise); rows for
+        types absent from the query show a placeholder, not a fabricated 0.0.
+
+        Loads model weights explicitly (like explain_trace()/explain_gnn_subgraph())
+        rather than assuming the caller already did -- this method now runs its own
+        predictions (the group-ablation shift), not just displaying precomputed
+        values, so it can't silently run on an untrained/default-init model the way
+        a pure display function safely could."""
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
         counts_q = self._decode_event_types(query_graph)
         counts_cf = self._decode_event_types(cf_graph)
         all_types = sorted(set(counts_q) | set(counts_cf))
         differing = [t for t in all_types if counts_q.get(t, 0) != counts_cf.get(t, 0)]
 
-        col_labels = ["Activity", f"Query (#{query_id})", f"CF (#{cf_id})", "Δ"]
-        header_colors = ["#EAEAEA", "#4C72B0", "#DD8452", "#EAEAEA"]
+        col_labels = ["Activity", f"Query (#{query_id})", f"CF (#{cf_id})", "Δ", "LOO one-hot Δpred (h)"]
+        header_colors = ["#EAEAEA", "#4C72B0", "#DD8452", "#EAEAEA", "#EAEAEA"]
 
         if not differing:
             fig, ax = plt.subplots(figsize=(6, 1.6))
@@ -1530,12 +1573,34 @@ class Explainer(Modelling):
             ax.text(0.5, 0.5, "No activity-type differences", ha='center', va='center',
                     fontsize=10, transform=ax.transAxes)
         else:
+            query_idx_by_type = self._decode_event_types_with_indices(query_graph)
+            fnames = self.feature_names.get('Events', [])
+            n_types = fnames.index('elapsed_h') if 'elapsed_h' in fnames else 0
+            type_names = fnames[:n_types]
+            baseline_value = self._predict_value_for_graph(query_graph, 0)
+            large_shift_threshold = self.target_std.item()
+
             rows = []
+            shifts = []
             for t in differing:
                 qv, cv = counts_q.get(t, 0), counts_cf.get(t, 0)
-                rows.append([t, str(qv), str(cv), f"{cv - qv:+d}"])
+                node_idx = query_idx_by_type.get(t, [])
+                if node_idx and t in type_names:
+                    col = type_names.index(t)
+                    perturbed = query_graph.clone()
+                    for i in node_idx:
+                        perturbed['Events'].x[i, col] = 0.0
+                    pred_perturbed = self._predict_value_for_graph(
+                        query_graph, 0, perturbed_graph=perturbed)
+                    signed_shift = baseline_value - pred_perturbed
+                    shift_str = f"{signed_shift/3600:+.2f}"
+                else:
+                    signed_shift = None
+                    shift_str = "—"
+                shifts.append(signed_shift)
+                rows.append([t, str(qv), str(cv), f"{cv - qv:+d}", shift_str])
 
-            fig, ax = plt.subplots(figsize=(7, 0.55 * len(rows) + 1.2))
+            fig, ax = plt.subplots(figsize=(8.5, 0.55 * len(rows) + 1.2))
             ax.axis('off')
             ax.set_title(f"Event-type differences: Query #{query_id} vs. CF #{cf_id}",
                          fontsize=10)
@@ -1543,6 +1608,7 @@ class Explainer(Modelling):
                               cellLoc='center')
             table.auto_set_font_size(False)
             table.set_fontsize(9)
+            table.auto_set_column_width(col=list(range(len(col_labels))))
             table.scale(1, 1.6)
 
             for col in range(len(col_labels)):
@@ -1553,12 +1619,79 @@ class Explainer(Modelling):
             for r, row in enumerate(rows, start=1):
                 delta_cell = table[r, 3]
                 delta_cell.set_text_props(color="#A5443A", weight='bold')
+                shift = shifts[r - 1]
+                shift_cell = table[r, 4]
+                if shift is not None and abs(shift) > large_shift_threshold:
+                    shift_cell.set_text_props(color="#A5443A", weight='bold')
 
         plt.tight_layout()
         plt.savefig(os.path.join(save_dir, "cf_event_type_diff.png"), dpi=150,
                     bbox_inches='tight')
         plt.close()
+
+        if differing:
+            import pandas as pd
+            diff_table = pd.DataFrame([
+                {'activity': t, 'query_count': counts_q.get(t, 0), 'cf_count': counts_cf.get(t, 0),
+                 'delta': counts_cf.get(t, 0) - counts_q.get(t, 0),
+                 'query_loo_onehot_shift_hours': (shifts[i] / 3600.0) if shifts[i] is not None else None}
+                for i, t in enumerate(differing)
+            ])
+            print(f"\nEvent-type differences: Query #{query_id} vs. CF #{cf_id}")
+            print(diff_table.to_string(index=False))
+            diff_table.to_csv(os.path.join(save_dir, "cf_event_type_diff.csv"), index=False)
+
         print(f"Saved CF event-type diff to {save_dir}")
+
+    def _plot_cf_viewpoint_feature_diff(self, query_graph, cf_graph, query_id, cf_id, save_dir):
+        """Table of the viewpoint (seed) node's own feature values, query vs.
+        counterfactual, sorted by |delta| descending. Complements
+        _plot_cf_event_type_diff (which only covers Events activity types) by
+        showing differences in the query/CF order's OWN attributes (price,
+        n_packages, etc.) -- values are the raw z-score-normalized features stored
+        in the graph tensors, consistent with how every other feature value is
+        displayed elsewhere in this file (e.g. explain_trace()'s printed feature
+        values); not denormalized back to raw units."""
+        vp = self.viewpoint_object
+        names = self.feature_names.get(vp, [])
+        q_feats = query_graph[vp].x[0]
+        cf_feats = cf_graph[vp].x[0]
+
+        rows = []
+        for f in range(q_feats.size(0)):
+            fname = names[f] if f < len(names) else f"feat_{f}"
+            qv, cv = q_feats[f].item(), cf_feats[f].item()
+            rows.append([fname, qv, cv, cv - qv])
+        rows.sort(key=lambda r: abs(r[3]), reverse=True)
+
+        col_labels = ["Feature", f"Query (#{query_id})", f"CF (#{cf_id})", "Δ"]
+        header_colors = ["#EAEAEA", "#4C72B0", "#DD8452", "#EAEAEA"]
+
+        fig, ax = plt.subplots(figsize=(7, 0.55 * len(rows) + 1.2))
+        ax.axis('off')
+        ax.set_title(f"{vp} feature differences: Query #{query_id} vs. CF #{cf_id}",
+                     fontsize=10)
+        cell_text = [[fname, f"{qv:.3f}", f"{cv:.3f}", f"{delta:+.3f}"]
+                     for fname, qv, cv, delta in rows]
+        table = ax.table(cellText=cell_text, colLabels=col_labels, loc='center',
+                          cellLoc='center')
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1, 1.6)
+
+        for col in range(len(col_labels)):
+            header_cell = table[0, col]
+            header_cell.set_facecolor(header_colors[col])
+            header_cell.set_text_props(weight='bold',
+                                       color='white' if col in (1, 2) else 'black')
+        for r in range(1, len(cell_text) + 1):
+            table[r, 3].set_text_props(color="#A5443A", weight='bold')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, f"cf_{vp.lower()}_feature_diff.png"), dpi=150,
+                    bbox_inches='tight')
+        plt.close()
+        print(f"Saved CF {vp} feature diff to {save_dir}")
 
     # ── Feature attribution (PyG Explainer + CaptumExplainer) ───────────────────
     # Verified against the previous hand-rolled `captum.attr.InputXGradient(forward_func)`
@@ -2130,6 +2263,358 @@ class Explainer(Modelling):
             "node_mask_dict": node_mask_dict,
             "edge_mask_dict": edge_mask_dict,
             "save_dir": save_dir,
+        }
+
+    def compare_loo_gnn_importance(self, order_id, top_k=5, n_events=None,
+                                   epochs=200, lr=0.01, save_dir=None):
+        """Compare which NODE instances LOO (reg_explanation, signed prediction-shift
+        ablation) and GNNExplainer (learned soft attribution mask) each flag as most
+        important for a single trace's prediction.
+
+        Node importance only -- edge importance is intentionally excluded from this
+        comparison. GNNExplainer's edge masks are disabled for this architecture
+        (see _get_gnn_explainer's docstring: HGTConv fuses all relations into one
+        MessagePassing call, so PyG's set_hetero_masks has nothing to patch), and the
+        separate experimental edge-importance path below reweights post-softmax
+        attention rather than performing a true ablation -- explicitly documented
+        there as not comparable to LOO's edge ranking. Comparing node importance,
+        where both methods are on solid footing, avoids that problem entirely.
+
+        IMPORTANT SCALE CAVEAT: LOO's score is a signed shift in the model's actual
+        predicted output (seconds/hours) -- removing this node changes the prediction
+        by this much. GNNExplainer's score is an unsupervised soft attribution weight
+        in [0, 1] with no such physical interpretation. The two are NOT comparable in
+        magnitude -- only in RANK (which nodes each method considers most important).
+        This method reports both raw scores for reference but the actual comparison
+        is the top-k overlap/rank table, not a magnitude diff.
+
+        Reuses explain_trace() and explain_gnn_subgraph() as-is (including their own
+        printed output and saved plots) rather than re-deriving LOO/GNNExplainer from
+        scratch -- this method's only new logic is aggregating GNNExplainer's
+        per-(node, feature) mask down to one score per node INSTANCE (existing code
+        only ever aggregates to per-node-TYPE or per-feature, never per-instance) and
+        building the comparison table.
+        """
+        if save_dir is None:
+            suffix = f"_ev{n_events}" if n_events is not None else ""
+            save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}{suffix}_loo_gnn")
+        os.makedirs(save_dir, exist_ok=True)
+
+        loo_result = self.explain_trace(order_id, top_k=top_k, n_events=n_events)
+        gnn_result = self.explain_gnn_subgraph(order_id, epochs=epochs, lr=lr,
+                                               top_k=top_k, n_events=n_events)
+
+        import numpy as np
+        import pandas as pd
+
+        # LOO: already a ranked list of (node_type, node_idx, shift, large, signed_shift)
+        loo_ranked = loo_result['node_importances']
+        loo_rank_map = {(nt, idx): (rank, signed_shift / 3600.0)
+                        for rank, (nt, idx, shift, large, signed_shift) in enumerate(loo_ranked, 1)}
+        loo_top_keys = [(nt, idx) for nt, idx, *_ in loo_ranked[:top_k]]
+
+        # GNNExplainer: aggregate node_mask_dict[nt] ([n_nodes, n_feats]) down to one
+        # score per node INSTANCE (mean |mask| across that node's own features) --
+        # the new piece of logic this method adds; existing code never does this.
+        gnn_scores = []
+        for nt, mask in gnn_result['node_mask_dict'].items():
+            per_node = np.abs(mask).mean(axis=1)
+            for idx, val in enumerate(per_node):
+                gnn_scores.append((nt, idx, float(val)))
+        gnn_scores.sort(key=lambda r: r[2], reverse=True)
+        gnn_rank_map = {(nt, idx): (rank, val) for rank, (nt, idx, val) in enumerate(gnn_scores, 1)}
+        gnn_top_keys = [(nt, idx) for nt, idx, val in gnn_scores[:top_k]]
+
+        loo_top_set, gnn_top_set = set(loo_top_keys), set(gnn_top_keys)
+        overlap = loo_top_set & gnn_top_set
+
+        # Union order: LOO's top-k first (in LOO rank order), then any GNNExplainer
+        # top-k nodes not already included (in GNNExplainer rank order).
+        union_keys = list(loo_top_keys) + [k for k in gnn_top_keys if k not in loo_top_set]
+
+        rows = []
+        for nt, idx in union_keys:
+            loo_rank, loo_shift = loo_rank_map.get((nt, idx), (None, None))
+            gnn_rank, gnn_score = gnn_rank_map.get((nt, idx), (None, None))
+            rows.append({
+                'node': f"{nt}[{idx}]",
+                'loo_rank': loo_rank if loo_rank is not None else None,
+                'loo_signed_shift_hours': loo_shift,
+                'gnn_rank': gnn_rank if gnn_rank is not None else None,
+                'gnn_score': gnn_score,
+                'in_both_top_k': (nt, idx) in overlap,
+            })
+        table = pd.DataFrame(rows)
+
+        print(f"\n{'='*60}")
+        print(f"LOO vs. GNNExplainer node-importance comparison for "
+              f"{self.viewpoint_object} #{order_id}")
+        print(f"  {len(overlap)} of top-{top_k} nodes agree between methods")
+        print(f"  NOTE: LOO shift (hours) and GNNExplainer score ([0,1] soft mask) are "
+              f"on different scales -- compare RANK/overlap, not magnitude.")
+        print(table.to_string(index=False))
+
+        csv_path = os.path.join(save_dir, "loo_gnn_node_comparison.csv")
+        table.to_csv(csv_path, index=False)
+
+        # Styled table image, matching the house style established by
+        # _plot_cf_event_type_diff / _plot_cf_viewpoint_feature_diff.
+        col_labels = ["Node", "LOO rank", "LOO shift (h)", "GNNExp. rank", "GNNExp. score", "Both top-k?"]
+        header_colors = ["#EAEAEA", "#4C72B0", "#4C72B0", "#DD8452", "#DD8452", "#EAEAEA"]
+        cell_text = []
+        for r in rows:
+            cell_text.append([
+                r['node'],
+                str(r['loo_rank']) if r['loo_rank'] is not None else "—",
+                f"{r['loo_signed_shift_hours']:+.2f}" if r['loo_signed_shift_hours'] is not None else "—",
+                str(r['gnn_rank']) if r['gnn_rank'] is not None else "—",
+                f"{r['gnn_score']:.4f}" if r['gnn_score'] is not None else "—",
+                "✓" if r['in_both_top_k'] else "",
+            ])
+
+        fig, ax = plt.subplots(figsize=(9, 0.55 * len(rows) + 1.4))
+        ax.axis('off')
+        ax.set_title(f"LOO vs. GNNExplainer node importance: {self.viewpoint_object} #{order_id}  "
+                     f"({len(overlap)}/{top_k} agree)", fontsize=10)
+        gtable = ax.table(cellText=cell_text, colLabels=col_labels, loc='center', cellLoc='center')
+        gtable.auto_set_font_size(False)
+        gtable.set_fontsize(9)
+        gtable.scale(1, 1.6)
+        for col in range(len(col_labels)):
+            hc = gtable[0, col]
+            hc.set_facecolor(header_colors[col])
+            hc.set_text_props(weight='bold', color='white' if col in (1, 2, 3, 4) else 'black')
+        for r_idx, r in enumerate(rows, start=1):
+            if r['in_both_top_k']:
+                gtable[r_idx, 5].set_text_props(color="#2E7D32", weight='bold')
+
+        plt.tight_layout()
+        png_path = os.path.join(save_dir, "loo_gnn_node_comparison.png")
+        plt.savefig(png_path, dpi=150, bbox_inches='tight')
+        plt.close()
+
+        print(f"\nSaved {csv_path}")
+        print(f"Saved {png_path}")
+        print('=' * 60)
+
+        return {
+            'order_id': order_id,
+            'table': table,
+            'overlap_count': len(overlap),
+            'save_dir': save_dir,
+        }
+
+    def compare_loo_gnn_importance_aggregate(self, n_traces=235, top_k=5, epochs=200,
+                                             lr=0.01, save_dir=None):
+        """Aggregate version of compare_loo_gnn_importance(): for each of the first
+        n_traces last-event test graphs (same deterministic sampling as
+        explain_aggregate(), so both cover the identical trace set), compute the
+        top-k node-instance overlap between LOO and GNNExplainer, then report the
+        mean/std overlap rate and its full distribution across traces.
+
+        Uses the LOWER-LEVEL primitives directly (reg_explanation(), and a raw
+        _get_gnn_explainer() call mirroring explain_gnn_subgraph()'s internals)
+        rather than looping the full compare_loo_gnn_importance()/explain_trace()/
+        explain_gnn_subgraph() wrappers, which each save ~15+ plot files per trace
+        -- looping those 235 times would produce thousands of redundant files and
+        be needlessly slow. This mirrors how explain_aggregate() itself avoids
+        explain_trace()'s heavy wrapper for the same reason.
+
+        Node importance only, same scope as the single-trace version (edge
+        importance is out of scope -- see compare_loo_gnn_importance's docstring
+        for why). Failures are logged, not silently swallowed."""
+        import numpy as np
+        import pandas as pd
+
+        if save_dir is None:
+            save_dir = os.path.join(self.path_dict['explainer_path'], "aggregate_loo_gnn")
+        os.makedirs(save_dir, exist_ok=True)
+
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        last_event_graphs = [g for g in self.test_data
+                             if g[self.viewpoint_object]['last_event'][0].item()]
+        sample = last_event_graphs[:n_traces]
+        print(f"Running aggregate LOO-vs-GNNExplainer comparison on {len(sample)} traces…")
+
+        gnn_explainer = self._get_gnn_explainer(epochs, lr)
+
+        from collections import defaultdict
+        type_loo_shifts = defaultdict(list)
+        type_gnn_scores = defaultdict(list)
+
+        rows = []
+        n_failed = 0
+        n_skipped_empty_edges = 0
+        for g in sample:
+            oid = g[self.viewpoint_object]['id'][0].item()
+            n_nodes = sum(g[nt].x.size(0) for nt in g.node_types)
+
+            # PyG's GNNExplainer._initialize_masks() calls indices.max() on each
+            # relation's edge_index unconditionally, which raises on an EMPTY
+            # edge_index (not every trace touches every relation -- e.g. a Customer
+            # with no directly-linked Employees is common and legitimate). This is
+            # a PyG library limitation, not fixable from here -- skip explicitly
+            # with a clear reason rather than letting it surface as a generic
+            # RuntimeError caught by the except block below.
+            empty_etypes = [et for et in g.edge_types if g[et].edge_index.size(1) == 0]
+            if empty_etypes:
+                n_skipped_empty_edges += 1
+                print(f"  [trace skipped] order={oid}: {len(empty_etypes)} edge type(s) with "
+                      f"zero edges (e.g. {empty_etypes[0]}) -- GNNExplainer can't initialize "
+                      f"masks for an empty relation (PyG limitation, not a code bug)")
+                continue
+
+            try:
+                node_imp, _, _, _, _ = self.reg_explanation(g, 0, None, top_k)
+                loo_top = {(nt, idx) for nt, idx, *_ in node_imp[:top_k]}
+                # Per-type LOO magnitude, ALL nodes not just top-k -- matches
+                # explain_aggregate()'s own convention (abs shift, not signed: signed
+                # shifts from different traces would partly cancel out in a type-level
+                # mean, which is why explain_aggregate() uses magnitude too).
+                for nt, idx, shift, _, _ in node_imp:
+                    type_loo_shifts[nt].append(shift / 3600.0)
+
+                x_dict = {nt: g[nt].x for nt in g.node_types}
+                explanation = gnn_explainer(x_dict, g.edge_index_dict, index=0)
+                node_mask_dict = {nt: explanation.node_mask_dict[nt].detach().cpu().numpy()
+                                  for nt in g.node_types if nt in explanation.node_mask_dict}
+                gnn_scores = []
+                for nt, mask in node_mask_dict.items():
+                    per_node = np.abs(mask).mean(axis=1)
+                    for idx, val in enumerate(per_node):
+                        gnn_scores.append((nt, idx, float(val)))
+                        type_gnn_scores[nt].append(float(val))
+                gnn_scores.sort(key=lambda r: r[2], reverse=True)
+                gnn_top = {(nt, idx) for nt, idx, val in gnn_scores[:top_k]}
+
+                overlap = len(loo_top & gnn_top)
+                rows.append({'order_id': int(oid), 'n_nodes': n_nodes, 'overlap': overlap})
+            except Exception as ex:
+                n_failed += 1
+                print(f"  [trace failed] order={oid}: {type(ex).__name__}: {ex}")
+                continue
+
+        table = pd.DataFrame(rows)
+        csv_path = os.path.join(save_dir, "aggregate_loo_gnn_overlap.csv")
+        table.to_csv(csv_path, index=False)
+
+        overlaps = table['overlap'].values
+        mean_overlap = overlaps.mean()
+        std_overlap = overlaps.std()
+
+        print(f"\nAggregate LOO-vs-GNNExplainer overlap (n={len(table)} traces, "
+              f"{n_skipped_empty_edges} skipped [empty edge type], "
+              f"{n_failed} failed [other], top_k={top_k}):")
+        print(f"  Mean overlap: {mean_overlap:.2f}/{top_k}  (σ={std_overlap:.2f})")
+        counts = table['overlap'].value_counts().sort_index()
+        for k in range(top_k + 1):
+            print(f"  {k}/{top_k} agree: {counts.get(k, 0)} traces "
+                  f"({100*counts.get(k, 0)/len(table):.1f}%)")
+
+        # Distribution chart -- palette.md sequential blue, matching this session's
+        # established chart conventions.
+        import matplotlib.pyplot as plt
+        dist = [int((table['overlap'] == k).sum()) for k in range(top_k + 1)]
+        fig, ax = plt.subplots(figsize=(7, 4.5), facecolor='#fcfcfb')
+        ax.set_facecolor('#fcfcfb')
+        bars = ax.bar(range(top_k + 1), dist, color='#2a78d6', alpha=0.9, width=0.6)
+        for bar, v in zip(bars, dist):
+            if v > 0:
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(dist)*0.01,
+                        str(v), ha='center', va='bottom', fontsize=9, color='#0b0b0b')
+        ax.set_xticks(range(top_k + 1))
+        ax.set_xlabel(f"Nodes agreeing (out of top-{top_k})")
+        ax.set_ylabel("Number of traces")
+        ax.set_title(f"LOO vs. GNNExplainer top-{top_k} node overlap "
+                     f"(n={len(table)} traces, mean={mean_overlap:.2f}/{top_k})",
+                     fontsize=11, loc='left')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.grid(axis='y', color='#e1e0d9', linewidth=1, zorder=0)
+        ax.set_axisbelow(True)
+        plt.tight_layout()
+        png_path = os.path.join(save_dir, "aggregate_loo_gnn_overlap_distribution.png")
+        plt.savefig(png_path, dpi=150, bbox_inches='tight')
+        plt.close()
+
+        print(f"\nSaved {csv_path}")
+        print(f"Saved {png_path}")
+
+        # ── Top-5 node TYPES by aggregate GNNExplainer importance, with LOO's
+        # aggregate magnitude alongside -- node INSTANCES aren't comparable across
+        # traces (Events[13] means something different in every graph), so this
+        # aggregates at the type level, same granularity as
+        # explain_aggregate()'s aggregate_node_type_importance.png, but bringing
+        # GNNExplainer alongside LOO in one table/figure like the single-trace
+        # compare_loo_gnn_importance() table does.
+        type_gnn_mean = {nt: (sum(v) / len(v)) for nt, v in type_gnn_scores.items() if v}
+        type_loo_mean = {nt: (sum(v) / len(v)) for nt, v in type_loo_shifts.items() if v}
+        gnn_ranked_types = sorted(type_gnn_mean, key=lambda nt: type_gnn_mean[nt], reverse=True)[:top_k]
+        loo_ranked_types = sorted(type_loo_mean, key=lambda nt: type_loo_mean[nt], reverse=True)
+        loo_rank_of = {nt: r for r, nt in enumerate(loo_ranked_types, 1)}
+
+        type_rows = []
+        for rank, nt in enumerate(gnn_ranked_types, 1):
+            type_rows.append({
+                'node_type': nt,
+                'gnn_rank': rank,
+                'gnn_mean_score': type_gnn_mean[nt],
+                'loo_rank': loo_rank_of.get(nt),
+                'loo_mean_abs_shift_hours': type_loo_mean.get(nt),
+            })
+        type_table = pd.DataFrame(type_rows)
+        type_csv_path = os.path.join(save_dir, "aggregate_loo_gnn_by_type.csv")
+        type_table.to_csv(type_csv_path, index=False)
+
+        print(f"\nTop {top_k} node types by aggregate GNNExplainer importance "
+              f"(n={len(table)} traces):")
+        print(type_table.to_string(index=False))
+
+        col_labels = ["Node type", "GNNExp. rank", "GNNExp. mean score",
+                      "LOO rank", "LOO mean |shift| (h)"]
+        header_colors = ["#EAEAEA", "#DD8452", "#DD8452", "#4C72B0", "#4C72B0"]
+        cell_text = [[
+            r['node_type'], str(r['gnn_rank']), f"{r['gnn_mean_score']:.4f}",
+            str(r['loo_rank']) if r['loo_rank'] is not None else "—",
+            f"{r['loo_mean_abs_shift_hours']:.2f}" if r['loo_mean_abs_shift_hours'] is not None else "—",
+        ] for r in type_rows]
+
+        fig, ax = plt.subplots(figsize=(8.5, 0.55 * len(type_rows) + 1.4))
+        ax.axis('off')
+        ax.set_title(f"Top {top_k} node types by aggregate GNNExplainer importance, "
+                     f"with LOO's aggregate shift (n={len(table)} traces)", fontsize=10)
+        ttable = ax.table(cellText=cell_text, colLabels=col_labels, loc='center', cellLoc='center')
+        ttable.auto_set_font_size(False)
+        ttable.set_fontsize(9)
+        ttable.auto_set_column_width(col=list(range(len(col_labels))))
+        ttable.scale(1, 1.6)
+        for col in range(len(col_labels)):
+            hc = ttable[0, col]
+            hc.set_facecolor(header_colors[col])
+            hc.set_text_props(weight='bold', color='white' if col in (1, 2, 3, 4) else 'black')
+        for r_idx, r in enumerate(type_rows, start=1):
+            if r['loo_rank'] is not None and r['loo_rank'] <= top_k:
+                ttable[r_idx, 3].set_text_props(color="#2E7D32", weight='bold')
+                ttable[r_idx, 4].set_text_props(color="#2E7D32", weight='bold')
+
+        plt.tight_layout()
+        type_png_path = os.path.join(save_dir, "aggregate_loo_gnn_by_type.png")
+        plt.savefig(type_png_path, dpi=150, bbox_inches='tight')
+        plt.close()
+
+        print(f"Saved {type_csv_path}")
+        print(f"Saved {type_png_path}")
+
+        return {
+            'table': table,
+            'type_table': type_table,
+            'mean_overlap': mean_overlap,
+            'std_overlap': std_overlap,
+            'n_failed': n_failed,
+            'n_skipped_empty_edges': n_skipped_empty_edges,
+            'save_dir': save_dir,
         }
 
     # ── EXPERIMENTAL: real edge importance via GNNExplainer + HGTConv ───────────

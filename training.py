@@ -68,7 +68,10 @@ class Modelling:
                     g[self.viewpoint_object].y = (g[self.viewpoint_object].y - target_mean) / target_std
 
             # Print out the Mean and STD of the chosen regression database
-            print(f"Mean (hours): {round(target_mean.item() / 3600)}, STD (hours): {round(target_std.item() / 3600)}")
+            print(f"Training-set target normalization stats -- Mean (hours): "
+                  f"{round(target_mean.item() / 3600)}, STD (hours): {round(target_std.item() / 3600)} "
+                  f"(used to z-normalize the remaining-time target and as the '>1 std = large shift' "
+                  f"threshold in LOO; not a validation/error metric)")
             self.target_mean, self.target_std = target_mean.to(self.device), target_std.to(self.device)
 
         # Classifier

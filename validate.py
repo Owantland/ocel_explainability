@@ -62,7 +62,8 @@ def metrics(subset, label):
     print(f"  RMSE : {rmse_:.1f} h")
     print(f"  R²   : {r2_:.3f}")
     print(f"  Mean true remaining : {subset['true_h'].mean():.1f} h  "
-          f"(std={subset['true_h'].std():.1f} h)")
+          f"(std={subset['true_h'].std():.1f} h -- spread of the TRUE remaining-time "
+          f"values in this subset, not a model-error metric)")
     return mae_, rmse_, r2_
 
 mae_all,  rmse_all,  r2_all  = metrics(df,   "ALL prefixes")
