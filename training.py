@@ -398,17 +398,32 @@ class Modelling:
 
     def sweep(self, n_trials=None):
         """
-        Performs a training sweep to find the optimal hidden_channels/lr for this dataset.
+        Performs a training sweep to find the optimal hidden_channels/lr (and, for logistics,
+        num_layers) for this dataset.
 
-        num_layers and num_heads are fixed, not tuned (see TRAINING_VS_HOEG.md recs 5a/5b):
-        HOEG (Smit et al. 2024) fixes message-passing depth at 2 and has no attention-head
-        analogue at all, and this session found num_layers=1 makes any node type without a
-        direct edge to the viewpoint provably unreachable (EXPLAINABILITY_DEPTH.md) -- sweep()
-        was previously free to (and did) select it. hidden_channels excludes {128, 256} for
-        logistics specifically (rec 5d): HOEG's own Section 6.1 finding is that smaller
-        hidden_dims suit messier data, and this project separately measured ~285s/epoch at
-        hidden_channels=128 on logistics, so those two values are disproportionately expensive
-        there for a choice literature already argues against.
+        num_layers and num_heads are fixed, not tuned, for order_management (see
+        TRAINING_VS_HOEG.md recs 5a/5b): HOEG (Smit et al. 2024) fixes message-passing depth at 2
+        and has no attention-head analogue at all, and this session found num_layers=1 makes any
+        node type without a direct edge to the viewpoint provably unreachable
+        (EXPLAINABILITY_DEPTH.md) -- sweep() was previously free to (and did) select it.
+
+        logistics is a deliberate, empirically-forced exception: retraining
+        TimeFrom_CustomerOrder_to_Depart under the fixed depth=2 collapsed the model to a
+        near-constant predictor (last-event R2 approx -1700) regardless of epoch/patience budget,
+        while a prior one-off experiment (experiment_num_layers3.py) showed num_layers=3 alone
+        cuts last-event MAE from 243.6h to 28.2h. sweep() now tunes num_layers in {3,4,5} for
+        logistics specifically -- a second, documented deviation from HOEG parity for this
+        dataset (see TRAINING_VS_HOEG.md), on top of its already-documented epoch/patience one.
+        num_heads is still fixed at 2 for both datasets (no HOEG analogue either way).
+
+        hidden_channels excludes {128, 256} for logistics specifically (rec 5d): HOEG's own
+        Section 6.1 finding is that smaller hidden_dims suit messier data, and this project
+        separately measured ~285s/epoch at hidden_channels=128 on logistics, so those two values
+        are disproportionately expensive there for a choice literature already argues against.
+
+        Trials are persisted to a SQLite-backed Optuna study (study_name keyed on database/task_id)
+        so a killed/interrupted run can be resumed by simply calling sweep() again -- it picks up
+        from the last completed trial instead of restarting the whole grid.
 
         :param n_trials: number of trials; defaults to exactly the grid size (rec 5c) so a
                          GridSampler run covers every combination once with no wasted repeats
@@ -422,20 +437,26 @@ class Modelling:
         criterion = torch.nn.L1Loss()
         batch_size = self.path_dict.get('batch_size', 16)
 
-        FIXED_NUM_LAYERS = 2  # matches HOEG's fixed message-passing depth
+        FIXED_NUM_LAYERS = 2  # matches HOEG's fixed message-passing depth (order_management only)
         FIXED_NUM_HEADS = 2   # no HOEG analogue; fixed rather than tuned with no grounding
 
-        hidden_choices = ([8, 16, 24, 32, 48, 64] if self.database == 'logistics'
+        is_logistics = self.database == 'logistics'
+
+        hidden_choices = ([8, 16, 24, 32, 48, 64] if is_logistics
                           else [8, 16, 24, 32, 48, 64, 128, 256])
         lr_choices = [1e-3, 1e-2]
-        n_combos = len(hidden_choices) * len(lr_choices)
+        # logistics tunes num_layers in {3,4,5} (see docstring); order_management keeps it fixed.
+        layer_choices = [3, 4, 5] if is_logistics else None
+        n_combos = len(hidden_choices) * len(lr_choices) * (len(layer_choices) if is_logistics else 1)
         n_trials = n_combos if n_trials is None else min(n_trials, n_combos)
 
         def objective(trial):
             hidden_channels = trial.suggest_categorical('hidden_channels', hidden_choices)
             lr = trial.suggest_categorical('lr', lr_choices)
+            num_layers = (trial.suggest_categorical('num_layers', layer_choices)
+                          if is_logistics else FIXED_NUM_LAYERS)
 
-            trial_params = {'hidden_channels': hidden_channels, 'num_layers': FIXED_NUM_LAYERS,
+            trial_params = {'hidden_channels': hidden_channels, 'num_layers': num_layers,
                             'num_heads': FIXED_NUM_HEADS, 'lr': lr}
             model = self._build_model(trial_params).to(self.device)
 
@@ -465,13 +486,25 @@ class Modelling:
                         break
             return best_val
 
-        # GridSampler over the now fully-enumerable (hidden_channels x lr) space guarantees
-        # every combination is tried exactly once in n_combos trials — no wasted repeats from
-        # TPE re-sampling a space this small (rec 5c).
+        # GridSampler over the now fully-enumerable (hidden_channels x lr [x num_layers for
+        # logistics]) space guarantees every combination is tried exactly once in n_combos
+        # trials — no wasted repeats from TPE re-sampling a space this small (rec 5c).
+        search_space = {'hidden_channels': hidden_choices, 'lr': lr_choices}
+        if is_logistics:
+            search_space['num_layers'] = layer_choices
+
+        # SQLite-backed storage makes the study resumable: if this process is killed mid-sweep
+        # (has happened on long logistics runs), simply calling sweep() again picks up from the
+        # last completed trial instead of losing all progress and restarting the grid.
+        db_dir = os.path.dirname(self.model_path)
+        os.makedirs(db_dir, exist_ok=True)
         study = optuna.create_study(
             direction='minimize',
-            sampler=optuna.samplers.GridSampler({'hidden_channels': hidden_choices, 'lr': lr_choices}),
+            sampler=optuna.samplers.GridSampler(search_space),
             pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
+            storage=f"sqlite:///{db_dir}/sweep_{self.task_id}.db",
+            study_name=f"{self.database}_{self.task_id}",
+            load_if_exists=True,
         )
 
         # Seed with an informed prior from HOEG (Smit et al. 2024, Section 6.1): lower learning
@@ -481,7 +514,12 @@ class Modelling:
         # first just means the most-likely-good result is available early if the sweep is
         # interrupted; GridSampler still covers the rest of the grid regardless.
         _hidden_prior = 256 if self.database == 'order_management' else 64
-        study.enqueue_trial({'hidden_channels': _hidden_prior, 'lr': 1e-3})
+        _prior_trial = {'hidden_channels': _hidden_prior, 'lr': 1e-3}
+        if is_logistics:
+            # Deepest choice first: this session's evidence points toward more depth helping
+            # logistics specifically (see docstring).
+            _prior_trial['num_layers'] = 5
+        study.enqueue_trial(_prior_trial)
 
         study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
