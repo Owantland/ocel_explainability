@@ -35,8 +35,10 @@ class Modelling:
         self.test_data = torch.load(f"{self.path_dict['pytorch_path']}/test_graphs_sg.pt", weights_only=False)
 
         # Model parameters
-        self.max_epochs = 100
-        self.early_stop_patience = 10
+        # Matches sweep()'s budget and HOEG's Table 5/7 (single unified
+        # epoch/patience regime for both tuning and final reported results).
+        self.max_epochs = 30
+        self.early_stop_patience = 4
 
         kpi_type = self.path_dict['kpi_type']
 

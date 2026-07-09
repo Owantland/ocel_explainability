@@ -21,14 +21,14 @@ Two things worth flagging:
 | | HOEG (Table 5) | This project |
 |---|---|---|
 | Batch size | 16 (resource-constrained, not principled) | 16 (same constraint, `path_dict.get('batch_size', 16)`) |
-| Epochs / early stopping | 30 / patience 4 — **used uniformly** for tuning and final results | Sweep: 30 epochs, patience 4 (matches). **Final training: 100 epochs, patience 10** (`self.max_epochs`/`self.early_stop_patience`) |
+| Epochs / early stopping | 30 / patience 4 — **used uniformly** for tuning and final results | Sweep: 30 epochs, patience 4. **Final training: also 30/4** as of 2026-07-09 (`self.max_epochs`/`self.early_stop_patience`, `training.py:38-39`) — resolved, see recommendation 1. |
 | Optimizer | Adam | Adam |
 | Learning rate | fixed choice from `{0.01, 0.001}`, no scheduler | same grid during sweep, **plus** `ReduceLROnPlateau` (factor 0.5, patience 10) during training |
 | Weight decay | not mentioned | 1e-5 (regression defaults) vs. **hardcoded 0.001 during `sweep()`** — internal inconsistency |
 | Gradient clipping | not mentioned | `clip_grad_norm_(max_norm=1.0)` |
 | Target normalization | z-score on train split only (leakage prevention) | same, plus `_norm.json` sidecar caching so re-running doesn't silently shift normalization |
 
-The epoch/patience mismatch is the most material finding here: HOEG deliberately uses **one** small budget everywhere so tuning and reported results are directly comparable. This project's `sweep()` faithfully reproduces that budget, but `Het_Reg_Modelling` itself trains for over 3x longer with 2.5x the patience — meaning the model that gets reported is trained under a materially different regime than the one that was tuned. That may well be the right call (more thorough final training), but it's currently an undocumented accident of two numbers living in different places, not a stated methodological choice.
+**Resolved 2026-07-09** (see recommendation 1): the epoch/patience mismatch was the most material finding here — HOEG deliberately uses **one** small budget everywhere so tuning and reported results are directly comparable, but `Het_Reg_Modelling`/`Homo_Reg_Modelling` previously trained for over 3x longer with 2.5x the patience versus `sweep()`, as an undocumented accident of two numbers living in different places rather than a stated methodological choice. Fixed by aligning `self.max_epochs`/`self.early_stop_patience` down to 30/4 to match `sweep()` and HOEG's Table 5/7 exactly. All existing checkpoints (order_management/PayOrder, logistics/CustomerOrder_to_Depart) need retraining under the new regime — see `project_presentation_checkpoint_churn` memory for retrain status.
 
 ## 3. Hyperparameter tuning strategy
 
@@ -56,7 +56,7 @@ HOEG ran the equivalent search manually (Section 6.1, Figure 2) rather than with
 
 ## 5. Recommendations
 
-1. **Reconcile the epoch/patience mismatch.** Either bring `Het_Reg_Modelling`'s final-training budget in line with `sweep()`'s (30/4, matching HOEG for direct comparability), or keep the larger budget (100/10) but document *why* the final run uses a different regime than the one hyperparameters were tuned under.
+1. ✅ **[Implemented, 2026-07-09]** Reconciled the epoch/patience mismatch — `Het_Reg_Modelling`'s (and `Homo_Reg_Modelling`'s, which shares the same `self.max_epochs`/`self.early_stop_patience` attributes) final-training budget now matches `sweep()`'s (30/4), restoring direct comparability with HOEG's Table 5/7 single-budget methodology. Requires retraining all existing checkpoints.
 2. ✅ **[Implemented]** Wall-clock timing added to `compare_models()` and `baselines.py` (fitting-time/prediction-time table, mirroring HOEG's Table 7).
 3. ✅ **[Implemented, 2026-07-04]** `weight_decay` inconsistency fixed — `sweep()`'s hardcoded `0.001` now matches the regression defaults' `1e-5` (`training.py:367,444`). This turned out to matter more than "pick one deliberately": the old `0.001` value was directly responsible for several node types' per-type input projections collapsing to exactly zero during training — see `EXPLAINABILITY_DEPTH.md`.
 4. ✅ **[Implemented]** PReLU activation added between stacked `HGTConv` layers in `model_classes/HGT.py`, matching HOEG's own choice.
