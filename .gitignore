@@ -207,3 +207,15 @@ marimo/_lsp/
 __marimo__/
 /files/databases/
 /explainer_tests/
+
+# macOS
+.DS_Store
+
+# Generated pipeline artifacts (graphs, checkpoints, outputs) - regenerable, not source
+/files/graph_structures/
+/files/hetero_structures/
+/files/models/
+/files/output_tables/
+/files/explainer_outputs/
+/files/results.csv
+/data/
