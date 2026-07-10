@@ -566,7 +566,8 @@ class Modelling:
         print(f"Sweep plot saved to {sweep_path}")
 
         best = study.best_params
-        best_params = {'hidden_channels': best['hidden_channels'], 'num_layers': FIXED_NUM_LAYERS,
+        best_params = {'hidden_channels': best['hidden_channels'],
+                       'num_layers': best['num_layers'] if is_logistics else FIXED_NUM_LAYERS,
                        'num_heads': FIXED_NUM_HEADS, 'lr': best['lr'], 'weight_decay': 1e-5}
         print(f"Best params for {self.task_id}: {best_params}  (val MAE: {study.best_value:.4f})")
         self._save_params(best_params)
