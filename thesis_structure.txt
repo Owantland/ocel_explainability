@@ -1,60 +1,153 @@
-Introduction
-	* Explain OCELS and Predictive process monitoring
-	* Explain graphs, heterogeneous graphs, and their use for preserving OCEL shapes and information
-	* Explain how Graph Neural Networks leverage the graph shape to obtain more information for use in proper predictions
-	* Explain how Graph Neural Networks, although good, are normally treated as black boxes which can hinder their adoption
-	* Explain the purpose of the thesis: Providing an overview of explainability methods available for predictive process monitoring making sure to note the difficulty of obtaining proper heterogeneous implementations. Explain the three explainability methods chosen for the project:
-		-- LOO - Perturbation analysis: assesses the significance of individual input features or components by systematically removing or altering them and observing the impact on the model’s predictions.
-		-- Counterfactual explanation: demonstrate which changes are needed in the factual input to achieve a different output prediction
-		-- Feature attribution with integrated gradients
-	All of this probably also encompasses Related Works
-Dataset
+1. Introduction
+	* Explain Predictive Process Monitoring (PPM): predicting the outcome of an ongoing process before it finishes, so stakeholders can still influence the outcome. [van der Aalst et al. 2012]
+	* Explain Object-Centric Event Logs (OCELs): representing process flows through the relationship between events and the multiple objects associated with each event step, as opposed to single-case-ID logs that force an artificial single-object view. [Adams et al. 2022]
+	* Explain graphs and heterogeneous graphs, and their use for preserving OCEL shape and information without collapsing it into a single-case table.
+		- Homogeneous representation: event nodes only, connected when they share a related object.
+		- Heterogeneous representation: object nodes (with their own attributes) alongside event nodes, preserving more of the original process structure. [Zhai et al. 2025]
+	* Explain how Graph Neural Networks leverage this graph shape to obtain more information for prediction than single-case-ID or purely event-sequence approaches, while noting this is contested in the OC-PPM literature, not a settled point:
+		- Prior OC-PPM work has used non-GNN encodings successfully (Gradient Boosting on object-interaction features). [Galanti et al. 2023a]
+		- A direct empirical comparison found GNNs underperforming Gradient Boosting on OC-PPM while costing 8-10x more training time, across 21 KPIs. [Galanti & de Leoni, n.d.]
+		- This is precisely why this thesis's contribution is framed around explainability, not accuracy alone: a GNN that trades some accuracy for interpretability is only worth adopting if the interpretability is real and reliable.
+	* Explain how Graph Neural Networks, although powerful, are normally treated as black boxes, which can hinder adoption in a business-process setting where a wrong or unexplained prediction has real operational consequences.
+	* Explain the purpose of the thesis: providing an overview of explainability methods available for predictive process monitoring on heterogeneous graphs, noting the specific difficulty of finding implementations that actually support heterogeneous structures (most published GNN-explainability work targets homogeneous graphs). Explain the FOUR explainability components chosen for the project (corrected from an earlier three-method scope: fidelity metrics were added as a fourth, load-bearing component, not an afterthought):
+		-- LOO - Perturbation analysis: assesses the significance of individual input features or components by systematically removing or altering them and observing the impact on the model's predictions.
+		-- Feature attribution with Integrated Gradients: complements LOO with a finer-grained view of which raw features drive the important elements it highlights. [Sundararajan et al. 2017]
+		-- Counterfactual explanation: demonstrates which changes to the factual input would be needed to achieve a different output prediction, answering an end-user question like "what would need to change for this process to finish sooner?" [Huang et al. 2022]
+		-- Fidelity metrics: quantifies whether the explanations produced by the above are actually faithful to the model, not just plausible-looking. [Stevens et al. 2022]
+	* Point forward to Related Work (below) rather than folding it in loosely, since the comparison baseline and the methodological template are both substantial enough to deserve their own chapter.
+
+2. Related Work
+	Object-centric predictive process monitoring
+		* Prior work encoding object interactions as tabular features for KPI prediction with Gradient Boosting, evaluated on a real utility-provider log. [Galanti et al. 2023a]
+		* A critical counterpoint: a direct comparison of LSTM/Gradient Boosting against GNN techniques across two processes and 21 KPIs, concluding GNNs underperform Gradient Boosting while costing substantially more to train. Directly motivates this thesis's explainability-first framing. [Galanti & de Leoni, n.d.]
+		* A Shapley-value-based explainable decision-support framework for PPM (global + local explanations, validated with a 20-user study) — a feature-attribution-style precedent from outside the GNN literature worth contrasting with this thesis's Integrated-Gradients approach. [Galanti et al. 2023b]
+		* Global predictive monitoring of object-centric processes: merging all ongoing process executions into one global graph via GNNs to capture interferences not explicit in shared objects, rather than treating each case in isolation. Referred to informally in project notes as "Pietro's work" — mentioned as a direction for future work in this thesis, since a single-trace/prefix view was chosen here for tractability. [de Leoni & Volpato]
+		* An object-centric predictive process monitoring approach considering interactions between object types, evaluated on a public OCEL. [Gherissi et al. 2023]
+		* An IoT-enhanced OCEL 2.0 extension, simulating a real-world logistics process with device-to-business-object interrelationships — relevant as an example of the OCEL 2.0 standard being extended for a specific domain, the way this thesis's own SQL-generalization work extends it for arbitrary datasets. [Wei et al. 2024]
+	The direct comparison baseline
+		* HOEG: a heterogeneous object-event graph encoding that does not aggregate object features, using a k-dimensional heterogeneous GNN for remaining-time prediction. This is this thesis's primary, structured comparison baseline — architecture, training methodology, and hyperparameter grid are all benchmarked against it directly (see Models, Training methodology). [Smit et al. 2024]
+	The methodological template
+		* A heterogeneous GNN framework combining post-hoc feature attribution and counterfactual explanation for a multi-modal, explainable land-use-inference task. This is the direct methodological precedent this thesis adapts: the HGT architecture pattern, the Integrated-Gradients-via-Captum attribution approach, and the four-component graph-dissimilarity metric used for counterfactual candidate selection. [Zhai et al. 2025]
+	The GNN-explainability landscape
+		* Broad taxonomic surveys situating this thesis's chosen methods (perturbation-based, gradient/attribution-based) within the wider space of GNN-explainability approaches (also including surrogate and generation-based methods not used here). [Yuan et al. 2022] [Nandan et al. 2025]
+		* GNNExplainer: the first general, model-agnostic instance-level GNN explainer, formulating explanation as a learned soft mask over a compact subgraph and feature subset. Targets homogeneous graphs, but was still used in this thesis as a comparison point against LOO's node-importance ranking (see Models, Explainability layer design). [Ying et al. 2019]
+		* PGExplainer: parameterizes mask generation across instances via a learned network rather than optimizing per-instance from scratch, improving generalization — cited as the natural lineage step between GNNExplainer and the heterogeneous explainers below. [Luo et al. 2020]
+		* GNNInterpreter: a model-level (not instance-level) generative alternative, learning a probabilistic graph distribution that reveals a class's discriminative pattern rather than explaining single predictions — included to contrast instance-level choices (LOO, IG, counterfactual) against the model-level paradigm. [Wang & Shen 2023]
+	Heterogeneous/temporal explainers considered but not adopted
+		* HGExplainer: extends the GNNExplainer mask/mutual-information paradigm to heterogeneous graphs via meta-path sampling. Investigated for this thesis, but has no open-source implementation available, making it infeasible to apply directly. [Mika et al.]
+		* HTGExplainer: extends the same mask/mutual-information paradigm to heterogeneous AND temporal GNNs. Investigated and confirmed to work correctly in its original DGL-based implementation, but a port to PyTorch Geometric (the framework this thesis's HGT model uses) broke the examples — attempted and abandoned, not simply skipped. Future work building the rest of the pipeline on DGL could revisit this. [Li et al. 2023]
+	The counterfactual-explanation landscape
+		* LORELEY: extends LORE with control-flow constraints for realistic counterfactuals in predictive business process monitoring — the method this thesis's counterfactual component is directly built on, adapted from a classification setting to a regression setting (see Models). [Huang et al. 2022]
+		* NICE: a general nearest-unlike-neighbor counterfactual algorithm for heterogeneous tabular data, not graph- or process-specific — background context for the counterfactual-XAI landscape rather than a competing implementation. [Brughmans et al. 2022]
+		* A dedicated survey of graph counterfactual-explanation methods, taxonomy, and evaluation metrics — more directly comparable to this thesis's graph setting than NICE, useful for framing evaluation-metric choices. [Prado-Romero et al. 2024]
+	Grounding for perturbation-based interpretability (LOO)
+		* General ablation-study methodology on conventional ANNs, investigating internal representation and robustness via structural removal — cited as conceptual grounding for ablation/perturbation as an interpretability technique, independent of graph structure. [Meyes et al. 2019]
+		* "Representation erasure": an early, NLP-focused precursor to perturbation-based explanation, removing input dimensions/words/units to interpret model decisions — a direct conceptual ancestor of this thesis's LOO method. [Li, Monroe & Jurafsky 2017]
+
+3. Dataset
 	Preliminaries
-		Explain the essential components of the OCEL
+		Explain the essential components of an OCEL. [Adams et al. 2022]
 		Definitions
 			Single-ID Event Log
 			KPI Function
 				Examples: Remaining Time, Event occurrence
-			Prediction Problem on Single-id Event Logs
+			Prediction Problem on Single-ID Event Logs
 		Provide an example of a single trace
-		Object Centric Event Log
+		Object-Centric Event Log
 			Explanation
 			Example
 			Definition of the OCEL
+			Traces as a choice of viewpoint object plus a connection depth/hop distance; a trace's prefixes as its state at a given point in time; each trace as a strongly connected component of the full graph, so the dataset ends up as a list of distinct components rather than one interconnected graph. A global envisioning of the process across traces is possible but out of scope here — see Related Work's note on global predictive monitoring. [de Leoni & Volpato]
 		Predictive analytics in object-centric processes
-			Explain how the graph structure is maintained
-			Graph Based Neural Networks
+			Explain how the graph structure is maintained through the (x, y) tuple formulation: x is the heterogeneous graph representation of a prefix, y is the KPI value — a supervised-learning setup.
+			Graph-Based Neural Networks: why a graph-native encoding was chosen over the tabular/feature-based alternative in [Galanti et al. 2023a], and the explainability trade-off this implies given [Galanti & de Leoni, n.d.]'s accuracy critique.
 		Explanation of process predictions
-			Give a rundown of existing explainability methods
-			Provide a rundown of explainability methods for graphs
-			Explain how these methods exist but are not properly implemented for heterogeneous graphs as most are focused on homogeneous structures.
-	Order Management and Logistics datasets
-		Explain what the OCEL 2.0 standard is and how these datasets are organized
-		Give a general idea of what each dataset is meant to represent and make sure to say that they're both synthetic representations used for predictive process monitoring tasks
-	Probably here we have to provide more information on how the dataset was processed. 
-		* Explain how SQL queries were used and generalized to take advantage of the 2.0 standard to ensure they could be run on any standard data set
-		* Explain the basic ideas behind OCELs
-			- How the OCEL is generated using the objects and events described in the original dataset
-			- How arcs between objects can be expressed directly in the dataset (such as object to object) or can be inferred (such as event to event)
-			- Explain what attributes are chosen and which are generated to provide more information to the training model
-			- Explain the choice to standardize both features and output to mitigate the effect of distinctly different sized values
-			- Explain that the en result of the graph transformation is a series of graph prefixes as opposed to a global schema of all events occurring at the same time although that could be future work
-Models
-	For this part we probably have to describe the entire modelling process
-	Discuss how the train/test split was performed ensuring temporal distinction between each set
-	Discuss how the Graph Neural Network model was chosen and explain that a sweep was performed for each regression type to ensure that the model was working on the best hyperparameters.
-	Discuss how the training and validation process was performed, noting the optimizer and loss function chosen. 
-	Explain the design of the explainability layer of the model:
-		Explain how LOO was chosen as a model agnostic perturbation method to easily identify the important elements of the graph
-		Explain how Feature attribution with integrated gradients was chosen as a way to complement LOO, providing a deeper insight into the features that drive the important elements highlighted
-		Explain how the Counterfactual explanation provides a structural analysis aimed explicitly at the end user which can help answer a common question such as "What can be done to bring process X more in line with process Y which took less time to finish?"
-Results
-	Show a comparison against homogeneous models trained on the data or a different heterogeneous model to validate that the chosen representation is correct.
-	Show the final loss values for the model applied to the different KPIs chosen
-	Show an example of the aggregate explainability layer for LOO and Feature attribution:
-		Showcase the structural elements most important for the test set and a heatmap of the important attributes in the most important nodes to highlight what's driving the prediction
-	Show an example of the counterfactual analysis answering a real world question such as "Why did trace X take longer to go from PlaceOrder to PackageDelivered than trace Y?"
+			Give a rundown of existing explainability methods generally, then for graphs specifically, pointing back to Related Work rather than repeating it here.
+			Explain how these methods exist but are not properly implemented for heterogeneous graphs, since most published work targets homogeneous structures — the specific, concrete version of this claim (which methods, why not) lives in Related Work's "considered but not adopted" section, not as a generic assertion here.
+	Order Management dataset
+		Synthetic OCEL 2.0 benchmark dataset; describe the process it represents and the KPI(s) chosen (PayOrder remaining time).
+		Training recipe actually used: HGT with num_layers fixed at 2, matching HOEG's fixed message-passing depth. [Smit et al. 2024] This depth is sufficient here — every node type has a short enough path to the viewpoint.
+	Logistics dataset
+		Synthetic OCEL 2.0 benchmark dataset; describe the process it represents and the KPI(s) chosen (CustomerOrder-to-Depart remaining time), and that the viewpoint object was deliberately chosen to keep every node type reachable.
+		Training recipe actually used, and why it differs from Order Management: this dataset's graphs require more hops to route information from all node types to the viewpoint. A fixed depth of 2 caused entire node types to be provably unreachable and, separately, caused the model to collapse to a near-constant predictor regardless of training budget; num_layers was instead tuned over {3, 4, 5}, with 3 found decisively best. This deeper-graph reasoning follows the same logic as global predictive monitoring's premise that OC-PPM needs the model to see more of the process, not less. [de Leoni & Volpato]
+	Dataset processing
+		Explain how SQL queries were used and generalized to take advantage of the OCEL 2.0 standard, so they could run against any standard OCEL 2.0 dataset, not just these two. [Wei et al. 2024] is a useful comparison point of another team extending OCEL 2.0 for their own domain (IoT-enhanced logistics).
+		Explain the basic ideas behind OCEL generation:
+			- How the OCEL is generated from the objects and events in the original dataset
+			- How arcs between objects can be expressed directly (object-to-object) or inferred (event-to-event)
+			- What attributes are chosen vs. generated to give the model more information
+			- The choice to standardize both features and target to mitigate the effect of differently-scaled values
+			- That the result is a series of graph prefixes, not a single global schema of all simultaneous events — future work could pursue the global view, per [de Leoni & Volpato]
 
-Conclusion
-	Talk about the model values - where they high or low MAE? If so, explain what may be driving either result.
-	Talk about the possibilities provided by explainability methods. What can the current implementation provide to the end user and what more can be done? Ensure that the explanation notes that while using more established frameworks like GNNExplainer of PGExplainer would be ideal there is currently no proper implementation for our setup and as such were outside the scope of the research.
+4. Models
+	Train/test split, ensuring temporal separation between train, validation, and test sets so no process in a later split begins before every process in an earlier split has ended (no information leakage from future events).
+	Model architecture choice
+		Why HGT over other heterogeneous architectures: contrast against HOEG's k-dimensional GNN, which does not aggregate object features the way this thesis's encoding does. [Smit et al. 2024]
+		Why this specific explainability pipeline: adapting the combined HGT + post-hoc-explanation pattern from [Zhai et al. 2025] rather than building each component from scratch.
+		Metric choice: MAE and RMSE, and why these are appropriate for this regression setting.
+	The num_layers / weight_decay investigation
+		A `weight_decay` hardcode mismatch (0.001 during hyperparameter sweep vs. 1e-5 as the regression default) was found to zero out several node types' input projections entirely during training — a training-side bug, confirmed via a controlled experiment varying only the optimizer, independent of architecture depth.
+		Separately, num_layers=1 (freely selectable by the original sweep) made any node type without a direct edge to the viewpoint provably unreachable, regardless of training quality — a structural, not a training, limitation.
+		Both were fixed: weight_decay corrected project-wide, and num_layers fixed at 2 for Order Management (matching HOEG) but tuned over {3, 4, 5} for Logistics specifically, since a fixed depth of 2 caused Logistics to collapse to a near-constant predictor no matter the training budget. This dataset-specific divergence is deliberate and documented, not an inconsistency — see Dataset, Logistics.
+	Hyperparameter sweep
+		A grid search over hidden_channels and learning rate (and, for Logistics, num_layers) was used to identify the most effective configuration per KPI, informed by priors from HOEG's own reported findings on which values tend to work best. [Smit et al. 2024]
+	Training and validation
+		Optimizer, loss function, and epoch/early-stopping budget: aligned to HOEG's single, unified 30-epoch/patience-4 budget for Order Management, restoring direct comparability; kept on a longer, pre-existing budget for Logistics specifically, since the unified budget was empirically found to undertrain its rarer last-event cases.
+	Baselines for comparison
+		Mean predictor, Gradient Boosted Trees on a tabular encoding, and a homogeneous GNN trained on a homogeneous representation of the same information — three of HOEG's four baseline categories. [Smit et al. 2024] Purpose: showcase whether the heterogeneous representation earns its added complexity, and report honestly where it does not (see Results).
+		Report MAE against prefix depth, not just an aggregate figure, since the model should ideally become more precise the further along a process is.
+	Explainability layer design (four components)
+		LOO — Perturbation analysis: chosen as a model-agnostic method to identify the important elements of the graph by removing or altering them and observing the shift in prediction. Conceptually grounded in general ablation/erasure interpretability work. [Meyes et al. 2019] [Li, Monroe & Jurafsky 2017] Compared directly against GNNExplainer's node-importance ranking as a sanity check (see Results); GNNExplainer's own mask-based mechanism, and why it could be used here despite targeting homogeneous graphs by design, is described in Related Work. [Ying et al. 2019]
+		Feature attribution with Integrated Gradients — chosen to complement LOO with a finer-grained view of which raw features drive the important elements it highlights, implemented via Captum. [Sundararajan et al. 2017]
+		Counterfactual explanation — adapted from LORELEY, which was originally designed for a classification problem; adapting it to this thesis's regression setting required (a) a minimum-meaningful-difference threshold instead of a simple class filter, and (b) explicit prefix-depth-matching rules so candidates are compared at similar points in their process lifetime rather than across arbitrary lengths. [Huang et al. 2022] The four-part graph-dissimilarity metric used to rank candidates (feature/type/edge/structure) is adapted from the land-use template. [Zhai et al. 2025]
+		Fidelity metrics — quantifies whether the above three actually reflect the model's real behavior, not just plausible-looking output, using a parsimony-and-faithfulness framework. [Stevens et al. 2022]
+	Explainers considered but not implementable for this setup — see Related Work for the specific technical reason each was set aside: HGExplainer [Mika et al.], HTGExplainer [Li et al. 2023].
+
+5. Results
+	Dataset and trace overview
+		Give an overview of the total size of the data processed for each dataset, and example generated OCEL/event-log/graph structures where useful.
+	Model comparison
+		Show the comparison against the baselines (Mean, GBT, HomoGNN). Report honestly where the heterogeneous model does not clearly win: per Massimiliano's feedback, given the spread between models, it cannot be claimed with certainty that the heterogeneous representation is head-and-shoulders above the others — only that it is a reasonable, comfortable prediction.
+		Show R² alongside MAE, and MAE-against-prefix-depth, to show whether/where the heterogeneous representation's advantage grows as more of the process is observed.
+	The num_layers reachability finding, as its own result
+		Present the dead-node/unreachability finding and its fix as a genuine result, not a footnote: which node types were affected on each dataset, what the fix changed, and the Order-Management-vs-Logistics divergence in the final chosen depth.
+	Aggregate explainability layer — LOO and feature attribution
+		Showcase the structural elements most important across the test set, and a heatmap of the important attributes on the most important nodes, to show what is driving predictions in aggregate.
+		Present the LOO-vs-GNNExplainer comparison: how often the two methods agree on the most important nodes, and why their raw magnitudes are not directly comparable (GNNExplainer's [0,1] soft score vs. LOO's physical-units shift) even when their rankings are. [Ying et al. 2019]
+	Counterfactual analysis — worked examples
+		Present the real worked examples already produced, not one generic case: an extreme, structure-driven example where a single event dominates the prediction; a balanced example where structure and features contribute comparably; a genuine mid-trace (non-final-prefix) counterfactual on the Logistics dataset; and a same-trace before/after comparison showing an explanation can be fragile (only crystallizing at the final event) versus stable.
+	Fidelity metrics
+		Report fidelity+/fidelity-/characterization/sparsity for the explanations above, and what they say about how trustworthy the explanations actually are. [Stevens et al. 2022]
+
+6. Conclusion
+	Discuss the model's MAE/R² values — high or low, and why — grounded in the actual causes found during the project (the weight_decay bug, the num_layers reachability limit, and the more general finding that added model capacity can improve aggregate validation error while quietly degrading accuracy on the specific last-event cases this thesis cares about most).
+	Discuss what the current explainability implementation can and cannot provide to an end user, and what more could be done.
+		Correct an earlier framing here: GNNExplainer was not out of scope — it was implemented and used directly as a comparison point against LOO (see Results). What remains genuinely out of scope, and why, are the heterogeneous/temporal explainers HGExplainer and HTGExplainer, for the specific, concrete reasons given in Related Work (no open-source implementation; a failed DGL-to-PyTorch-Geometric port), not a general "not available" claim.
+	State the real, current limitations honestly: some node types' feature attribution has not been fully root-caused even after the reachability fix; the Logistics dataset had at least one node type that remained structurally disconnected from the viewpoint under any tested depth; and the binary-classification KPI path was deliberately left unfinished as out of scope for this thesis.
+	Future work: a global, cross-trace view of the process rather than per-prefix isolation, following [de Leoni & Volpato]; a k-dimensional GNN baseline to compare directly against HOEG's own published architecture rather than only its reported numbers [Smit et al. 2024]; and revisiting HTGExplainer if a DGL-based pipeline is ever built [Li et al. 2023].
+
+7. References
+	[Adams et al. 2022] — Adams, J.N., Park, G., Levich, S., Schuster, D., van der Aalst, W.M.P. "A Framework for Extracting and Encoding Features from Object-Centric Event Data." arXiv:2209.01219, 2022. (files/papers_full/5.pdf)
+	[Brughmans et al. 2022] — Brughmans, D., Leyman, P., Martens, D. "NICE: An Algorithm for Nearest Instance Counterfactual Explanations." arXiv, 2022. (files/papers_full/Explanation/NICE_algo.pdf)
+	[de Leoni & Volpato] — de Leoni, M., Volpato, P. "Global Predictive Monitoring of Object-Centric Processes." Università di Padova. Referred to informally in project notes as "Pietro's work." (files/papers_full/4.pdf)
+	[Galanti & de Leoni, n.d.] — Galanti, R., de Leoni, M. "Predictive Analytics for Object-centric Processes: Do Graph Neural Networks Really Help?" Conference paper. Year not confirmed from the source file — verify before citing. (files/papers_full/2.pdf)
+	[Galanti et al. 2023a] — Galanti, R., de Leoni, M., Navarin, N., Marazzi, A. "Object-centric process predictive analytics." Expert Systems With Applications 213, 119173, 2023. (files/papers_full/1.pdf)
+	[Galanti et al. 2023b] — Galanti, R., de Leoni, M., Monaro, M., Navarin, N., Marazzi, A., Di Stasi, B., Maldera, S. "An explainable decision support system for predictive process analytics." Engineering Applications of Artificial Intelligence 120, 105904, 2023. (files/papers_full/3.pdf)
+	[Gherissi et al. 2023] — Gherissi, W., El Haddad, J., Grigori, D. "Object Centric Predictive Process Monitoring." In: Service-Oriented Computing — ICSOC 2022 Workshops, LNCS 13821, pp. 27-39, Springer, 2023. NOTE: the source file (files/papers_full/7.pdf) is the FULL 44MB proceedings volume, not an extracted single paper — it also contains "Developing Supply Chain Risk Management Strategies by Using Counterfactual Explanation" (Ordibazar et al., pp. 53-65) and "Explainable Predictive Decision Mining for Operational Support" (Park et al., pp. 66-79). Confirm which of the three was actually intended before citing.
+	[Huang et al. 2022] — Huang, T-H., Metzger, A., Pohl, K. "Counterfactual Explanations for Predictive Business Process Monitoring." (LORELEY) arXiv, 2022. (files/papers_full/Explanation/cf_explanations_for_PPM.pdf)
+	[Li et al. 2023] — Li, J., Zhang, C., Zhang, C. "Heterogeneous Temporal Graph Neural Network Explainer." (HTGExplainer) CIKM 2023. (files/papers_full/Explanation/HTGExplainer.pdf)
+	[Li, Monroe & Jurafsky 2017] — Li, J., Monroe, W., Jurafsky, D. "Understanding Neural Networks through Representation Erasure." arXiv, 2017. (files/papers_full/Explanation/ablation_2.pdf)
+	[Luo et al. 2020] — Luo, D., Cheng, W., Xu, D., Yu, W., Zong, B., Chen, H., Zhang, X. "Parameterized Explainer for Graph Neural Network." (PGExplainer) NeurIPS 2020. (files/papers_full/Explanation/PGExplainer.pdf)
+	[Meyes et al. 2019] — Meyes, R., Lu, M., Waubert de Puiseau, C., Meisen, T. "Ablation Studies in Artificial Neural Networks." arXiv, 2019. (files/papers_full/Explanation/ablation_1.pdf)
+	[Mika et al.] — Mika, G.P., Bouzeghoub, A., Węgrzyn-Wolska, K., Neggaz, Y.M. "HGExplainer: Explainable Heterogeneous Graph Neural Network." Year not confirmed from the source file — verify before citing. (files/papers_full/Explanation/HGExplainer.pdf)
+	[Nandan et al. 2025] — Nandan, M., Mitra, S., De, D. "GraphXAI: a survey of graph neural networks (GNNs) for explainable AI (XAI)." Neural Computing and Applications 37, pp. 10949-11000, 2025. (files/papers_full/6.pdf)
+	[Prado-Romero et al. 2024] — Prado-Romero, M.A., Prenkaj, B., Stilo, G., Giannotti, F. "A Survey on Graph Counterfactual Explanations: Definitions, Methods, Evaluation, and Research Challenges." ACM Computing Surveys, 2024. (files/papers_full/Explanation/counterfactual_survey.pdf)
+	[Smit et al. 2024] — Smit, T.K., Reijers, H.A., Lu, X. "HOEG: A New Approach for Object-Centric Predictive Process Monitoring." arXiv:2404.05316, Utrecht University, 2024. (files/papers_full/HOEG-New_Approach_4_OCPPM.pdf)
+	[Stevens et al. 2022] — Stevens, A., De Smedt, J., Peeperkorn, J. "Quantifying Explainability in Outcome-Oriented Predictive Process Monitoring." ICPM 2021 Workshops, LNBIP 433, KU Leuven, 2022. (files/papers_full/Explanation/quantifying_explainability_in_PPM.pdf)
+	[Sundararajan et al. 2017] — Sundararajan, M., Taly, A., Yan, Q. "Axiomatic Attribution for Deep Networks." (Integrated Gradients) ICML 2017. (files/papers_full/Explanation/captum_integrated_gradients.pdf)
+	[van der Aalst et al. 2012] — van der Aalst, W. et al. (IEEE Task Force on Process Mining). "Process Mining Manifesto." BPM 2011 Workshops, LNBIP 99, pp. 169-194, 2012. (files/papers_full/process_mining_manifesto.pdf)
+	[Wang & Shen 2023] — Wang, X., Shen, H-W. "GNNInterpreter: A Probabilistic Generative Model-Level Explanation for Graph Neural Networks." ICLR 2023. (files/papers_full/Explanation/GNNInterpreter.pdf)
+	[Wei et al. 2024] — Wei, J., Ouyang, C., Ma, W., Jiang, D., Xia, J., ter Hofstede, A., Wang, Y., Huang, L. "From Conventional to IoT-Enhanced: Simulated Object-Centric Event Logs for Real-Life Logistics Processes." CEUR-WS Vol-3758, paper 19, BPM 2024 Doctoral Consortium, Kraków, 2024. (files/papers_full/IOT_Basis.pdf)
+	[Ying et al. 2019] — Ying, R., Bourgeois, D., You, J., Zitnik, M., Leskovec, J. "GNNExplainer: Generating Explanations for Graph Neural Networks." NeurIPS 2019. (files/papers_full/Explanation/GNNExplainer.pdf)
+	[Yuan et al. 2022] — Yuan, H., Yu, H., Gui, S., Ji, S. "Explainability in Graph Neural Networks: A Taxonomic Survey." IEEE TPAMI (arXiv preprint), 2022. (files/papers_full/Explanation/taxonomic_survey_explainability.pdf)
+	[Zhai et al. 2025] — Zhai, X., Jiang, J., Dejl, A., Rago, A., Guo, F., Toni, F., Sivakumar, A. "Heterogeneous graph neural networks with post-hoc explanations for multi-modal and explainable land use inference." Information Fusion 120, 103057, 2025. (files/papers_full/hetero_gnns_with_post_hoc_explanations.pdf)

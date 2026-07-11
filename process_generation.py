@@ -1,11 +1,18 @@
 # Given an OCEL 2.0 standard database and a viewpoint, obtain all relevant objects and events for each viewpoint object
 # and create a simplified list of process executions.
-import datetime
-import sqlite3
+import re
 import pandas as pd
 import sup_funcs as sup
-import os
-import numpy as np
+
+_IDENTIFIER_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+def _validate_identifier(name):
+    """SQLite can only bind values, not table/column identifiers, so any name pulled from the
+    database (event types, config-driven viewpoints) and interpolated into a query string is
+    checked against an allow-list pattern first."""
+    if not _IDENTIFIER_RE.match(str(name)):
+        raise ValueError(f"Unsafe SQL identifier: {name!r}")
+    return name
 
 '''
     Creating a unified Event table
@@ -16,19 +23,9 @@ class ProcessGeneration:
         self.cant = cant
         self.funcs = sup.SupportFunctions(database, cant)
         self.path_dict = self.funcs.get_paths()
-        conn = sqlite3.connect(self.path_dict['ocel_path'])
-        self.cursor = conn.cursor()
-
-    def get_quantile(self, kpi_val):
-        if kpi_val <= self.time_quantiles[0]:
-            qt = 0
-        elif kpi_val > self.time_quantiles[0] and kpi_val <= self.time_quantiles[1]:
-            qt =  1
-        elif kpi_val > self.time_quantiles[1] and kpi_val <= self.time_quantiles[2]:
-            qt =  2
-        else:
-            qt =  3
-        return qt
+        # Reuse SupportFunctions' own connection/cursor to this same database file
+        # rather than opening a second, redundant connection.
+        self.cursor = self.funcs.cursor
 
     def get_data_dictionaries(self):
         # Generate a list of object to object relationships
@@ -73,7 +70,7 @@ class ProcessGeneration:
             ev_type = row['ev_type']
             if ev_type not in ev_tables.keys():
                 ev_tables[ev_type] = []
-                ev_table = f'event_{ev_type}'
+                ev_table = f'event_{_validate_identifier(ev_type)}'
                 cols = self.funcs.col_names(ev_table)
 
                 qry = f'''
@@ -96,22 +93,24 @@ class ProcessGeneration:
         print("Obtaining all related nodes and arcs")
 
         # Generate a list of all objects of the chosen viewpoint
+        viewpoint = _validate_identifier(self.path_dict['viewpoint'])
         qry = f'''
                     SELECT *
-                    FROM object_{self.path_dict['viewpoint']}
+                    FROM object_{viewpoint}
                     ORDER BY 2
-                    LIMIT {self.cant};
+                    LIMIT ?;
                '''
-        self.cursor.execute(qry)
+        self.cursor.execute(qry, (self.cant,))
         vwpnt_objects = self.cursor.fetchall()
         o2o_table, e20_table, ev_tables, ev_ts_dict = self.get_data_dictionaries()
 
         # For each viewpoint object obtain a list of related objects
         rltd_nodes = {}
         vwpnt_cnt = 0
+        progress_step = max(1, len(vwpnt_objects) // 20)
         for vwpnt_object in vwpnt_objects:
             vwpnt_cnt += 1
-            if vwpnt_cnt % int(len(vwpnt_objects) / 20) == 0:
+            if vwpnt_cnt % progress_step == 0:
                 print(int(vwpnt_cnt / int(len(vwpnt_objects))*100), '%')
             ob_list = set()
 
@@ -150,8 +149,10 @@ class ProcessGeneration:
                 event = (ev_id, ev_type, timestamp)
                 rltd_events.add(event)
 
-            # Sort the events chronologically and add an index
-            rltd_events = sorted(rltd_events, key=lambda x: x[2])
+            # Sort the events chronologically and add an index. ev_id is a secondary sort key
+            # so events sharing an identical timestamp get a deterministic, reproducible order
+            # instead of one dependent on Python's hash-randomized set iteration order.
+            rltd_events = sorted(rltd_events, key=lambda x: (x[2], x[0]))
             for idx, event in enumerate(rltd_events):
                 ev_id = event[0]
                 ev_type = event[1]
@@ -260,33 +261,33 @@ class ProcessGeneration:
                         # Identify the end event for the trace
                         try:
                             end_event = [ev for ev in evs_by_ob if ev in kpi_events][-1]
-                        except IndexError: #In case the object is not tied to the event type just take the last instance.
-                            end_event = ev_df[ev_df['type'] == self.path_dict['kpi_event']]['index'].values[-1]
+                        except IndexError:
+                            # The object isn't tied to any instance of the KPI event -- fall
+                            # back to the trace's last instance instead. Logged since a
+                            # misconfigured kpi_event would otherwise silently affect every trace.
+                            print(f"  [get_ev_log] object {ob_id} (viewpoint {vwpnt_object}) has "
+                                  f"no '{kpi_event}' event of its own; falling back to the "
+                                  f"trace's last instance.")
+                            end_event = ev_df[ev_df['type'] == kpi_event]['index'].values[-1]
                         start_time = ev_df[ev_df['index'] == first_event]['timestamp'].values[0]
                         end_time = ev_df[ev_df['index'] == end_event]['timestamp'].values[0]
 
                         # Begin calculating the timeToEvent for each step of the process
                         event_log = ev_df[ev_df['timestamp'] >= start_time]
-                        event_log = event_log[event_log['timestamp'] <= end_time]
+                        event_log = event_log[event_log['timestamp'] <= end_time].copy()
 
                         # Add lines to event log file
-                        id_col = [log_id for _ in range(len(event_log.index))]
-                        trace_id = [vwpnt_object for _ in range(len(event_log.index))]
-                        ev_log = event_log[['ocel_id', 'type', 'timestamp']]
-                        ev_log['vwpnt_id'] = id_col
-                        ev_log['ob_id'] = trace_id
+                        ev_log = event_log[['ocel_id', 'type', 'timestamp']].copy()
+                        ev_log['vwpnt_id'] = log_id
+                        ev_log['ob_id'] = vwpnt_object
                         log_frames = pd.concat([log_frames, ev_log])
 
                         # Calculate the KPI value
                         event_log['kpi_val'] = pd.to_datetime(end_time) - pd.to_datetime(event_log['timestamp'])
                         event_log['kpi_val'] = event_log['kpi_val'].apply(lambda x: x.total_seconds())
 
-                        viewpoint_id = [log_id for _ in range(len(event_log.index))]
-                        kpi_event = [kpi_event for _ in range(len(event_log.index))]
-                        ob_id = [ob_id for _ in range(len(event_log.index))]
-                        ob_idx = [ob_idx for _ in range(len(event_log.index))]
-                        kpi = event_log[['timestamp', 'kpi_val']]
-                        kpi['viewpoint_id'] = viewpoint_id
+                        kpi = event_log[['timestamp', 'kpi_val']].copy()
+                        kpi['viewpoint_id'] = log_id
                         kpi['kpi_event'] = kpi_event
                         kpi['ob_id'] = ob_id
                         kpi['ob_idx'] = ob_idx
@@ -295,28 +296,22 @@ class ProcessGeneration:
 
             elif self.path_dict['kpi_type'] == 1:
                 # Add the current viewpoint's elements to the event log
-                id_col = [log_id for _ in range(len(ev_df.index))]
-                ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
-                ev_log = ev_df[['ocel_id', 'type', 'timestamp']]
-                ev_log['vwpnt_id'] = id_col
-                ev_log['ob_id'] = ob_id
+                ev_log = ev_df[['ocel_id', 'type', 'timestamp']].copy()
+                ev_log['vwpnt_id'] = log_id
+                ev_log['ob_id'] = vwpnt_object
                 log_frames = pd.concat([log_frames, ev_log])
 
-                # Checks if there's more than one CreatePackage event
-                evs = ev_df[ev_df['type'] == "CreatePackage"]
+                # Checks if there's more than one instance of the KPI event
+                evs = ev_df[ev_df['type'] == kpi_event]
                 trace_evs = len(evs.values)
-                mult_pckgs = [1 if trace_evs > 1 else 0]
-                kpi_val = [mult_pckgs[0] for _ in range(len(ev_df.index))]
-                viewpoint_id = [log_id for _ in range(len(ev_df.index))]
-                kpi_event = [kpi_event for _ in range(len(ev_df.index))]
-                ob_id = [vwpnt_object for _ in range(len(ev_df.index))]
-                ob_idx = [0 for _ in range(len(ev_df.index))]
-                kpi = ev_df[['timestamp']]
+                kpi_val = 1 if trace_evs > 1 else 0
+
+                kpi = ev_df[['timestamp']].copy()
                 kpi['kpi_val'] = kpi_val
-                kpi['viewpoint_id'] = viewpoint_id
+                kpi['viewpoint_id'] = log_id
                 kpi['kpi_event'] = kpi_event
-                kpi['ob_id'] = ob_id
-                kpi['ob_idx'] = ob_idx
+                kpi['ob_id'] = vwpnt_object
+                kpi['ob_idx'] = 0
                 all_kpis = pd.concat([all_kpis, kpi])
 
         # Save the kpis and the event log
