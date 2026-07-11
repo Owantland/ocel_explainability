@@ -1,18 +1,8 @@
 # Given an OCEL 2.0 standard database and a viewpoint, obtain all relevant objects and events for each viewpoint object
 # and create a simplified list of process executions.
-import re
 import pandas as pd
 import sup_funcs as sup
-
-_IDENTIFIER_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
-
-def _validate_identifier(name):
-    """SQLite can only bind values, not table/column identifiers, so any name pulled from the
-    database (event types, config-driven viewpoints) and interpolated into a query string is
-    checked against an allow-list pattern first."""
-    if not _IDENTIFIER_RE.match(str(name)):
-        raise ValueError(f"Unsafe SQL identifier: {name!r}")
-    return name
+from sup_funcs import _validate_identifier
 
 '''
     Creating a unified Event table

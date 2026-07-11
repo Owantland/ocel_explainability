@@ -1,22 +1,35 @@
 import sqlite3
-from dataclasses import replace
 
 import pandas as pd
-import numpy as np
-import copy
 import math
-from torch_geometric.data import HeteroData, Data
+from torch_geometric.data import HeteroData
 import torch
 from torch_geometric.loader import DataLoader
 import torch_geometric.transforms as T
 import json
 import warnings
-import os
 import sup_funcs as sf
 warnings.filterwarnings("ignore")
-import pandas as pd
-import datetime as dt
 import ast
+
+
+def _load_required_csv(path, produced_by):
+    try:
+        return pd.read_csv(path)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Missing required input '{path}' -- expected to be produced by {produced_by}."
+        ) from None
+
+
+def _load_required_json(path, produced_by):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Missing required input '{path}' -- expected to be produced by {produced_by}."
+        ) from None
 
 
 def _remap_events_edge(edge, remap, src_is_events, tgt_is_events):
@@ -49,26 +62,19 @@ class HeteroGraphsGenerator:
 
         self.funcs = sf.SupportFunctions(database, cant)
         self.path_dict = self.funcs.get_paths()
-        self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
+        self.pd_df = _load_required_csv(self.path_dict['ev_log_path'], "process_generation.py's get_ev_log()")
         conn = sqlite3.connect(self.path_dict['ocel_path'])
         self.cursor = conn.cursor()
 
-        # Open Relevant Files
-        with open(f'{self.path_dict["graph_output_path"]}ocel.csv') as csv_file:
-            self.ocel_df = pd.read_csv(csv_file)
-
-        with open(f'{self.path_dict["graph_output_path"]}all_kpis.csv') as csv_file:
-            self.all_kpis = pd.read_csv(csv_file)
-
-        with open(f'{self.path_dict["graph_output_path"]}edges.csv') as csv_file:
-            self.edges = pd.read_csv(csv_file)
-
-        with open(f'{self.path_dict["graph_output_path"]}ev_log.csv') as csv_file:
-            self.ev_log = pd.read_csv(csv_file)
-
-        # Open relevant files
-        with open(f'{self.path_dict["graph_output_path"]}tensor_dict.json') as json_file:
-            self.tensor_dict = json.load(json_file)
+        # Open relevant files -- ocel.csv/edges.csv/tensor_dict.json come from
+        # ocel_generator.py; all_kpis.csv/ev_log.csv come from process_generation.py's
+        # get_ev_log(). A missing file here means an earlier pipeline stage hasn't run yet.
+        graph_output_path = self.path_dict["graph_output_path"]
+        self.ocel_df      = _load_required_csv(f'{graph_output_path}ocel.csv', "ocel_generator.py")
+        self.all_kpis     = _load_required_csv(f'{graph_output_path}all_kpis.csv', "process_generation.py's get_ev_log()")
+        self.edges        = _load_required_csv(f'{graph_output_path}edges.csv', "ocel_generator.py")
+        self.ev_log       = _load_required_csv(f'{graph_output_path}ev_log.csv', "process_generation.py's get_ev_log()")
+        self.tensor_dict  = _load_required_json(f'{graph_output_path}tensor_dict.json', "ocel_generator.py")
 
         # Extend in-memory dims for enriched node types (not written back to JSON;
         # hetero_graphs.py always applies these increments at init time).
@@ -96,25 +102,29 @@ class HeteroGraphsGenerator:
         active_orders = []
         for i in range(self.num_vp_obj):
             temp = self.pd_df[self.pd_df['vwpnt_id'] == i + 1]
-            strt_time = temp.iloc[0, 2]
-            end_time = temp.iloc[-1, 2]
-            ob_id = temp.iloc[0, 3]
+            strt_time = temp.iloc[0]['timestamp']
+            end_time = temp.iloc[-1]['timestamp']
+            ob_id = temp.iloc[0]['ob_id']
             active_orders.append([ob_id, strt_time, end_time])
         pd_active_orders = pd.DataFrame(active_orders)
         pd_active_orders.sort_values(by=2, inplace=True)
 
-        # Create a dictionary of delivery times
+        # Create a dictionary of delivery times, keyed by the object's actual OCEL ID
+        # (ev_log.csv's 'ob_id' column) -- NOT 'vwpnt_id' (the integer trace counter), which
+        # this previously read by mistake via positional indexing (column 3 is 'vwpnt_id',
+        # not 'ob_id', which is column 4). That bug made get_learning_set()'s
+        # `elif ob_id in self.active_orders_dict` lookup unable to ever match a real OCEL ID,
+        # silently defeating per-instance y-values for non-primary same-type viewpoint nodes.
         active_orders_dict = {}
         for idx in range(1, self.num_vp_obj + 1):
-            delivery_time = self.pd_df[self.pd_df['vwpnt_id'] == idx].iloc[-1, 2]
-            ob_id = self.pd_df[self.pd_df['vwpnt_id'] == idx].iloc[0, 3]
+            rows = self.pd_df[self.pd_df['vwpnt_id'] == idx]
+            delivery_time = rows.iloc[-1]['timestamp']
+            ob_id = rows.iloc[0]['ob_id']
             active_orders_dict[ob_id] = delivery_time
         return pd_active_orders, active_orders_dict
 
     def get_learning_set(self, sample):
-        set_ys = []
         set_graphs = []
-        num_order = 95
 
         for process in sample:
             # Go row for row obtaining the relevant values
@@ -233,9 +243,16 @@ class HeteroGraphsGenerator:
                         ob_len = self.tensor_dict[key]
                         try:
                             data[key].x = torch.tensor(active_graph[key], dtype=torch.float32).reshape(-1, ob_len)
-                        except TypeError:
-                            print(key)
-                            print(active_graph[key])
+                        except TypeError as e:
+                            # A malformed/wrong-shaped node feature here should never be
+                            # silently dropped -- it would otherwise leave this node type
+                            # missing from the graph entirely, surfacing (if at all) as a
+                            # much more confusing failure deep inside model training.
+                            raise TypeError(
+                                f"Failed to build node type '{key}' for process={process}, "
+                                f"event index={cnt}: expected reshape(-1, {ob_len}), got data "
+                                f"{active_graph[key]!r}"
+                            ) from e
                 for edge in edge_list:
                     split = edge.split("_to_")
                     data[split[0], 'to', split[1]].edge_index = torch.tensor(active_graph[edge],

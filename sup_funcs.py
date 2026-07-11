@@ -1,7 +1,28 @@
 # A collection of support functions used by multiple scripts in the project
+import re
 import sqlite3
 import yaml
 import os
+
+_IDENTIFIER_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+def _validate_identifier(name):
+    """SQLite can only bind values, not table/column identifiers, so any name pulled from the
+    database (event types, config-driven viewpoints) and interpolated into a query string is
+    checked against an allow-list pattern first."""
+    if not _IDENTIFIER_RE.match(str(name)):
+        raise ValueError(f"Unsafe SQL identifier: {name!r}")
+    return name
+
+_REQUIRED_KEYS = ['ocel_path', 'graph_output_path', 'pytorch_path', 'model_output_path',
+                  'explainer_output_path', 'viewpoint', 'added_depth', 'unique_ids',
+                  'kpi_event', 'kpi_viewpoint', 'filtered_tables', 'attributes',
+                  'time_attributes', 'encoding', 'kpi_type']
+
+def _require(cfg, key, database):
+    if key not in cfg:
+        raise KeyError(f"config.yml['{database}'] is missing required key '{key}'")
+    return cfg[key]
 
 class SupportFunctions:
     def __init__(self, database, cant):
@@ -12,26 +33,19 @@ class SupportFunctions:
         self.cursor = conn.cursor()
 
     def get_paths(self):
+        """Builds the path/config dict for this database. Side effect: also creates the
+        graph_output_path/pytorch_path/explainer_path directories on disk if they don't
+        already exist, every time this is called -- every caller in the codebase relies
+        on this happening as part of construction."""
         with open('files/config.yml', 'r') as file:
             db_configs = yaml.safe_load(file)
         db_cfg = db_configs[self.database]
-        path_dict = {'ocel_path': db_cfg['ocel_path'],
-                     'graph_output_path': db_cfg['graph_output_path'],
-                     'pytorch_path': db_cfg['pytorch_path'],
-                     'model_path': db_cfg['model_output_path'],
-                     'explainer_path': db_cfg['explainer_output_path'],
-                     'results_path': f"files/results.csv",
-                     'viewpoint': db_cfg['viewpoint'],
-                     'depth': db_cfg['added_depth'],
-                     'unique_ids': db_cfg['unique_ids'],
-                     'kpi_event': db_cfg['kpi_event'],
-                     'kpi_viewpoint': db_cfg['kpi_viewpoint'],
-                     'filtered_tables': db_cfg['filtered_tables'],
-                     'attributes': db_cfg['attributes'],
-                     'time_attributes': db_cfg['time_attributes'],
-                     'encoding': db_cfg['encoding'],
-                     'kpi_type': db_cfg['kpi_type'],
-                     'role_encoding': db_cfg.get('role_encoding') or {},}
+        path_dict = {key: _require(db_cfg, key, self.database) for key in _REQUIRED_KEYS}
+        path_dict['model_path'] = path_dict.pop('model_output_path')
+        path_dict['explainer_path'] = path_dict.pop('explainer_output_path')
+        path_dict['depth'] = path_dict.pop('added_depth')
+        path_dict['results_path'] = "files/results.csv"
+        path_dict['role_encoding'] = db_cfg.get('role_encoding') or {}
 
         # Generate the appropriate path for saving the process execution log
         path_dict['graph_output_path'] = f"{path_dict['graph_output_path']}{self.cant}/"
@@ -52,7 +66,7 @@ class SupportFunctions:
         return path_dict
 
     def col_names(self, table_name):
-        self.cursor.execute(f"PRAGMA table_info({table_name});")
+        self.cursor.execute(f"PRAGMA table_info({_validate_identifier(table_name)});")
         columns_info = self.cursor.fetchall()
         column_names = [column[1] for column in columns_info]
         return column_names
