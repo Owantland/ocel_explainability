@@ -848,39 +848,43 @@ def compare_to_hoeg(database='logistics', cant=2000):
 
 
 # MAIN
-cant = 2000
-database = 'order_management'
+# Guarded so this hand-toggled scratchpad only runs when db_testing.py is executed directly
+# (`python3 db_testing.py`) -- importing this module elsewhere (e.g. to reuse verify_ocel_generator)
+# no longer silently triggers a full model training run as a side effect.
+if __name__ == '__main__':
+    cant = 2000
+    database = 'order_management'
 
-# # # Verification of data sources and generated results
-# # # compare_to_hoeg(database, cant)
-# #
-# # Obtains all related nodes and arcs in the dataset and then generates the list of process executions
-# p = pg.ProcessGeneration(database, cant)
-# nodes = p.related_nodes()
-# p.get_ev_log(nodes)
-# verify_process_generation(database, cant)
-#
-# # # # # Generate the OCEL file with relevant attributes (required when role_encoding config changes)
-# # # # g = og.Generator(database, cant)
-# # # # g.generate_ocel(nodes)
-# verify_ocel_generator(database, cant)
-#
-# # Apply the train test split to the set of process executions to obtain the relevant sets for learning set generation
-# ttb = tb.TrainTestBuilder(database, cant)
-# train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps = ttb.timestamps_generator()
-#
-# # Obtains the learning set for training, testing and validation and converts it into pytorch tensors
-# hgg = hg.HeteroGraphsGenerator(database, cant, train_sampled_timestamps,
-#                                val_sampled_timestamps, test_sampled_timestamps)
-# hgg.trace_kpi()
-# verify_hetero_graphs(database, cant)
+    # # # Verification of data sources and generated results
+    # # # compare_to_hoeg(database, cant)
+    # #
+    # # Obtains all related nodes and arcs in the dataset and then generates the list of process executions
+    # p = pg.ProcessGeneration(database, cant)
+    # nodes = p.related_nodes()
+    # p.get_ev_log(nodes)
+    # verify_process_generation(database, cant)
+    #
+    # # # # # Generate the OCEL file with relevant attributes (required when role_encoding config changes)
+    # # # # g = og.Generator(database, cant)
+    # # # # g.generate_ocel(nodes)
+    # verify_ocel_generator(database, cant)
+    #
+    # # Apply the train test split to the set of process executions to obtain the relevant sets for learning set generation
+    # ttb = tb.TrainTestBuilder(database, cant)
+    # train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps = ttb.timestamps_generator()
+    #
+    # # Obtains the learning set for training, testing and validation and converts it into pytorch tensors
+    # hgg = hg.HeteroGraphsGenerator(database, cant, train_sampled_timestamps,
+    #                                val_sampled_timestamps, test_sampled_timestamps)
+    # hgg.trace_kpi()
+    # verify_hetero_graphs(database, cant)
 
-# Model training and testing
-m = t.Modelling(database, cant)
-# # Sweep1
-# # m.sweep()
-m.Modelling()
+    # Model training and testing
+    m = t.Modelling(database, cant)
+    # # Sweep1
+    # # m.sweep()
+    m.Modelling()
 
-# Baseline comparison
-m.Homo_Reg_Modelling()
-m.compare_models()
+    # Baseline comparison
+    m.Homo_Reg_Modelling()
+    m.compare_models()
