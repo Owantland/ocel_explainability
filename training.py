@@ -26,7 +26,7 @@ class Modelling:
         self.funcs = sf.SupportFunctions(database, cant)
         self.path_dict = self.funcs.get_paths()
         self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
-        self.viewpoint_object = self.path_dict['kpi_viewpoint']
+        self.kpi_viewpoint = self.path_dict['kpi_viewpoint']
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         # Load relevant datasets
@@ -61,13 +61,13 @@ class Modelling:
         }
         if kpi_type == 0:  # Regression
             # Appropriately name the task
-            self.task_id = f"TimeFrom_{self.viewpoint_object}_to_{self.path_dict['kpi_event']}"
+            self.task_id = f"TimeFrom_{self.kpi_viewpoint}_to_{self.path_dict['kpi_event']}"
             self.params = self._load_params() or _DEFAULTS[0] # Ensure there are sweep hyperparemeters to load
             self.model = self._build_model(self.params)
 
             # Standardize the output values.
             # Checks if there is a saved file containing the standardized values to import
-            train_y_all = torch.cat([g[self.viewpoint_object].y for g in self.train_data])
+            train_y_all = torch.cat([g[self.kpi_viewpoint].y for g in self.train_data])
             _model_dir = f"{self.path_dict['model_path']}/Hetero"
             _norm_path = f"{_model_dir}/{self.task_id}_norm.json"
             if os.path.exists(_norm_path):
@@ -79,7 +79,7 @@ class Modelling:
                 target_mean, target_std = train_y_all.mean(), train_y_all.std()
             for m in [self.train_data, self.val_data, self.test_data]:
                 for g in m:
-                    g[self.viewpoint_object].y = (g[self.viewpoint_object].y - target_mean) / target_std
+                    g[self.kpi_viewpoint].y = (g[self.kpi_viewpoint].y - target_mean) / target_std
 
             # Print out the Mean and STD of the chosen regression database
             print(f"Training-set target normalization stats -- Mean (hours): "
@@ -183,8 +183,8 @@ class Modelling:
             if len(_names) == _n_dims:
                 self.feature_names[_ob_type] = _names
 
-        if self.train_data and self.train_data[0][self.viewpoint_object].num_nodes > 0:
-            vp = self.viewpoint_object
+        if self.train_data and self.train_data[0][self.kpi_viewpoint].num_nodes > 0:
+            vp = self.kpi_viewpoint
             n_vp = self.train_data[0][vp].x.shape[1]
             base_names = list((self.path_dict.get('attributes') or {}).get(vp, []))
             self.feature_names[vp] = (base_names + _order_extra)[:n_vp]
@@ -228,11 +228,11 @@ class Modelling:
         if kpi_type == 0:
             return HGT.HGT(hidden_channels=params['hidden_channels'], out_channels=1,
                            num_layers=params['num_layers'], num_heads=params['num_heads'],
-                           data=self.train_data[0], viewpoint=self.viewpoint_object)
+                           data=self.train_data[0], viewpoint=self.kpi_viewpoint)
         elif kpi_type == 1:
             return HGT_CLASS.HGT_CLASS(hidden_channels=params['hidden_channels'], out_channels=2,
                                        num_heads=params['num_heads'], num_layers=params['num_layers'],
-                                       data=self.train_data[0], viewpoint=self.viewpoint_object)
+                                       data=self.train_data[0], viewpoint=self.kpi_viewpoint)
 
     """
         Heterogeneous Regression training and validation functions
@@ -244,8 +244,8 @@ class Modelling:
             batch = batch.to(device)
             optimizer.zero_grad()
             out  = model(batch.x_dict, batch.edge_index_dict)
-            mask = batch[self.viewpoint_object].mask.view(-1)
-            y    = batch[self.viewpoint_object].y.view(-1, out.shape[-1])
+            mask = batch[self.kpi_viewpoint].mask.view(-1)
+            y    = batch[self.kpi_viewpoint].y.view(-1, out.shape[-1])
             loss = criterion(out[mask], y[mask])
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -264,8 +264,8 @@ class Modelling:
         for batch in loader:
             batch = batch.to(device)
             out  = model(batch.x_dict, batch.edge_index_dict)
-            mask = batch[self.viewpoint_object].mask.view(-1)
-            y    = batch[self.viewpoint_object].y.view(-1, out.shape[-1])
+            mask = batch[self.kpi_viewpoint].mask.view(-1)
+            y    = batch[self.kpi_viewpoint].y.view(-1, out.shape[-1])
             loss = criterion(out[mask], y[mask])
 
             batch_size = int(mask.sum())
@@ -283,10 +283,10 @@ class Modelling:
         for batch in train_loader:
             batch = batch.to(self.device)
             optimizer.zero_grad()
-            batch_size = len(batch[self.viewpoint_object].batch)
+            batch_size = len(batch[self.kpi_viewpoint].batch)
             out = self.model(batch.x_dict, batch.edge_index_dict)
             seed_out = out[:batch_size]
-            seed_y = batch[self.viewpoint_object].y[:batch_size]
+            seed_y = batch[self.kpi_viewpoint].y[:batch_size]
 
             loss = criterion(seed_out, seed_y)
             loss.backward()
@@ -304,9 +304,9 @@ class Modelling:
         for batch in loader:
             batch = batch.to(self.device)
             out = self.model(batch.x_dict, batch.edge_index_dict)
-            batch_size = len(batch[self.viewpoint_object].batch)
+            batch_size = len(batch[self.kpi_viewpoint].batch)
             seed_out = out[:batch_size].argmax(dim=-1)
-            seed_y = batch[self.viewpoint_object].y[:batch_size]
+            seed_y = batch[self.kpi_viewpoint].y[:batch_size]
 
             total_correct += (seed_out == seed_y).sum().item()
             f1(seed_out, seed_y)
@@ -580,7 +580,7 @@ class Modelling:
     """
     def _hetero_to_homo(self, graphs):
         """Convert normalised HeteroData prefixes to homogeneous Data (events only)."""
-        vp = self.viewpoint_object
+        vp = self.kpi_viewpoint
         et = ('Events', 'to', 'Events')
         result = []
         for g in graphs:
@@ -719,7 +719,7 @@ class Modelling:
     def compare_models(self):
         """Evaluate HGT and HomoGNN side-by-side on the test split and save a comparison plot."""
 
-        vp = self.viewpoint_object
+        vp = self.kpi_viewpoint
         # _hetero_to_homo() skips prefixes where the kpi_viewpoint object hasn't appeared yet;
         # apply the same filter here so het_test and homo_test stay aligned for zip() below.
         het_test        = [g for g in self.test_data if g[vp].y.shape[0] > 0]
@@ -735,7 +735,7 @@ class Modelling:
         homo_model = REG_GNN.REG_GNN(
             in_channels     = in_ch,
             hidden_channels = self.params.get('hidden_channels', 48),
-            num_layers      = self.params.get('num_layers', 3),
+            num_layers      = self.params.get('num_layers', 2),
         ).to(self.device)
         homo_model.load_state_dict(torch.load(homo_model_path, weights_only=False))
         homo_model.eval()

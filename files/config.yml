@@ -10,6 +10,7 @@ order_management:
   kpi_type: 0
   kpi_event: "PayOrder" #"CreatePackage" "PackageDelivered" "PayOrder"
   kpi_viewpoint: "Orders"
+  batch_size: 16
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:
     Orders: ['price']
@@ -33,6 +34,7 @@ logistics:
   kpi_type: 0
   kpi_event: "Depart" # LoadToVehicle
   kpi_viewpoint: "CustomerOrder"
+  batch_size: 16
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:
     CustomerOrder: ['AmountofGoods']

@@ -46,7 +46,7 @@ class Explainer(Modelling):
 
         G = nx.MultiDiGraph()
 
-        G.add_node((self.viewpoint_object, 0), node_type=self.viewpoint_object, importance=1.0, is_seed=True, flips=False)
+        G.add_node((self.kpi_viewpoint, 0), node_type=self.kpi_viewpoint, importance=1.0, is_seed=True, flips=False)
 
         top_nodes = node_importances[:node_top_k]
         for nt, i, drop, flips in top_nodes:
@@ -61,7 +61,7 @@ class Explainer(Modelling):
 
             for key, ntype in [(src_key, src_type), (dst_key, dst_type)]:
                 if key not in G.nodes:
-                    is_seed = (ntype == self.viewpoint_object and key[1] == 0)
+                    is_seed = (ntype == self.kpi_viewpoint and key[1] == 0)
                     G.add_node(key, node_type=ntype, importance=0.0, is_seed=is_seed, flips=False)
 
             G.add_edge(src_key, dst_key, edge_type=edge_type[1], importance=drop, flips=flips)
@@ -126,7 +126,7 @@ class Explainer(Modelling):
         explanation_nodes_by_type = {}
         for nt, i, _drop, _flips in node_importances[:node_top_k]:
             explanation_nodes_by_type.setdefault(nt, set()).add(i)
-        explanation_nodes_by_type.setdefault(self.viewpoint_object, set()).add(0)
+        explanation_nodes_by_type.setdefault(self.kpi_viewpoint, set()).add(0)
 
         explanation_edges_by_type = {}
         for et, e, _drop, _flips in edge_importances[:edge_top_k]:
@@ -204,7 +204,7 @@ class Explainer(Modelling):
         predicted_class = baseline_proba.argmax().item()
         baseline_confidence = baseline_proba[predicted_class].item()
 
-        print(f"\nExplaining {self.viewpoint_object} node #{object_idx}")
+        print(f"\nExplaining {self.kpi_viewpoint} node #{object_idx}")
         print(f"  Predicted class: {predicted_class} (confidence {baseline_confidence:.4f})")
         print(f"  Sampled neighborhood: " +
               ", ".join(f"{nt}={explain_subgraph[nt].num_nodes}" for nt in explain_subgraph.node_types))
@@ -212,7 +212,7 @@ class Explainer(Modelling):
         node_importances = []
         for node_type in explain_subgraph.node_types:
             n = explain_subgraph[node_type].x.size(0)
-            start = 1 if node_type == self.viewpoint_object else 0
+            start = 1 if node_type == self.kpi_viewpoint else 0
             for i in range(start, n):
                 perturbed = explain_subgraph.clone()
                 perturbed[node_type].x[i] = 0.0
@@ -239,7 +239,7 @@ class Explainer(Modelling):
         edge_importances.sort(key=lambda t: t[2], reverse=True)
 
         seed_feature_importances = self.feature_importance_for_node(
-            explain_subgraph, self.viewpoint_object, 0, baseline_confidence, predicted_class, top_k=top_k
+            explain_subgraph, self.kpi_viewpoint, 0, baseline_confidence, predicted_class, top_k=top_k
         )
 
         if node_importances:
@@ -262,10 +262,10 @@ class Explainer(Modelling):
             flag = "  <-- FLIPS PREDICTION" if flips else ""
             print(f"    {edge_type} edge ({src} -> {dst}): confidence drop = {drop:+.4f}{flag}")
 
-        print(f"\n  Top {top_k} most important FEATURES on the seed {self.viewpoint_object} itself:")
+        print(f"\n  Top {top_k} most important FEATURES on the seed {self.kpi_viewpoint} itself:")
         for f, drop, flips in seed_feature_importances:
             flag = "  <-- FLIPS PREDICTION" if flips else ""
-            print(f"    {self.viewpoint_object}[0].x[{f}]: confidence drop = {drop:+.4f}{flag}")
+            print(f"    {self.kpi_viewpoint}[0].x[{f}]: confidence drop = {drop:+.4f}{flag}")
 
         if top_node_type is not None:
             print(f"\n  Top {top_k} most important FEATURES on the most influential neighbor "
@@ -332,9 +332,9 @@ class Explainer(Modelling):
         """Build a NetworkX subgraph from LOO regression importance scores."""
         import networkx as nx
 
-        seed_key = (self.viewpoint_object, seed_paper_idx)
+        seed_key = (self.kpi_viewpoint, seed_paper_idx)
         G = nx.MultiDiGraph()
-        G.add_node(seed_key, node_type=self.viewpoint_object, importance=1.0,
+        G.add_node(seed_key, node_type=self.kpi_viewpoint, importance=1.0,
                    signed_importance=0.0, is_seed=True, large_shift=False, is_connector=False)
 
         included = {seed_key}
@@ -499,7 +499,7 @@ class Explainer(Modelling):
         explanation_nodes_by_type = {}
         for nt, i, _shift, _large, _signed in node_importances[:node_top_k]:
             explanation_nodes_by_type.setdefault(nt, set()).add(i)
-        explanation_nodes_by_type.setdefault(self.viewpoint_object, set()).add(paper_idx)
+        explanation_nodes_by_type.setdefault(self.kpi_viewpoint, set()).add(paper_idx)
 
         explanation_edges_by_type = {}
         for et, e, _shift, _large, _signed in edge_importances[:edge_top_k]:
@@ -592,7 +592,7 @@ class Explainer(Modelling):
         for node_type in explain_subgraph.node_types:
             n = explain_subgraph[node_type].x.size(0)
             for idx in range(n):
-                if node_type == self.viewpoint_object and idx == object_idx:
+                if node_type == self.kpi_viewpoint and idx == object_idx:
                     continue
                 perturbed = explain_subgraph.clone()
                 perturbed[node_type].x[idx] = 0.0
@@ -621,7 +621,7 @@ class Explainer(Modelling):
         edge_importances.sort(key=lambda t: t[2], reverse=True)
 
         seed_feature_importances = self.reg_feature_importance_for_node_in_graph(
-            explain_subgraph, self.viewpoint_object, object_idx, baseline_value, object_idx, top_k=top_k
+            explain_subgraph, self.kpi_viewpoint, object_idx, baseline_value, object_idx, top_k=top_k
         )
 
         if node_importances:
@@ -756,8 +756,8 @@ class Explainer(Modelling):
         )
 
         self.plot_feature_importances(
-            self.viewpoint_object, seed_feats,
-            os.path.join(save_dir, f"feat_importance_{self.viewpoint_object}.png"),
+            self.kpi_viewpoint, seed_feats,
+            os.path.join(save_dir, f"feat_importance_{self.kpi_viewpoint}.png"),
             order_id=order_id
         )
         if node_importances:
@@ -782,7 +782,7 @@ class Explainer(Modelling):
 
         names = self.feature_names
         print(f"\n{'='*60}")
-        print(f"Explanation for {self.viewpoint_object} #{order_id}")
+        print(f"Explanation for {self.kpi_viewpoint} #{order_id}")
         print(f"  Predicted remaining time : {round(baseline_value / 3600)} hours")
         print(f"  Graph size : " +
               ", ".join(f"{nt}={explain_subgraph[nt].num_nodes}" for nt in explain_subgraph.node_types))
@@ -827,8 +827,8 @@ class Explainer(Modelling):
             flag = "  [LARGE SHIFT]" if large else ""
             print(f"  {rank}. {et[0]}→{et[2]} ({src}→{dst}): shift={signed_shift/3600:+.2f}h{flag}")
 
-        print(f"\nTop {top_k} features on seed {self.viewpoint_object} node:")
-        seed_names = names.get(self.viewpoint_object, [])
+        print(f"\nTop {top_k} features on seed {self.kpi_viewpoint} node:")
+        seed_names = names.get(self.kpi_viewpoint, [])
         for rank, (f, shift, large, signed_shift) in enumerate(seed_feats[:top_k], 1):
             fname = seed_names[f] if f < len(seed_names) else f"feat_{f}"
             flag = "  [LARGE SHIFT]" if large else ""
@@ -882,7 +882,7 @@ class Explainer(Modelling):
         explain_subgraph = self._locate_test_graph(order_id, n_events)
 
         print(f"\n{'='*60}")
-        print(f"Feature attribution for {self.viewpoint_object} #{order_id}")
+        print(f"Feature attribution for {self.kpi_viewpoint} #{order_id}")
         print(f"{'='*60}")
 
         results = {}
@@ -965,7 +965,7 @@ class Explainer(Modelling):
         self.model.eval()
 
         last_event_graphs = [g for g in self.test_data
-                             if g[self.viewpoint_object]['last_event'][0].item()]
+                             if g[self.kpi_viewpoint]['last_event'][0].item()]
         sample = last_event_graphs[:n_traces]
         print(f"Running aggregate explanation on {len(sample)} traces…")
 
@@ -980,7 +980,7 @@ class Explainer(Modelling):
                 (node_imp, edge_imp, seed_feats, _, _) = self.reg_explanation(g, 0, None, top_k)
             except Exception as ex:
                 n_failed += 1
-                oid = g[self.viewpoint_object]['id'][0].item() if self.viewpoint_object in g.node_types else '?'
+                oid = g[self.kpi_viewpoint]['id'][0].item() if self.kpi_viewpoint in g.node_types else '?'
                 print(f"  [trace failed] order={oid}: {type(ex).__name__}: {ex}")
                 continue
 
@@ -988,7 +988,7 @@ class Explainer(Modelling):
                 type_shifts[nt].append(shift / 3600)
 
             for f, shift, _, _ in seed_feats:
-                feat_shifts[self.viewpoint_object][f].append(shift / 3600)
+                feat_shifts[self.kpi_viewpoint][f].append(shift / 3600)
 
             m = self.evaluate_explanation_quality(g, 0, node_imp, edge_imp,
                                                    node_top_k=10, edge_top_k=15, verbose=False)
@@ -1132,7 +1132,7 @@ class Explainer(Modelling):
         Raises ValueError (with the order's actually-available prefix lengths, for
         the n_events=<int> case) rather than returning None on no match.
         """
-        vp = self.viewpoint_object
+        vp = self.kpi_viewpoint
 
         if n_events is None:
             for g in self.test_data:
@@ -1183,12 +1183,12 @@ class Explainer(Modelling):
                 num_layers=arch['num_layers'],
                 num_heads=arch['num_heads'],
                 data=self.test_data[0],
-                viewpoint=self.viewpoint_object,
+                viewpoint=self.kpi_viewpoint,
             ).to(self.device)
         self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
         self.model.eval()
 
-        vp = self.viewpoint_object
+        vp = self.kpi_viewpoint
         query_graph = self._locate_test_graph(order_id, n_events)
         query_pred = self._predict_value_for_graph(query_graph, 0)
         query_oid = order_id
@@ -1296,7 +1296,7 @@ class Explainer(Modelling):
         n_q = query_graph['Events'].x.size(0) if 'Events' in query_graph.node_types else '?'
 
         print(f"\n{'=' * 60}")
-        print(f"Counterfactual Explanation for {self.viewpoint_object} #{order_id}")
+        print(f"Counterfactual Explanation for {self.kpi_viewpoint} #{order_id}")
         print(f"  Query: {round(query_pred / 3600)}h predicted | prefix length: {n_q} events")
         print(f"  Graph: " +
               ", ".join(f"{nt}={query_graph[nt].num_nodes}" for nt in query_graph.node_types))
@@ -1468,8 +1468,8 @@ class Explainer(Modelling):
         n_cf = cf_graph['Events'].x.size(0) if 'Events' in cf_graph.node_types else 0
 
         fig, axes = plt.subplots(1, 2, figsize=(16, 8))
-        seed_key_q = (self.viewpoint_object, 0)
-        seed_key_cf = (self.viewpoint_object, 0)
+        seed_key_q = (self.kpi_viewpoint, 0)
+        seed_key_cf = (self.kpi_viewpoint, 0)
         self._draw_hetero_nx(G_q, axes[0], type_colors, seed_key=seed_key_q,
                               title=f"Query #{query_id}\n{n_q} events, {query_hours:.1f}h predicted")
         self._draw_hetero_nx(G_cf, axes[1], type_colors, seed_key=seed_key_cf,
@@ -1652,7 +1652,7 @@ class Explainer(Modelling):
         in the graph tensors, consistent with how every other feature value is
         displayed elsewhere in this file (e.g. explain_trace()'s printed feature
         values); not denormalized back to raw units."""
-        vp = self.viewpoint_object
+        vp = self.kpi_viewpoint
         names = self.feature_names.get(vp, [])
         q_feats = query_graph[vp].x[0]
         cf_feats = cf_graph[vp].x[0]
@@ -1740,7 +1740,7 @@ class Explainer(Modelling):
 
         self.model.eval()
         last_event_graphs = [
-            g for g in self.test_data if g[self.viewpoint_object]['last_event'][0].item()
+            g for g in self.test_data if g[self.kpi_viewpoint]['last_event'][0].item()
         ]
         if n_traces is not None:
             last_event_graphs = last_event_graphs[:n_traces]
@@ -1902,8 +1902,8 @@ class Explainer(Modelling):
         #    carry non-zero attribution (see EXPLAINABILITY_DEPTH.md) ───
         if depth_stratify:
             self._explain_attribution_by_depth(methods=methods, n_traces=n_traces,
-                                                node_type=self.viewpoint_object)
-            if 'Events' != self.viewpoint_object:
+                                                node_type=self.kpi_viewpoint)
+            if 'Events' != self.kpi_viewpoint:
                 self._explain_attribution_by_depth(methods=methods, n_traces=n_traces,
                                                     node_type='Events')
 
@@ -1915,7 +1915,7 @@ class Explainer(Modelling):
         import numpy as np
         import pandas as pd
 
-        node_type = node_type or self.viewpoint_object
+        node_type = node_type or self.kpi_viewpoint
         graphs = self.test_data if n_traces is None else self.test_data[:n_traces]
         n = len(graphs)
         print(f"\nDepth-stratified attribution: {n} prefixes across all depths "
@@ -2045,8 +2045,8 @@ class Explainer(Modelling):
 
         # ── Mean / GBT (refit fresh, as baselines.py's script already does) ──
         pt_path = self.path_dict['pytorch_path']
-        train_df = bl.load_raw_split(f"{pt_path}/train_graphs_sg.pt", self.viewpoint_object)
-        test_df = bl.load_raw_split(f"{pt_path}/test_graphs_sg.pt", self.viewpoint_object)
+        train_df = bl.load_raw_split(f"{pt_path}/train_graphs_sg.pt", self.kpi_viewpoint)
+        test_df = bl.load_raw_split(f"{pt_path}/test_graphs_sg.pt", self.kpi_viewpoint)
         # feature columns derived dynamically, not bl.FEAT_COLS -- the viewpoint's raw
         # feature count varies by database (e.g. Orders has 4, TransportDocument has 1)
         feat_cols = [c for c in train_df.columns if c not in ('y_h', 'order_id', 'last_event')]
@@ -2217,7 +2217,7 @@ class Explainer(Modelling):
 
         n_q = graph['Events'].x.size(0) if 'Events' in graph.node_types else '?'
         print(f"\n{'='*60}")
-        print(f"GNNExplainer subgraph explanation for {self.viewpoint_object} #{order_id}")
+        print(f"GNNExplainer subgraph explanation for {self.kpi_viewpoint} #{order_id}")
         print(f"  Predicted remaining time : {round(baseline_value / 3600)} hours "
               f"| prefix length: {n_q} events")
         print(f"\nTop node types by mean |mask|:")
@@ -2348,7 +2348,7 @@ class Explainer(Modelling):
 
         print(f"\n{'='*60}")
         print(f"LOO vs. GNNExplainer node-importance comparison for "
-              f"{self.viewpoint_object} #{order_id}")
+              f"{self.kpi_viewpoint} #{order_id}")
         print(f"  {len(overlap)} of top-{top_k} nodes agree between methods")
         print(f"  NOTE: LOO shift (hours) and GNNExplainer score ([0,1] soft mask) are "
               f"on different scales -- compare RANK/overlap, not magnitude.")
@@ -2374,7 +2374,7 @@ class Explainer(Modelling):
 
         fig, ax = plt.subplots(figsize=(9, 0.55 * len(rows) + 1.4))
         ax.axis('off')
-        ax.set_title(f"LOO vs. GNNExplainer node importance: {self.viewpoint_object} #{order_id}  "
+        ax.set_title(f"LOO vs. GNNExplainer node importance: {self.kpi_viewpoint} #{order_id}  "
                      f"({len(overlap)}/{top_k} agree)", fontsize=10)
         gtable = ax.table(cellText=cell_text, colLabels=col_labels, loc='center', cellLoc='center')
         gtable.auto_set_font_size(False)
@@ -2434,7 +2434,7 @@ class Explainer(Modelling):
         self.model.eval()
 
         last_event_graphs = [g for g in self.test_data
-                             if g[self.viewpoint_object]['last_event'][0].item()]
+                             if g[self.kpi_viewpoint]['last_event'][0].item()]
         sample = last_event_graphs[:n_traces]
         print(f"Running aggregate LOO-vs-GNNExplainer comparison on {len(sample)} traces…")
 
@@ -2448,7 +2448,7 @@ class Explainer(Modelling):
         n_failed = 0
         n_skipped_empty_edges = 0
         for g in sample:
-            oid = g[self.viewpoint_object]['id'][0].item()
+            oid = g[self.kpi_viewpoint]['id'][0].item()
             n_nodes = sum(g[nt].x.size(0) for nt in g.node_types)
 
             # PyG's GNNExplainer._initialize_masks() calls indices.max() on each
@@ -2718,7 +2718,7 @@ class Explainer(Modelling):
 
         print(f"\n{'='*60}")
         print(f"[EXPERIMENTAL] GNNExplainer edge importance for "
-              f"{self.viewpoint_object} #{order_id}")
+              f"{self.kpi_viewpoint} #{order_id}")
         print(f"  Predicted remaining time : {round(baseline_value / 3600)} hours")
         print(f"\nTop {top_k} edges by |mask - 0.5| (distance from a no-op mask):")
         for rank, (et, local_idx, val) in enumerate(edge_rows[:top_k], 1):
