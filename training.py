@@ -8,8 +8,7 @@ import numpy as np
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
-from model_classes import REG_GNN, HGT_CLASS, HGT
-from torchmetrics import F1Score
+from model_classes import REG_GNN, HGT
 
 import sup_funcs as sf
 import pandas as pd
@@ -53,46 +52,43 @@ class Modelling:
             self.early_stop_patience = 4
 
         kpi_type = self.path_dict['kpi_type']
+        if kpi_type != 0:
+            raise NotImplementedError(
+                f"kpi_type={kpi_type} is not supported -- only regression (kpi_type=0) is "
+                f"implemented. The binary-classification path (BinaryModelling, HGT_CLASS, "
+                f"class_train/class_eval) was removed as unused/abandoned scaffolding."
+            )
 
         # Load model defaults if sweep is not succesful
-        _DEFAULTS = {
-            0: {'hidden_channels': 64, 'num_layers': 2, 'num_heads': 2, 'lr': 0.001, 'weight_decay': 1e-5},
-            1: {'hidden_channels': 64, 'num_layers': 2, 'num_heads': 2, 'lr': 0.001, 'weight_decay': 1e-5},
-        }
-        if kpi_type == 0:  # Regression
-            # Appropriately name the task
-            self.task_id = f"TimeFrom_{self.kpi_viewpoint}_to_{self.path_dict['kpi_event']}"
-            self.params = self._load_params() or _DEFAULTS[0] # Ensure there are sweep hyperparemeters to load
-            self.model = self._build_model(self.params)
+        _DEFAULTS = {'hidden_channels': 64, 'num_layers': 2, 'num_heads': 2, 'lr': 0.001, 'weight_decay': 1e-5}
 
-            # Standardize the output values.
-            # Checks if there is a saved file containing the standardized values to import
-            train_y_all = torch.cat([g[self.kpi_viewpoint].y for g in self.train_data])
-            _model_dir = f"{self.path_dict['model_path']}/Hetero"
-            _norm_path = f"{_model_dir}/{self.task_id}_norm.json"
-            if os.path.exists(_norm_path):
-                with open(_norm_path) as _f:
-                    _saved = json.load(_f)
-                target_mean = torch.tensor(_saved["target_mean"])
-                target_std  = torch.tensor(_saved["target_std"])
-            else:
-                target_mean, target_std = train_y_all.mean(), train_y_all.std()
-            for m in [self.train_data, self.val_data, self.test_data]:
-                for g in m:
-                    g[self.kpi_viewpoint].y = (g[self.kpi_viewpoint].y - target_mean) / target_std
+        # Appropriately name the task
+        self.task_id = f"TimeFrom_{self.kpi_viewpoint}_to_{self.path_dict['kpi_event']}"
+        self.params = self._load_params() or _DEFAULTS # Ensure there are sweep hyperparemeters to load
+        self.model = self._build_model(self.params)
 
-            # Print out the Mean and STD of the chosen regression database
-            print(f"Training-set target normalization stats -- Mean (hours): "
-                  f"{round(target_mean.item() / 3600)}, STD (hours): {round(target_std.item() / 3600)} "
-                  f"(used to z-normalize the remaining-time target and as the '>1 std = large shift' "
-                  f"threshold in LOO; not a validation/error metric)")
-            self.target_mean, self.target_std = target_mean.to(self.device), target_std.to(self.device)
+        # Standardize the output values.
+        # Checks if there is a saved file containing the standardized values to import
+        train_y_all = torch.cat([g[self.kpi_viewpoint].y for g in self.train_data])
+        _model_dir = f"{self.path_dict['model_path']}/Hetero"
+        _norm_path = f"{_model_dir}/{self.task_id}_norm.json"
+        if os.path.exists(_norm_path):
+            with open(_norm_path) as _f:
+                _saved = json.load(_f)
+            target_mean = torch.tensor(_saved["target_mean"])
+            target_std  = torch.tensor(_saved["target_std"])
+        else:
+            target_mean, target_std = train_y_all.mean(), train_y_all.std()
+        for m in [self.train_data, self.val_data, self.test_data]:
+            for g in m:
+                g[self.kpi_viewpoint].y = (g[self.kpi_viewpoint].y - target_mean) / target_std
 
-        # Classifier
-        elif kpi_type == 1:
-            self.task_id = f"Classifier_{self.path_dict['kpi_event']}"
-            self.params = self._load_params() or _DEFAULTS[1]
-            self.model = self._build_model(self.params)
+        # Print out the Mean and STD of the chosen regression database
+        print(f"Training-set target normalization stats -- Mean (hours): "
+              f"{round(target_mean.item() / 3600)}, STD (hours): {round(target_std.item() / 3600)} "
+              f"(used to z-normalize the remaining-time target and as the '>1 std = large shift' "
+              f"threshold in LOO; not a validation/error metric)")
+        self.target_mean, self.target_std = target_mean.to(self.device), target_std.to(self.device)
 
         # Node feature standardization — Must always be performed
         # (Events contains a mix of one-hot type flags and continuous temporal features;
@@ -222,17 +218,11 @@ class Modelling:
         with open(self._params_path, 'w') as f:
             json.dump(all_params, f, indent=2)
 
-    # Constructs the appropriate model type depending on the task at hand
+    # Constructs the HGT regression model
     def _build_model(self, params):
-        kpi_type = self.path_dict['kpi_type']
-        if kpi_type == 0:
-            return HGT.HGT(hidden_channels=params['hidden_channels'], out_channels=1,
-                           num_layers=params['num_layers'], num_heads=params['num_heads'],
-                           data=self.train_data[0], viewpoint=self.kpi_viewpoint)
-        elif kpi_type == 1:
-            return HGT_CLASS.HGT_CLASS(hidden_channels=params['hidden_channels'], out_channels=2,
-                                       num_heads=params['num_heads'], num_layers=params['num_layers'],
-                                       data=self.train_data[0], viewpoint=self.kpi_viewpoint)
+        return HGT.HGT(hidden_channels=params['hidden_channels'], out_channels=1,
+                       num_layers=params['num_layers'], num_heads=params['num_heads'],
+                       data=self.train_data[0], viewpoint=self.kpi_viewpoint)
 
     """
         Heterogeneous Regression training and validation functions
@@ -272,47 +262,6 @@ class Modelling:
             total_examples += batch_size
             total_loss += float(loss) * batch_size
         return total_loss / total_examples
-
-    """
-        Hetero Classifier training and validation functions
-    """
-    def class_train(self, train_loader, optimizer, criterion):
-        self.model.train()
-
-        total_loss = total_examples = 0
-        for batch in train_loader:
-            batch = batch.to(self.device)
-            optimizer.zero_grad()
-            batch_size = len(batch[self.kpi_viewpoint].batch)
-            out = self.model(batch.x_dict, batch.edge_index_dict)
-            seed_out = out[:batch_size]
-            seed_y = batch[self.kpi_viewpoint].y[:batch_size]
-
-            loss = criterion(seed_out, seed_y)
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item() * batch_size
-            total_examples += batch_size
-        return total_loss / total_examples
-
-    @torch.no_grad()
-    def class_eval(self, loader):
-        self.model.eval()
-        total_correct = total_examples = 0
-        f1 = F1Score("binary")
-        for batch in loader:
-            batch = batch.to(self.device)
-            out = self.model(batch.x_dict, batch.edge_index_dict)
-            batch_size = len(batch[self.kpi_viewpoint].batch)
-            seed_out = out[:batch_size].argmax(dim=-1)
-            seed_y = batch[self.kpi_viewpoint].y[:batch_size]
-
-            total_correct += (seed_out == seed_y).sum().item()
-            f1(seed_out, seed_y)
-            total_examples += batch_size
-
-        return total_correct / total_examples, f1.compute().item()
 
     def Het_Reg_Modelling(self, training_data, val_data, test_data):
         # Estanlish seeds to ensure replicability
@@ -932,16 +881,8 @@ class Modelling:
         plt.close()
         print(f"Training curves saved to {out_path}")
 
-    def BinaryModelling(self, training_data, val_data, test_data):
-        raise NotImplementedError("BinaryModelling not yet implemented")
-
     def Modelling(self):
         """
-            Main function, obtains the relevant files and selects the appropriate training and validation functions to
-            run for the chosen KPI
+            Main function: trains the HGT regression model.
         """
-        kpi_type = self.path_dict['kpi_type']
-        if kpi_type == 0: # Regression
-            self.Het_Reg_Modelling(self.train_data, self.val_data, self.test_data)
-        elif kpi_type == 1: #Binary Classification
-            self.BinaryModelling(self.train_data, self.val_data, self.test_data)
+        self.Het_Reg_Modelling(self.train_data, self.val_data, self.test_data)

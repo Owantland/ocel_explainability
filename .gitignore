@@ -219,3 +219,11 @@ __marimo__/
 /files/explainer_outputs/
 /files/results.csv
 /data/
+
+# Legacy/vendored/reference material - large, not source, would otherwise be at risk of an
+# accidental bulk `git add -A`/`git add .` staging several GB into history
+/old_version/
+/shelved_ideas/
+/GNN-land-use-main/
+/files/papers/
+/files/papers_full/
