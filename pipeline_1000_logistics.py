@@ -28,7 +28,7 @@ print("\n" + "=" * 60)
 print("VALIDATION")
 print("=" * 60)
 
-vp = m.viewpoint_object
+vp = m.kpi_viewpoint
 records = []
 
 with torch.no_grad():

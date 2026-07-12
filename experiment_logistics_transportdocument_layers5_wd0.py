@@ -37,7 +37,7 @@ CHECKPOINT_PATH = 'files/models/logistics/1000/Hetero/TimeFrom_TransportDocument
 BASELINE_ARCH = {'hidden_channels': 64, 'num_layers': 3, 'num_heads': 2}
 
 m = t.Modelling(DATABASE, CANT)
-vp = m.viewpoint_object
+vp = m.kpi_viewpoint
 print(f"Task ID: {m.task_id}")
 print(f"Params loaded from model_params.json (used for the NEW experiment): {m.params}")
 print(f"Actual architecture of the on-disk checkpoint (from state_dict inspection): {BASELINE_ARCH}")

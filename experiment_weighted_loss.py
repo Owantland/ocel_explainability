@@ -33,7 +33,7 @@ import random
 random.seed(42)
 np.random.seed(42)
 
-vp = m.viewpoint_object
+vp = m.kpi_viewpoint
 batch_size = m.path_dict.get('batch_size', 16)
 train_loader = DataLoader(m.train_data, batch_size=batch_size, shuffle=True)
 val_loader   = DataLoader(m.val_data,   batch_size=batch_size, shuffle=False)

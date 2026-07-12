@@ -327,12 +327,12 @@ class Explainer(Modelling):
         feature_importances.sort(key=lambda t: t[1], reverse=True)
         return feature_importances[:top_k]
 
-    def reg_explanation_subgraph(self, graph, seed_paper_idx, node_importances,
+    def reg_explanation_subgraph(self, graph, object_idx, node_importances,
                                  edge_importances, node_top_k=10):
         """Build a NetworkX subgraph from LOO regression importance scores."""
         import networkx as nx
 
-        seed_key = (self.kpi_viewpoint, seed_paper_idx)
+        seed_key = (self.kpi_viewpoint, object_idx)
         G = nx.MultiDiGraph()
         G.add_node(seed_key, node_type=self.kpi_viewpoint, importance=1.0,
                    signed_importance=0.0, is_seed=True, large_shift=False, is_connector=False)
@@ -413,7 +413,9 @@ class Explainer(Modelling):
 
         try:
             pos = nx.kamada_kawai_layout(G)
-        except Exception:
+        except Exception as exc:
+            print(f"  [layout] kamada_kawai_layout failed ({type(exc).__name__}: {exc}), "
+                  f"falling back to spring_layout")
             pos = nx.spring_layout(G, seed=42, k=0.9)
 
         # Sign color: green = this element's actual value pushed the prediction toward a
@@ -491,15 +493,15 @@ class Explainer(Modelling):
         plt.close()
         print(f"Saved explanation subgraph visualization to {save_path}")
 
-    def evaluate_explanation_quality(self, graph, paper_idx, node_importances, edge_importances,
+    def evaluate_explanation_quality(self, graph, object_idx, node_importances, edge_importances,
                                      node_top_k=10, edge_top_k=15, verbose=True):
         """Compute fidelity+/-, characterization, and sparsity for regression explanations."""
-        baseline_value = self._predict_value_for_graph(graph, paper_idx)
+        baseline_value = self._predict_value_for_graph(graph, object_idx)
 
         explanation_nodes_by_type = {}
         for nt, i, _shift, _large, _signed in node_importances[:node_top_k]:
             explanation_nodes_by_type.setdefault(nt, set()).add(i)
-        explanation_nodes_by_type.setdefault(self.kpi_viewpoint, set()).add(paper_idx)
+        explanation_nodes_by_type.setdefault(self.kpi_viewpoint, set()).add(object_idx)
 
         explanation_edges_by_type = {}
         for et, e, _shift, _large, _signed in edge_importances[:edge_top_k]:
@@ -518,7 +520,7 @@ class Explainer(Modelling):
                 dtype=torch.bool, device=self.device,
             )
             complement[et].edge_index = edge_index[:, keep]
-        pred_complement = self._predict_value_for_graph(graph, paper_idx, perturbed_graph=complement)
+        pred_complement = self._predict_value_for_graph(graph, object_idx, perturbed_graph=complement)
         fidelity_plus = abs(baseline_value - pred_complement)
 
         # Fidelity-: keep ONLY the explanation
@@ -538,7 +540,7 @@ class Explainer(Modelling):
                 dtype=torch.bool, device=self.device,
             )
             subgraph[et].edge_index = edge_index[:, keep]
-        pred_subgraph = self._predict_value_for_graph(graph, paper_idx, perturbed_graph=subgraph)
+        pred_subgraph = self._predict_value_for_graph(graph, object_idx, perturbed_graph=subgraph)
         fidelity_minus = abs(baseline_value - pred_subgraph)
 
         denom = fidelity_plus + fidelity_minus
@@ -1049,7 +1051,8 @@ class Explainer(Modelling):
                 summary_std[k] = round(statistics.stdev(vals), 6) if len(vals) > 1 else 0.0
             writer.writerow(summary_std)
 
-        print(f"\nAggregate explanation quality (n={len(all_metrics)} traces):")
+        print(f"\nAggregate explanation quality (n={len(all_metrics)} traces, "
+              f"{n_failed} failed/skipped out of {len(sample)} sampled):")
         for k in metric_keys:
             vals = [m[k] for m in all_metrics]
             mean_v = sum(vals) / len(vals) if vals else float("nan")
@@ -1432,7 +1435,9 @@ class Explainer(Modelling):
         import networkx as nx
         try:
             pos = nx.kamada_kawai_layout(G)
-        except Exception:
+        except Exception as exc:
+            print(f"  [layout] kamada_kawai_layout failed ({type(exc).__name__}: {exc}), "
+                  f"falling back to spring_layout")
             pos = nx.spring_layout(G, seed=42, k=0.9)
 
         node_colors = [type_colors.get(attrs['node_type'], 'gray') for _, attrs in G.nodes(data=True)]

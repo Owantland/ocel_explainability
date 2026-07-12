@@ -199,7 +199,7 @@ else:
     _fail("target_std in seconds", f"std={ts:.1f} — looks like hours, not seconds?")
 
 # --- 3c. Normalised node features on training data have mean ≈ 0 per dim ---
-# Check Events and viewpoint_object as representative types
+# Check Events and kpi_viewpoint as representative types
 problem_features = []
 for nt in ['Events', vp]:
     xs = [g[nt].x for g in m.train_data if g[nt].num_nodes > 0]

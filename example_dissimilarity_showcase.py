@@ -177,7 +177,7 @@ palette = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2",
            "#937860", "#DA8BC3", "#8C8C8C"]
 all_types = sorted(base.node_types)
 type_colors = {nt: palette[i % len(palette)] for i, nt in enumerate(all_types)}
-seed_key = (e.viewpoint_object, 0)
+seed_key = (e.kpi_viewpoint, 0)
 
 # Union graph (combined scenario is a superset of every other scenario's node set)
 # for a single shared layout.

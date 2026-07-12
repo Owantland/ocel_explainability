@@ -19,7 +19,7 @@ m = t.Modelling(DATABASE, CANT)
 m.model.load_state_dict(torch.load(m.model_path, weights_only=False))
 m.model.eval()
 
-vp = m.viewpoint_object   # 'Orders'
+vp = m.kpi_viewpoint   # 'Orders'
 records = []
 
 with torch.no_grad():

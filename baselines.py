@@ -147,7 +147,7 @@ def hgt_predictions(m) -> tuple[pd.DataFrame, float]:
     fitting/prediction time are measured separately elsewhere)."""
     m.model.load_state_dict(torch.load(m.model_path, weights_only=False))
     m.model.eval()
-    vp = m.viewpoint_object
+    vp = m.kpi_viewpoint
     records = []
     pred_time_s = 0.0
     with torch.no_grad():
@@ -188,7 +188,7 @@ def homo_predictions(m) -> "tuple[pd.DataFrame, float]":
     denormalised predictions plus the wall-clock prediction time in seconds."""
     from model_classes import REG_GNN
 
-    vp = m.viewpoint_object
+    vp = m.kpi_viewpoint
     het_test = [g for g in m.test_data if g[vp].y.shape[0] > 0]
     homo_test = m._hetero_to_homo(m.test_data)
     homo_model_path = m.model_path.replace(".pth", "_homo.pth")

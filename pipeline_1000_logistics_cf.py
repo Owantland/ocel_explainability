@@ -10,7 +10,7 @@ DATABASE = 'logistics'
 CANT = 1000
 
 e = exp.Explainer(DATABASE, CANT)
-vp = e.viewpoint_object
+vp = e.kpi_viewpoint
 
 # Group prefixes by case, tracking each case's recorded depths (Events node count).
 depths_by_case = {}
