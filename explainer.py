@@ -298,22 +298,34 @@ class Explainer(Modelling):
                 grouped[nt].append((idx, shift, large, signed_shift))
         return grouped
 
+    def _loo_shift_for_nodes(self, explain_subgraph, object_idx, baseline_value, node_keys):
+        """Zero each (node_type, idx) in node_keys' feature vector in turn and record
+        the resulting signed/absolute prediction shift, one at a time -- the same
+        single-node perturbation reg_explanation() applies exhaustively to every node
+        in the graph, factored out so it can also be called on an arbitrary caller-
+        supplied subset (see explain_gnn_primary(), which calls this only on the
+        node instances GNNExplainer identified, not the whole graph)."""
+        node_importances = []
+        for node_type, idx in node_keys:
+            perturbed = explain_subgraph.clone()
+            perturbed[node_type].x[idx] = 0.0
+            pred = self._predict_value_for_graph(explain_subgraph, object_idx, perturbed_graph=perturbed)
+            signed_shift = baseline_value - pred
+            shift = abs(signed_shift)
+            large_shift = shift > self.target_std.item()
+            node_importances.append((node_type, idx, shift, large_shift, signed_shift))
+        return node_importances
+
     def reg_explanation(self, explain_subgraph, object_idx, graph_id, top_k):
         baseline_value = self._predict_value_for_graph(explain_subgraph, object_idx)
 
-        node_importances = []
-        for node_type in explain_subgraph.node_types:
-            n = explain_subgraph[node_type].x.size(0)
-            for idx in range(n):
-                if node_type == self.kpi_viewpoint and idx == object_idx:
-                    continue
-                perturbed = explain_subgraph.clone()
-                perturbed[node_type].x[idx] = 0.0
-                pred = self._predict_value_for_graph(explain_subgraph, object_idx, perturbed_graph=perturbed)
-                signed_shift = baseline_value - pred
-                shift = abs(signed_shift)
-                large_shift = shift > self.target_std.item()
-                node_importances.append((node_type, idx, shift, large_shift, signed_shift))
+        all_node_keys = [
+            (node_type, idx)
+            for node_type in explain_subgraph.node_types
+            for idx in range(explain_subgraph[node_type].x.size(0))
+            if not (node_type == self.kpi_viewpoint and idx == object_idx)
+        ]
+        node_importances = self._loo_shift_for_nodes(explain_subgraph, object_idx, baseline_value, all_node_keys)
 
         edge_importances = []
         for edge_type in explain_subgraph.edge_types:
@@ -2191,6 +2203,46 @@ class Explainer(Modelling):
             "save_dir": save_dir,
         }
 
+    def _gnn_node_instance_ranking(self, node_mask_dict):
+        """Aggregate GNNExplainer's per-(node, feature) soft mask
+        (node_mask_dict[nt]: [n_nodes, n_feats]) down to one score per node INSTANCE
+        (mean |mask| across that node's own features), sorted descending. Returns
+        [(node_type, idx, score), ...]. Shared by compare_loo_gnn_importance() (rank/
+        overlap comparison against LOO) and explain_gnn_primary() (GNNExplainer as
+        the primary structural identifier, with LOO reduced to a targeted impact
+        estimate over exactly the node instances this ranking selects)."""
+        import numpy as np
+        gnn_scores = []
+        for nt, mask in node_mask_dict.items():
+            per_node = np.abs(mask).mean(axis=1)
+            for idx, val in enumerate(per_node):
+                gnn_scores.append((nt, idx, float(val)))
+        gnn_scores.sort(key=lambda r: r[2], reverse=True)
+        return gnn_scores
+
+    def _induced_edges(self, graph, included_keys):
+        """Real edges in graph where both endpoints are in included_keys (a set of
+        (node_type, idx) tuples), in the (edge_type, e_idx, shift, large,
+        signed_shift) schema evaluate_explanation_quality()/reg_explanation_subgraph()
+        expect, with a placeholder shift=0.0 -- these edges carry no importance
+        score of their own (GNNExplainer supplies none on this architecture), they
+        exist purely to keep evaluate_explanation_quality()'s Fidelity- ('keep ONLY
+        the explanation') subgraph topologically connected instead of edgeless.
+        Without this, Fidelity- with edge_importances=[] strips every edge
+        regardless of endpoints, so it measures 'can the model run with zero
+        edges at all' rather than 'does this node selection reproduce the
+        prediction' -- always bad, independent of which nodes were selected."""
+        included = set(included_keys)
+        induced = []
+        for edge_type in graph.edge_types:
+            src_type, _, dst_type = edge_type
+            edge_index = graph[edge_type].edge_index
+            for e in range(edge_index.size(1)):
+                src, dst = edge_index[:, e].tolist()
+                if (src_type, src) in included and (dst_type, dst) in included:
+                    induced.append((edge_type, e, 0.0, False, 0.0))
+        return induced
+
     def compare_loo_gnn_importance(self, order_id, top_k=5, n_events=None,
                                    epochs=200, lr=0.01, save_dir=None):
         """Compare which NODE instances LOO (reg_explanation, signed prediction-shift
@@ -2239,15 +2291,7 @@ class Explainer(Modelling):
                         for rank, (nt, idx, shift, large, signed_shift) in enumerate(loo_ranked, 1)}
         loo_top_keys = [(nt, idx) for nt, idx, *_ in loo_ranked[:top_k]]
 
-        # GNNExplainer: aggregate node_mask_dict[nt] ([n_nodes, n_feats]) down to one
-        # score per node INSTANCE (mean |mask| across that node's own features) --
-        # the new piece of logic this method adds; existing code never does this.
-        gnn_scores = []
-        for nt, mask in gnn_result['node_mask_dict'].items():
-            per_node = np.abs(mask).mean(axis=1)
-            for idx, val in enumerate(per_node):
-                gnn_scores.append((nt, idx, float(val)))
-        gnn_scores.sort(key=lambda r: r[2], reverse=True)
+        gnn_scores = self._gnn_node_instance_ranking(gnn_result['node_mask_dict'])
         gnn_rank_map = {(nt, idx): (rank, val) for rank, (nt, idx, val) in enumerate(gnn_scores, 1)}
         gnn_top_keys = [(nt, idx) for nt, idx, val in gnn_scores[:top_k]]
 
@@ -2541,6 +2585,289 @@ class Explainer(Modelling):
             'type_table': type_table,
             'mean_overlap': mean_overlap,
             'std_overlap': std_overlap,
+            'n_failed': n_failed,
+            'n_skipped_empty_edges': n_skipped_empty_edges,
+            'save_dir': save_dir,
+        }
+
+    # ── GNNExplainer as PRIMARY structural identifier, LOO as targeted impact ───
+    # estimator. Distinct from compare_loo_gnn_importance() above, which runs both
+    # methods independently and compares their rankings -- here GNNExplainer's
+    # ranking IS the explanation, and LOO only ever evaluates the specific node
+    # instances GNNExplainer flagged (never an exhaustive sweep). Additive: does
+    # not replace explain_trace()/explain_aggregate(), which remain the only
+    # source of edge importance (GNNExplainer has none on this architecture, see
+    # _get_gnn_explainer's docstring) and of full exhaustive-LOO rankings.
+
+    def explain_gnn_primary(self, order_id, top_k=5, epochs=200, lr=0.01,
+                            n_events=None, save_dir=None):
+        """Explain a single trace with GNNExplainer as the primary identifier of
+        important structural elements, and LOO reduced to a targeted impact
+        estimate over exactly the node instances GNNExplainer identifies --
+        inverting explain_trace()'s roles, where exhaustive LOO does both jobs.
+
+        Node-only scope: GNNExplainer has no edge signal on this architecture --
+        use explain_trace() for edge importance.
+
+        n_events: None (default) explains the order's last recorded prefix; an
+                     int explains the prefix with exactly that many Events nodes
+                     (see _locate_test_graph), matching explain_trace()'s
+                     convention.
+        """
+        if save_dir is None:
+            suffix = f"_ev{n_events}" if n_events is not None else ""
+            save_dir = os.path.join(self.path_dict['explainer_path'],
+                                    f"order_{order_id}{suffix}_gnnprimary")
+        os.makedirs(save_dir, exist_ok=True)
+
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        graph = self._locate_test_graph(order_id, n_events)
+        object_idx = 0
+        baseline_value = self._predict_value_for_graph(graph, object_idx)
+        n_q = graph['Events'].x.size(0) if 'Events' in graph.node_types else '?'
+
+        # GNNExplainer identifies the important node instances.
+        x_dict = {nt: graph[nt].x for nt in graph.node_types}
+        gnn_explainer = self._get_gnn_explainer(epochs, lr)
+        explanation = gnn_explainer(x_dict, graph.edge_index_dict, index=object_idx)
+        node_mask_dict = {nt: explanation.node_mask_dict[nt].detach().cpu().numpy()
+                          for nt in graph.node_types if nt in explanation.node_mask_dict}
+        gnn_ranking = self._gnn_node_instance_ranking(node_mask_dict)
+        gnn_score_map = {(nt, idx): score for nt, idx, score in gnn_ranking}
+        identified_keys = [(nt, idx) for nt, idx, _ in gnn_ranking
+                           if not (nt == self.kpi_viewpoint and idx == object_idx)][:top_k]
+
+        # LOO estimates the impact of exactly these identified nodes -- not an
+        # exhaustive sweep over the whole graph.
+        node_importances = self._loo_shift_for_nodes(graph, object_idx, baseline_value, identified_keys)
+        node_importances.sort(key=lambda t: t[2], reverse=True)
+
+        # Joint impact of masking all identified nodes out together -- reuses
+        # evaluate_explanation_quality()'s Fidelity+/- as-is. GNNExplainer has no
+        # edge importance signal to feed it, but the real edges among the
+        # identified nodes + seed still need to be passed (see _induced_edges'
+        # docstring) so Fidelity- reflects "does this node selection reproduce
+        # the prediction" rather than "can the model run with zero edges".
+        included_keys = set(identified_keys) | {(self.kpi_viewpoint, object_idx)}
+        induced_edges = self._induced_edges(graph, included_keys)
+        quality = self.evaluate_explanation_quality(
+            graph, object_idx, node_importances, induced_edges,
+            node_top_k=top_k, edge_top_k=max(len(induced_edges), 1), verbose=False
+        )
+
+        seed_feature_importances = self.reg_feature_importance_for_node_in_graph(
+            graph, self.kpi_viewpoint, object_idx, baseline_value, object_idx, top_k=top_k
+        )
+        if identified_keys:
+            top_node_type, top_node_idx = identified_keys[0]
+            top_node_feature_importances = self.reg_feature_importance_for_node_in_graph(
+                graph, top_node_type, top_node_idx, baseline_value, object_idx, top_k=top_k
+            )
+        else:
+            top_node_type, top_node_idx, top_node_feature_importances = None, None, []
+
+        print(f"\n{'='*60}")
+        print(f"GNNExplainer-primary explanation for {self.kpi_viewpoint} #{order_id}")
+        print(f"  Predicted remaining time : {round(baseline_value / 3600)} hours "
+              f"| prefix length: {n_q} events")
+        print(f"  {len(identified_keys)} node(s) identified by GNNExplainer (epochs={epochs}, "
+              f"lr={lr}); shifts below are LOO's TARGETED impact estimate for exactly these "
+              f"nodes, not an exhaustive graph-wide ranking (see explain_trace() for that).")
+
+        print(f"\nIdentified nodes (GNNExplainer rank → LOO impact):")
+        for rank, (nt, idx, shift, large, signed_shift) in enumerate(node_importances, 1):
+            flag = "  [LARGE SHIFT]" if large else ""
+            print(f"  {rank}. {nt}[{idx}]  gnn_score={gnn_score_map.get((nt, idx), float('nan')):.4f}  "
+                  f"shift={signed_shift/3600:+.2f}h{flag}")
+
+        print(f"\nEdge importance: not available in this pathway -- GNNExplainer has no edge "
+              f"signal on this architecture (see _get_gnn_explainer docstring). Use "
+              f"explain_trace() for edge importance.")
+
+        print(f"\nJoint impact of masking all {len(identified_keys)} identified node(s) together:")
+        print(f"  Fidelity+        : {quality['fidelity_plus']:.4f}h")
+        print(f"  Fidelity−        : {quality['fidelity_minus']:.4f}h")
+        print(f"  Characterization : {quality['characterization_score']:.4f}")
+        print(f"  Node sparsity    : {quality['node_sparsity']:.2%}")
+
+        self.plot_node_type_summary(node_importances, os.path.join(save_dir, "node_type_summary.png"))
+        if seed_feature_importances:
+            self.plot_feature_importances(
+                self.kpi_viewpoint, seed_feature_importances,
+                os.path.join(save_dir, f"feat_importance_{self.kpi_viewpoint}.png"), order_id=order_id
+            )
+        if top_node_feature_importances:
+            self.plot_feature_importances(
+                top_node_type, top_node_feature_importances,
+                os.path.join(save_dir, f"feat_importance_{top_node_type}.png"), order_id=order_id
+            )
+        G = self.reg_explanation_subgraph(graph, object_idx, node_importances, [], node_top_k=top_k)
+        self.reg_visualize_explanation_subgraph(G, os.path.join(save_dir, "explanation_subgraph.png"))
+
+        import pandas as pd
+        csv_path = os.path.join(save_dir, "gnnprimary_node_importance.csv")
+        pd.DataFrame([
+            {'rank': r, 'node_type': nt, 'node_idx': idx,
+             'gnn_score': gnn_score_map.get((nt, idx)),
+             'loo_signed_shift_hours': signed_shift / 3600.0, 'large_shift': large}
+            for r, (nt, idx, shift, large, signed_shift) in enumerate(node_importances, 1)
+        ]).to_csv(csv_path, index=False)
+
+        print(f"\nOutputs saved to: {save_dir}")
+        print('='*60)
+
+        return {
+            'order_id': order_id,
+            'predicted_hours': baseline_value / 3600.0,
+            'identified_keys': identified_keys,
+            'node_importances': node_importances,
+            'quality': quality,
+            'save_dir': save_dir,
+        }
+
+    def explain_gnn_primary_aggregate(self, n_traces=50, top_k=5, epochs=200,
+                                      lr=0.01, save_dir=None):
+        """Aggregate version of explain_gnn_primary(): for each of the first
+        n_traces last-event test graphs (same deterministic sampling as
+        explain_aggregate()), GNNExplainer identifies the top-k important node
+        instances and LOO estimates their impact -- individually and jointly
+        (Fidelity+/-/characterization) -- reporting mean +/- std across traces.
+        Directly comparable to aggregate_metrics.csv's exhaustive-LOO numbers
+        from explain_aggregate(), answering whether this cheaper, GNNExplainer-
+        driven explanation loses fidelity relative to full LOO.
+
+        Uses the lower-level primitives directly (as
+        compare_loo_gnn_importance_aggregate() does) rather than looping
+        explain_gnn_primary()'s full wrapper, to avoid writing per-trace plot
+        files n_traces times.
+        """
+        import numpy as np
+        import pandas as pd
+        from collections import defaultdict
+
+        if save_dir is None:
+            save_dir = os.path.join(self.path_dict['explainer_path'], "aggregate_gnnprimary")
+        os.makedirs(save_dir, exist_ok=True)
+
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        vp = self.kpi_viewpoint
+        last_event_graphs = [g for g in self.test_data if g[vp]['last_event'][0].item()]
+        sample = last_event_graphs[:n_traces]
+        print(f"Running aggregate GNNExplainer-primary explanation on {len(sample)} traces…")
+
+        gnn_explainer = self._get_gnn_explainer(epochs, lr)
+
+        type_counts = defaultdict(int)
+        type_shifts = defaultdict(list)
+        rows = []
+        n_failed = 0
+        n_skipped_empty_edges = 0
+        for g in sample:
+            oid = int(g[vp]['id'][0].item())
+
+            # Same PyG GNNExplainer._initialize_masks() limitation documented in
+            # compare_loo_gnn_importance_aggregate(): crashes on a legitimately-
+            # empty edge type, regardless of node-vs-edge masking mode.
+            empty_etypes = [et for et in g.edge_types if g[et].edge_index.size(1) == 0]
+            if empty_etypes:
+                n_skipped_empty_edges += 1
+                print(f"  [trace skipped] order={oid}: {len(empty_etypes)} edge type(s) with "
+                      f"zero edges -- GNNExplainer can't initialize masks for an empty relation")
+                continue
+
+            try:
+                object_idx = 0
+                baseline_value = self._predict_value_for_graph(g, object_idx)
+                x_dict = {nt: g[nt].x for nt in g.node_types}
+                explanation = gnn_explainer(x_dict, g.edge_index_dict, index=object_idx)
+                node_mask_dict = {nt: explanation.node_mask_dict[nt].detach().cpu().numpy()
+                                  for nt in g.node_types if nt in explanation.node_mask_dict}
+                gnn_ranking = self._gnn_node_instance_ranking(node_mask_dict)
+                identified_keys = [(nt, idx) for nt, idx, _ in gnn_ranking
+                                   if not (nt == vp and idx == object_idx)][:top_k]
+
+                node_importances = self._loo_shift_for_nodes(g, object_idx, baseline_value, identified_keys)
+                for nt, idx, shift, large, signed_shift in node_importances:
+                    type_counts[nt] += 1
+                    type_shifts[nt].append(shift / 3600.0)
+
+                included_keys = set(identified_keys) | {(vp, object_idx)}
+                induced_edges = self._induced_edges(g, included_keys)
+                quality = self.evaluate_explanation_quality(
+                    g, object_idx, node_importances, induced_edges,
+                    node_top_k=top_k, edge_top_k=max(len(induced_edges), 1), verbose=False
+                )
+                rows.append({
+                    'order_id': oid,
+                    'n_identified': len(identified_keys),
+                    'fidelity_plus': quality['fidelity_plus'],
+                    'fidelity_minus': quality['fidelity_minus'],
+                    'characterization_score': quality['characterization_score'],
+                    'node_sparsity': quality['node_sparsity'],
+                })
+            except Exception as ex:
+                n_failed += 1
+                print(f"  [trace failed] order={oid}: {type(ex).__name__}: {ex}")
+                continue
+
+        table = pd.DataFrame(rows)
+        csv_path = os.path.join(save_dir, "aggregate_gnnprimary_metrics.csv")
+        table.to_csv(csv_path, index=False)
+
+        print(f"\nAggregate GNNExplainer-primary explanation (n={len(table)} traces, "
+              f"{n_skipped_empty_edges} skipped [empty edge type], {n_failed} failed [other], "
+              f"top_k={top_k}):")
+        print(f"  Fidelity+        : {table['fidelity_plus'].mean():.4f}h ± "
+              f"{table['fidelity_plus'].std():.4f}h")
+        print(f"  Fidelity−        : {table['fidelity_minus'].mean():.4f}h ± "
+              f"{table['fidelity_minus'].std():.4f}h")
+        print(f"  Characterization : {table['characterization_score'].mean():.4f} ± "
+              f"{table['characterization_score'].std():.4f}")
+        print(f"  Node sparsity    : {table['node_sparsity'].mean():.2%}")
+
+        print(f"\nNode-type selection frequency (share of traces' top-{top_k} identified "
+              f"by GNNExplainer):")
+        type_table_rows = []
+        for nt in sorted(type_counts, key=lambda t: type_counts[t], reverse=True):
+            shifts = np.array(type_shifts[nt])
+            freq = type_counts[nt] / (len(table) * top_k) if len(table) else float('nan')
+            print(f"  {nt:<12} selected {type_counts[nt]:>4}x  ({freq:.1%} of top-{top_k} slots)  "
+                  f"mean shift={shifts.mean():.2f}h ± {shifts.std():.2f}h")
+            type_table_rows.append({
+                'node_type': nt, 'selection_count': type_counts[nt], 'selection_frequency': freq,
+                'mean_shift_hours': shifts.mean(), 'std_shift_hours': shifts.std(),
+            })
+        type_table = pd.DataFrame(type_table_rows)
+        type_csv_path = os.path.join(save_dir, "aggregate_gnnprimary_type_summary.csv")
+        type_table.to_csv(type_csv_path, index=False)
+
+        fig, ax = plt.subplots(figsize=(7, 4.5), facecolor='#fcfcfb')
+        ax.set_facecolor('#fcfcfb')
+        ax.bar(type_table['node_type'], type_table['mean_shift_hours'],
+              yerr=type_table['std_shift_hours'], color='#2a78d6', alpha=0.9, capsize=4)
+        ax.set_xlabel("Node type")
+        ax.set_ylabel("Mean LOO impact if masked (hours)")
+        ax.set_title(f"GNNExplainer-identified node impact by type (n={len(table)} traces)",
+                    fontsize=11, loc='left')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        plt.xticks(rotation=30, ha='right')
+        plt.tight_layout()
+        png_path = os.path.join(save_dir, "aggregate_gnnprimary_type_summary.png")
+        plt.savefig(png_path, dpi=150)
+        plt.close()
+
+        print(f"\nSaved {csv_path}")
+        print(f"Saved {type_csv_path}")
+        print(f"Saved {png_path}")
+
+        return {
+            'table': table,
+            'type_table': type_table,
             'n_failed': n_failed,
             'n_skipped_empty_edges': n_skipped_empty_edges,
             'save_dir': save_dir,

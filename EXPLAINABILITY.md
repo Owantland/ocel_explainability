@@ -348,6 +348,47 @@ an independent cross-check on LOO rather than a replacement for it.
   `clear_masks()`, not true ablation) kept apart from the production `explain_gnn_subgraph` path
   pending validation. Not comparable to LOO's edge ranking; not called by any pipeline script.
 
+### GNNExplainer as primary identifier, LOO as targeted impact estimator (added 2026-07-13)
+
+A sixth capability, distinct from the comparison methods above: instead of running LOO and
+GNNExplainer independently and comparing their rankings, GNNExplainer's node ranking **is** the
+explanation, and LOO is reduced to a **targeted** impact estimate — computing `|Δpred|` only for
+the node instances GNNExplainer identified, not an exhaustive sweep over the whole graph. This is
+additive, not a replacement for `explain_trace()`/`explain_aggregate()`, which remain the only
+source of edge importance (GNNExplainer has none on this architecture, see `explain_gnn_subgraph`'s
+entry above) and of full exhaustive-LOO rankings.
+
+- **`explain_gnn_primary(order_id, top_k=5, epochs=200, lr=0.01, n_events=None)`** — runs
+  GNNExplainer, ranks node instances by its per-node aggregated soft mask (reusing the same
+  per-instance aggregation `compare_loo_gnn_importance()` uses), takes the top-k (excluding the
+  seed), then runs LOO's zero-and-repredict shift on exactly those nodes — individually (one shift
+  per node, same table format as `explain_trace()`) and jointly (`evaluate_explanation_quality()`'s
+  Fidelity+/-/characterization, reused as-is, over the identified set masked out together). Node-only
+  scope: the console output explicitly states edge importance isn't available in this pathway.
+- **`explain_gnn_primary_aggregate(n_traces=50, top_k=5, epochs=200, lr=0.01)`** — same idea across
+  `n_traces` last-event traces (same deterministic sampling as `explain_aggregate()`), reporting
+  mean±std joint Fidelity+/-/characterization (directly comparable to `aggregate_metrics.csv`'s
+  exhaustive-LOO numbers — "does the cheaper, GNNExplainer-driven explanation lose fidelity vs. full
+  LOO?") and per-node-type selection frequency + mean shift. Shares
+  `compare_loo_gnn_importance_aggregate()`'s empty-edge-type skip guard (same PyG
+  `GNNExplainer._initialize_masks()` limitation).
+- **Fidelity- fix specific to node-only explanations**: `evaluate_explanation_quality()`'s Fidelity-
+  ("keep ONLY the explanation") strips every edge not explicitly passed in `edge_importances` — with
+  no edge signal from GNNExplainer, passing `edge_importances=[]` directly would strip *all* edges,
+  making Fidelity- measure "can the model run with zero edges" rather than "does this node selection
+  reproduce the prediction" (confirmed empirically: Characterization collapsed to 0.48 on a real
+  order until fixed, vs. 0.95 after). `explain_gnn_primary()`/`_aggregate()` instead pass the real
+  edges connecting the identified nodes + seed (`_induced_edges()`, with a placeholder zero
+  importance score) so Fidelity- reflects real graph topology.
+- **Verified working on both datasets** (order_management, logistics): identified nodes largely
+  agree with `compare_loo_gnn_importance()`'s independent GNNExplainer ranking for the same order;
+  aggregate characterization on a 10-trace smoke sample came out noticeably lower than
+  `explain_aggregate()`'s exhaustive-LOO characterization on both datasets (order_management: 0.19
+  vs. the ~0.84 full-LOO figure tracked in `EXPLAINABILITY_DEPTH.md`; logistics: 0.02) — a real,
+  citable early signal that GNNExplainer's node selection is a weaker explanation than exhaustive
+  LOO's, not an artifact of the metric. Re-run at the full `n_traces=50` default before citing exact
+  numbers.
+
 ---
 
 ## 6. Proposed Improvements
