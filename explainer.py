@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import os
-from model_classes import HGT
 from training import Modelling
 from torch_geometric.explain import Explainer as PyGExplainer, CaptumExplainer, GNNExplainer
 
@@ -233,7 +232,7 @@ class Explainer(Modelling):
             )
             complement[et].edge_index = edge_index[:, keep]
         pred_complement = self._predict_value_for_graph(graph, object_idx, perturbed_graph=complement)
-        fidelity_plus = abs(baseline_value - pred_complement)
+        fidelity_plus = abs(baseline_value - pred_complement) / 3600.0  # hours, matching every other metric
 
         # Fidelity-: keep ONLY the explanation
         subgraph = graph.clone()
@@ -253,7 +252,7 @@ class Explainer(Modelling):
             )
             subgraph[et].edge_index = edge_index[:, keep]
         pred_subgraph = self._predict_value_for_graph(graph, object_idx, perturbed_graph=subgraph)
-        fidelity_minus = abs(baseline_value - pred_subgraph)
+        fidelity_minus = abs(baseline_value - pred_subgraph) / 3600.0  # hours, matching every other metric
 
         denom = fidelity_plus + fidelity_minus
         characterization_score = fidelity_plus / denom if denom > 1e-8 else 0.0
@@ -276,9 +275,9 @@ class Explainer(Modelling):
 
         if verbose:
             print("\n--- Explanation subgraph quality metrics ---")
-            print(f"  Fidelity+        : {fidelity_plus:.4f}  "
+            print(f"  Fidelity+        : {fidelity_plus:.4f}h  "
                   f"(higher is better -- removing the explanation should shift the prediction)")
-            print(f"  Fidelity-        : {fidelity_minus:.4f}  "
+            print(f"  Fidelity-        : {fidelity_minus:.4f}h  "
                   f"(closer to 0 is better -- the explanation alone should reproduce the prediction)")
             print(f"  Characterization : {characterization_score:.4f}  (higher is better, in [0, 1])")
             print(f"  Node sparsity    : {node_sparsity:.2%}  (share of the graph excluded from the explanation)")
@@ -495,6 +494,21 @@ class Explainer(Modelling):
         )
 
         names = self.feature_names
+
+        # Decode Events node indices to their activity type name (e.g. "Events[1]"
+        # -> "Events[1](PlaceOrder)") wherever an Events node is printed below, reusing
+        # the same decoder already used for counterfactual output (_decode_event_types*)
+        # instead of leaving raw indices unexplained in LOO's console/CSV output.
+        ev_idx_to_name = {}
+        for _name, _idxs in self._decode_event_types_with_indices(explain_subgraph).items():
+            for _i in _idxs:
+                ev_idx_to_name[_i] = _name
+
+        def _node_label(nt, idx):
+            if nt == 'Events' and idx in ev_idx_to_name:
+                return f"{nt}[{idx}]({ev_idx_to_name[idx]})"
+            return f"{nt}[{idx}]"
+
         print(f"\n{'='*60}")
         print(f"Explanation for {self.kpi_viewpoint} #{order_id}")
         print(f"  Predicted remaining time : {round(baseline_value / 3600)} hours")
@@ -515,13 +529,14 @@ class Explainer(Modelling):
                 if non_zero:
                     feat_vals = "  [" + ", ".join(f"{n}={v:.2f}" for n, v in non_zero) + "]"
             flag = "  [LARGE SHIFT]" if large else ""
-            print(f"  {rank}. {nt}[{idx}]{feat_vals}: shift={signed_shift/3600:+.2f}h{flag}")
+            print(f"  {rank}. {_node_label(nt, idx)}{feat_vals}: shift={signed_shift/3600:+.2f}h{flag}")
 
         top_per_type = self.top_nodes_per_type(node_importances, top_n=3)
         print(f"\nTop 3 nodes per type:")
         for nt in sorted(top_per_type):
             entries = ", ".join(
-                f"[{idx}]={signed_shift/3600:+.2f}h" + (" [LARGE]" if large else "")
+                (f"({ev_idx_to_name[idx]})" if nt == 'Events' and idx in ev_idx_to_name else "")
+                + f"[{idx}]={signed_shift/3600:+.2f}h" + (" [LARGE]" if large else "")
                 for idx, shift, large, signed_shift in top_per_type[nt]
             )
             print(f"  {nt:<12}: {entries}")
@@ -529,17 +544,25 @@ class Explainer(Modelling):
         import pandas as pd
         pd.DataFrame([
             {'node_type': nt, 'rank': rank, 'node_idx': idx,
+             'activity_name': ev_idx_to_name.get(idx, '') if nt == 'Events' else '',
              'shift_hours': shift / 3600, 'signed_shift_hours': signed_shift / 3600,
              'large_shift': large}
             for nt, entries in top_per_type.items()
             for rank, (idx, shift, large, signed_shift) in enumerate(entries, 1)
         ]).to_csv(os.path.join(save_dir, "top_nodes_per_type.csv"), index=False)
 
+        def _idx_label(nt, idx):
+            """Bare-index label for one endpoint of an edge, decorated with the
+            activity name only when nt is Events (no point repeating other types'
+            names, since et[0]/et[2] already print the type once for the whole edge)."""
+            return f"{idx}({ev_idx_to_name[idx]})" if nt == 'Events' and idx in ev_idx_to_name else str(idx)
+
         print(f"\nTop {top_k} edges by influence:")
         for rank, (et, e, shift, large, signed_shift) in enumerate(edge_importances[:top_k], 1):
             src, dst = explain_subgraph[et].edge_index[:, e].tolist()
             flag = "  [LARGE SHIFT]" if large else ""
-            print(f"  {rank}. {et[0]}→{et[2]} ({src}→{dst}): shift={signed_shift/3600:+.2f}h{flag}")
+            print(f"  {rank}. {et[0]}→{et[2]} ({_idx_label(et[0], src)}→{_idx_label(et[2], dst)}): "
+                  f"shift={signed_shift/3600:+.2f}h{flag}")
 
         print(f"\nTop {top_k} features on seed {self.kpi_viewpoint} node:")
         seed_names = names.get(self.kpi_viewpoint, [])
@@ -549,8 +572,8 @@ class Explainer(Modelling):
             print(f"  {rank}. {fname}: shift={signed_shift/3600:+.2f}h{flag}")
 
         print(f"\nExplanation quality metrics:")
-        print(f"  Fidelity+       : {metrics['fidelity_plus']:.4f}  (↑ better)")
-        print(f"  Fidelity−       : {metrics['fidelity_minus']:.4f}  (↓ better)")
+        print(f"  Fidelity+       : {metrics['fidelity_plus']:.4f}h  (↑ better)")
+        print(f"  Fidelity−       : {metrics['fidelity_minus']:.4f}h  (↓ better)")
         print(f"  Characterization: {metrics['characterization_score']:.4f}  (↑ better, max 1.0)")
         print(f"  Node sparsity   : {metrics['node_sparsity']:.1%}")
         print(f"  Edge sparsity   : {metrics['edge_sparsity']:.1%}")
@@ -886,20 +909,17 @@ class Explainer(Modelling):
                      early partial prefix is never compared against a population
                      dominated by fully-recorded (last-event) traces.
         """
-        import json
-
-        arch_cfg_path = self.model_path.replace('.pth', '_arch.json')
-        if os.path.exists(arch_cfg_path):
-            with open(arch_cfg_path) as f:
-                arch = json.load(f)
-            self.model = HGT.HGT(
-                hidden_channels=arch['hidden_channels'],
-                out_channels=1,
-                num_layers=arch['num_layers'],
-                num_heads=arch['num_heads'],
-                data=self.test_data[0],
-                viewpoint=self.kpi_viewpoint,
-            ).to(self.device)
+        # Note: previously rebuilt self.model from a legacy `_arch.json` sidecar here,
+        # bypassing the model_params.json-driven architecture every other explain_*
+        # method relies on (_load_params() already prioritizes model_params.json over
+        # _arch.json -- self.model, built once in __init__, already reflects that
+        # priority correctly). Removed 2026-07-13: rebuilding from a possibly-stale
+        # _arch.json risked a shape-mismatch crash or a silently-substituted model
+        # after a future retrain, and made self.model rebindable mid-session, which
+        # is also what made cached PyG/GNNExplainer explainer objects a staleness risk
+        # elsewhere in this class. Verified this fix doesn't change any currently-cited
+        # counterfactual output (dissimilarity is model-independent; predictions were
+        # already identical since _arch.json and model_params.json happened to agree).
         self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
         self.model.eval()
 
@@ -2108,9 +2128,12 @@ class Explainer(Modelling):
                                              lr=0.01, save_dir=None):
         """Aggregate version of compare_loo_gnn_importance(): for each of the first
         n_traces last-event test graphs (same deterministic sampling as
-        explain_aggregate(), so both cover the identical trace set), compute the
-        top-k node-instance overlap between LOO and GNNExplainer, then report the
-        mean/std overlap rate and its full distribution across traces.
+        explain_aggregate() -- both draw from the same ordered last-event pool, so
+        they cover the identical trace set ONLY when called with the same n_traces;
+        the two methods' defaults differ (235 here vs. 50 there), so by default they
+        do NOT cover the same set), compute the top-k node-instance overlap between
+        LOO and GNNExplainer, then report the mean/std overlap rate and its full
+        distribution across traces.
 
         Uses the LOWER-LEVEL primitives directly (reg_explanation(), and a raw
         _get_gnn_explainer() call mirroring explain_gnn_subgraph()'s internals)

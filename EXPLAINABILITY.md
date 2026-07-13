@@ -335,20 +335,14 @@ interventions but both measured on the same `|Δpred|` scale. A cleaner design w
 node/edge and feature importances on separate scales, or normalize edge shifts by the expected
 impact of removing one edge from a graph of that size.
 
-### Readable event names in LOO output
+### ~~Readable event names in LOO output~~ RESOLVED (2026-07-13)
 
-Events are currently printed as `Events[1] [type_0=3.16, type_1=-0.33]`. The one-hot dimensions
-map directly to event types (`PlaceOrder`, `ConfirmOrder`, `PickItem`, etc. for order_management;
-different names for logistics) but this mapping is not decoded anywhere in the LOO output path
-(`reg_explanation`/`explain_trace`/`plot_feature_importances`) — still true as of 2026-07-12,
-**with one update**: a correct, verified index-to-name decoder (`_decode_event_types`/
-`_decode_event_types_with_indices`, index-consistent end-to-end with `ocel_generator.py`'s
-one-hot construction) now exists elsewhere in `explainer.py`, just not wired into this specific
-output path — it's currently only used by the counterfactual plotting functions
-(`_plot_cf_event_type_diff`). A fix here could reuse that existing decoder rather than building a
-new lookup from scratch, which is a smaller change than this section originally implied.
-> *"PlaceOrder event shifted prediction by +7.1h"*
-instead of raw indices.
+Events are now printed as `Events[6](PaymentReminder)` in `explain_trace`'s console output (top
+nodes, top-3-per-type, and top edges), and `top_nodes_per_type.csv` gained a new `activity_name`
+column (empty for non-`Events` rows). Implemented by reusing the existing
+`_decode_event_types_with_indices()` decoder — previously only wired into the counterfactual
+plotting functions — rather than building a new lookup; verified working on a real order on both
+`order_management` and `logistics`.
 
 ### Depth-stratified aggregation
 
@@ -363,12 +357,13 @@ outcome-defining work has happened.
 already has exactly this via `_explain_attribution_by_depth()`/`depth_stratify=True` (see §3) —
 this gap remains open specifically for LOO's `explain_aggregate`, which has no equivalent.
 
-### Fidelity metric units
+### ~~Fidelity metric units~~ RESOLVED (2026-07-13)
 
-`evaluate_explanation_quality` reports Fidelity+ and Fidelity− in **seconds** (raw de-normalized
-model output). Dividing by 3600 before printing and saving to CSV would align them with every
-other metric in the system (hours), making `aggregate_metrics.csv` directly comparable to test
-MAE and RMSE values without manual conversion.
+`evaluate_explanation_quality` now divides Fidelity+/Fidelity− by 3600 at the source (before
+they're returned, printed, or written to `aggregate_metrics.csv`), aligning them with every other
+metric in the system (hours) — `aggregate_metrics.csv` is now directly comparable to test MAE/RMSE
+without manual conversion. Verified no other file in the repo reads `fidelity_plus`/
+`fidelity_minus` or `aggregate_metrics.csv`, so nothing downstream depended on the old unit.
 
 ### Counterfactual quality validation
 
