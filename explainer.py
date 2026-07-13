@@ -797,6 +797,95 @@ class Explainer(Modelling):
 
         return all_metrics
 
+    def explain_loo_by_depth(self, n_traces=200, save_dir=None):
+        """Depth-stratified LOO node-type importance across ALL test prefixes (not just
+        last-event graphs, unlike explain_aggregate()) -- the LOO analogue of
+        _explain_attribution_by_depth(), closing the gap EXPLAINABILITY.md flags:
+        explain_aggregate() pools all prefix depths together, obscuring whether a node
+        type's relative importance shifts as a trace matures (e.g. resource-assignment
+        types mattering more early on, before the outcome-defining work has happened).
+        Reuses the same _DEPTH_BINS as _explain_attribution_by_depth()/compare_models().
+
+        Full LOO (this method) is far more expensive per graph than a gradient
+        attribution backward pass -- O(nodes+edges) forward passes per graph, not one --
+        so this defaults to a bounded sample (n_traces=200) rather than the whole test
+        set the way _explain_attribution_by_depth() does by default.
+        """
+        import numpy as np
+        import pandas as pd
+
+        if save_dir is None:
+            save_dir = os.path.join(self.path_dict['explainer_path'], "aggregate")
+        os.makedirs(save_dir, exist_ok=True)
+
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        graphs = self.test_data if n_traces is None else self.test_data[:n_traces]
+        n = len(graphs)
+        print(f"\nDepth-stratified LOO: {n} prefixes across all depths (vs. "
+              f"last-event-only scope in explain_aggregate() -- this is much slower, "
+              f"full LOO ablation per prefix, not one backward pass)")
+
+        bin_accum = {lbl: {} for _, _, lbl in self._DEPTH_BINS}  # lbl -> {node_type: [shifts_h]}
+        n_used = 0
+        for i, g in enumerate(graphs):
+            if i % max(1, n // 10) == 0:
+                print(f"  LOO depth stratification: {100 * i // n}%")
+            n_events = g['Events'].x.size(0) if 'Events' in g.node_types else 0
+            lbl = next((l for lo, hi, l in self._DEPTH_BINS if lo <= n_events <= hi), None)
+            if lbl is None or g[self.kpi_viewpoint].y.shape[0] == 0:
+                continue  # no depth bin matched, or kpi_viewpoint hasn't appeared yet
+            try:
+                node_imp, _, _, _, _ = self.reg_explanation(g, 0, None, top_k=5)
+            except Exception as ex:
+                print(f"  [skipped] prefix {i}: {type(ex).__name__}: {ex}")
+                continue
+            n_used += 1
+            for nt, idx, shift, large, signed_shift in node_imp:
+                bin_accum[lbl].setdefault(nt, []).append(shift / 3600.0)
+        print(f"  LOO depth stratification: 100%  ({n_used}/{n} prefixes used)")
+
+        labels = [lbl for _, _, lbl in self._DEPTH_BINS if bin_accum[lbl]]
+        if not labels:
+            print("  No prefixes with usable data for LOO depth stratification -- skipped")
+            return None
+
+        all_types = sorted({nt for lbl in labels for nt in bin_accum[lbl]})
+        heat = np.array([
+            [np.mean(bin_accum[lbl][nt]) if bin_accum[lbl].get(nt) else 0.0 for lbl in labels]
+            for nt in all_types
+        ])
+
+        fig, ax = plt.subplots(figsize=(max(6, len(labels) * 0.9 + 2), len(all_types) * 0.4 + 2))
+        im = ax.imshow(heat, aspect='auto', cmap='YlOrRd')
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels)
+        ax.set_yticks(range(len(all_types)))
+        ax.set_yticklabels(all_types, fontsize=9)
+        ax.set_xlabel("Prefix depth (n events seen)")
+        ax.set_title("LOO node-type importance by prefix depth (mean |shift|, hours)")
+        plt.colorbar(im, ax=ax, shrink=0.8)
+        plt.tight_layout()
+        heatmap_path = os.path.join(save_dir, "loo_depth_heatmap.png")
+        plt.savefig(heatmap_path, dpi=150)
+        plt.close()
+
+        rows = []
+        for lbl in labels:
+            for nt in all_types:
+                vals = bin_accum[lbl].get(nt, [])
+                rows.append({
+                    'depth_bin': lbl, 'node_type': nt,
+                    'mean_abs_shift_hours': round(float(np.mean(vals)), 6) if vals else 0.0,
+                    'n_prefixes': len(vals),
+                })
+        csv_path = os.path.join(save_dir, "loo_depth_importance.csv")
+        pd.DataFrame(rows).to_csv(csv_path, index=False)
+        print(f"  Saved LOO depth-stratified importance to: {save_dir}")
+
+        return {'labels': labels, 'node_types': all_types, 'heat': heat}
+
     # ------------------------------------------------------------------
     # Counterfactual explanations
     # ------------------------------------------------------------------
@@ -1095,6 +1184,95 @@ class Explainer(Modelling):
         print(f"\n  Plot saved to: {save_dir}")
         print('=' * 60)
         return results
+
+    def explain_aggregate_counterfactuals(self, n_traces=50, target_band='opposite', save_dir=None):
+        """Aggregate counterfactual retrieval across n_traces query traces -- the
+        counterfactual analogue of explain_aggregate()/explain_feature_attribution(),
+        closing the "no aggregate counterfactual mode" gap flagged in
+        EXPLAINABILITY.md. For each of the first n_traces last-event test graphs (same
+        deterministic sampling convention as explain_aggregate()), retrieves the
+        single best counterfactual via find_counterfactuals() and aggregates the 4
+        dissimilarity components plus the predicted-hours gap across all queries,
+        reporting mean +/- std -- answering "what does a counterfactual typically
+        look like across this dataset?" rather than one worked example at a time.
+
+        Cost note: find_counterfactuals() recomputes predictions for the entire
+        last-event candidate pool on every call (needed to determine the opposite-
+        outcome quartile), so this is O(n_traces * pool_size) forward passes, not
+        O(n_traces) -- the same default (50) as explain_aggregate() is used here for
+        consistency, not because the per-call cost is comparable to LOO's.
+        """
+        import pandas as pd
+
+        if save_dir is None:
+            save_dir = os.path.join(self.path_dict['explainer_path'], "aggregate")
+        os.makedirs(save_dir, exist_ok=True)
+
+        vp = self.kpi_viewpoint
+        last_event_graphs = [g for g in self.test_data if g[vp]['last_event'][0].item()]
+        sample = last_event_graphs[:n_traces]
+        print(f"\nRunning aggregate counterfactual retrieval on {len(sample)} traces "
+              f"(target_band={target_band})…")
+
+        rows = []
+        n_failed = 0
+        for i, g in enumerate(sample):
+            order_id = int(g[vp]['id'][0].item())
+            try:
+                results = self.find_counterfactuals(order_id, target_band=target_band, n_results=1)
+            except Exception as ex:
+                n_failed += 1
+                print(f"  [trace failed] order={order_id}: {type(ex).__name__}: {ex}")
+                continue
+            if not results:
+                n_failed += 1
+                print(f"  [no counterfactual found] order={order_id}")
+                continue
+            cf = results[0]
+            query_pred_h = self._predict_value_for_graph(g, 0) / 3600.0
+            rows.append({
+                'query_order_id': order_id,
+                'cf_order_id': cf['order_id'],
+                'query_predicted_hours': query_pred_h,
+                'cf_predicted_hours': cf['predicted_hours'],
+                'predicted_hours_gap': query_pred_h - cf['predicted_hours'],
+                'dissimilarity_total': cf['dissimilarity'],
+                'd_feat': cf['components']['feat'],
+                'd_type': cf['components']['type'],
+                'd_edge': cf['components']['edge'],
+                'd_struct': cf['components']['struct'],
+            })
+
+        if not rows:
+            print("  No counterfactuals retrieved for any sampled trace -- skipped")
+            return None
+
+        df = pd.DataFrame(rows)
+        csv_path = os.path.join(save_dir, "aggregate_cf_dissimilarity.csv")
+        df.to_csv(csv_path, index=False)
+
+        metric_cols = ['dissimilarity_total', 'd_feat', 'd_type', 'd_edge', 'd_struct',
+                       'predicted_hours_gap']
+        print(f"\nAggregate counterfactual retrieval (n={len(df)} traces, "
+              f"{n_failed} failed/skipped out of {len(sample)} sampled):")
+        for c in metric_cols:
+            print(f"  {c:22s}: {df[c].mean():.4f} ± {df[c].std():.4f}")
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        comp_cols = ['d_feat', 'd_type', 'd_edge', 'd_struct']
+        means = [df[c].mean() for c in comp_cols]
+        stds = [df[c].std() for c in comp_cols]
+        ax.bar(comp_cols, means, yerr=stds, color="#4C72B0", alpha=0.85, capsize=4)
+        ax.set_ylabel("Mean dissimilarity component")
+        ax.set_title(f"Aggregate counterfactual dissimilarity breakdown (n={len(df)} traces)")
+        ax.grid(True, axis="y", alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, "aggregate_cf_components.png"), dpi=150)
+        plt.close()
+
+        print(f"\nAggregate counterfactual outputs saved to: {save_dir}")
+
+        return df
 
     def _plot_cf_node_comparison(self, query_graph, cf_graph, query_id, cf_id, save_dir):
         """Side-by-side bar chart of node type counts: query vs. top counterfactual."""

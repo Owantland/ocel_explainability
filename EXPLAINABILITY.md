@@ -116,6 +116,16 @@ verified figure as of that document). Do not cite 0.887 in the thesis; check
 `EXPLAINABILITY_DEPTH.md` for the latest verified number, or re-run `explain_aggregate()` fresh
 against the current checkpoint before citing anything from this section.
 
+### Depth-stratified — `explain_loo_by_depth(n_traces=200)` (added 2026-07-13)
+
+Unlike `explain_aggregate()` above (last-event graphs only), this runs full LOO across ALL test
+prefixes at every depth, bins by prefix length using the same `_DEPTH_BINS` as
+`explain_feature_attribution`'s depth-stratified mode, and produces a node-type × depth-bin
+heatmap (`loo_depth_heatmap.png`) + CSV (`loo_depth_importance.csv`) instead of one pooled-across-
+all-depths mean — answering whether a node type's relative importance shifts as a trace matures.
+Defaults to a bounded 200-prefix sample rather than the whole test set, since full LOO ablation is
+far more expensive per graph than feature attribution's single backward pass.
+
 ---
 
 ## 2. Explanation Quality — Fidelity Metrics
@@ -274,10 +284,16 @@ matching a 15-event trace just because both are in Q4). The window doubles progr
 5. Prints a comparison table (node-type counts, edge-type counts, predicted times).
 6. Saves a side-by-side bar chart of node-type compositions (`cf_node_type_comparison.png`).
 
-### Aggregated
+### Aggregated — `explain_aggregate_counterfactuals(n_traces=50, target_band='opposite')` (added 2026-07-13)
 
-No aggregate counterfactual entry point currently exists — confirmed still true on re-verification
-2026-07-12. See §6 for the improvement proposal (unchanged from the original).
+Runs `find_counterfactuals()` across `n_traces` last-event query traces (same sampling convention
+as `explain_aggregate()`), retrieves each query's single best counterfactual, and aggregates the 4
+dissimilarity components plus the predicted-hours gap across all queries — mean ± std, saved to
+`aggregate_cf_dissimilarity.csv` plus a component-breakdown bar chart
+(`aggregate_cf_components.png`). Answers "what does a counterfactual typically look like across
+this dataset?" rather than one worked example at a time. Cost note: each `find_counterfactuals()`
+call recomputes predictions for the entire last-event candidate pool (needed to determine the
+opposite-outcome quartile), so this is O(n_traces × pool_size) forward passes, not O(n_traces).
 
 ---
 
@@ -320,9 +336,9 @@ an independent cross-check on LOO rather than a replacement for it.
 | Gap | Impact | Recommendation |
 |---|---|---|
 | ~~No single-trace IG entry point~~ | **RESOLVED** — `explain_trace_ig(order_id)` now exists (§3). | — |
-| No aggregate counterfactual | Cannot characterize *what systematically differs* between fast and slow orders | Add `explain_aggregate_counterfactuals(n=50)`: cluster slow orders, find their CFs, report mean structural differences |
+| ~~No aggregate counterfactual~~ | **RESOLVED (2026-07-13)** — `explain_aggregate_counterfactuals(n_traces=50, target_band='opposite')` now exists (§4); reports mean/std of the 4 dissimilarity components + predicted-hours gap across N query traces, not a cluster-based approach as originally proposed here, but answers the same underlying question. | — |
 | LOO and IG are disconnected | LOO costs O(all nodes + all edges) per trace even when most nodes are irrelevant | Use IG top-K attribution to pre-select candidate nodes, then run LOO only on those |
-| LOO's `explain_aggregate` doesn't depth-stratify | Raw `\|Δpred\|` magnitudes aren't comparable across differently-sized prefixes (see "Depth-stratified aggregation" below) — **feature attribution already has this via `depth_stratify=True` (§3), LOO doesn't** | Add the same depth-bin breakdown to `explain_aggregate` that `_explain_attribution_by_depth()` already does for IG/IntegratedGradients |
+| ~~LOO's `explain_aggregate` doesn't depth-stratify~~ | **RESOLVED (2026-07-13)** — `explain_loo_by_depth(n_traces=200)` now exists (§1); node-type × depth-bin heatmap, not a feature-dim one (see rationale in §1). | — |
 
 ### Masking strategy (edge LOO)
 
@@ -344,18 +360,16 @@ column (empty for non-`Events` rows). Implemented by reusing the existing
 plotting functions — rather than building a new lookup; verified working on a real order on both
 `order_management` and `logistics`.
 
-### Depth-stratified aggregation
+### ~~Depth-stratified aggregation~~ RESOLVED (2026-07-13)
 
 `explain_aggregate` (LOO) pools shifts across all prefix depths. A 3-event prefix has ~20 nodes
 while a 15-event prefix may have 60+, so their raw `|Δpred|` magnitudes are not directly
-comparable. Adding a `depth_bin` breakdown (e.g. 1–3, 4–6, 7–9, 10+ events) to the aggregate
-output would reveal whether the relative importance of node types changes as the process matures
-— for example, resource-assignment node types might matter more early in a trace, before the
-outcome-defining work has happened.
-
-**Partially resolved for a different method, 2026-07-12**: `explain_feature_attribution` (IG)
-already has exactly this via `_explain_attribution_by_depth()`/`depth_stratify=True` (see §3) —
-this gap remains open specifically for LOO's `explain_aggregate`, which has no equivalent.
+comparable. `explain_feature_attribution` (IG) already had this via
+`_explain_attribution_by_depth()`/`depth_stratify=True` (§3); LOO now has its own analogue,
+`explain_loo_by_depth()` (§1) — a node-type × depth-bin heatmap (not feature-dim × depth-bin like
+IG's, since LOO's natural aggregation unit across a whole prefix is per-node-type, matching what
+this gap's own framing asked for: "whether the relative importance of node types changes as the
+process matures").
 
 ### ~~Fidelity metric units~~ RESOLVED (2026-07-13)
 
