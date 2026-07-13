@@ -983,7 +983,7 @@ class Explainer(Modelling):
         raise ValueError(f"Order ID {order_id} not found in test data.")
 
     def find_counterfactuals(self, order_id, target_band='opposite', n_results=3,
-                              min_candidates=5, n_events=None):
+                              min_candidates=5, n_events=None, min_gap_hours=0.0):
         """Find the n_results most similar test traces with a contrasting predicted outcome.
 
         target_band: 'opposite' (default) — always traces with a LOWER predicted time than
@@ -997,6 +997,16 @@ class Explainer(Modelling):
                      by absolute event count instead of by last_event status, so an
                      early partial prefix is never compared against a population
                      dominated by fully-recorded (last-event) traces.
+        min_gap_hours: minimum |query_predicted_hours - candidate_predicted_hours| a
+                     candidate must have to be eligible at all (default 0.0 -- no
+                     minimum, preserves prior behavior exactly). A HARD filter: never
+                     relaxed by the depth-window-widening loop or the last-resort
+                     skip-length-gate fallback below, so a too-strict threshold can
+                     legitimately return fewer than n_results, or none, rather than
+                     silently substituting a below-threshold candidate. Composes with
+                     target_band as an independent, additional constraint (not tied to
+                     the 'opposite' branch specifically) -- orthogonal to, and strictly
+                     stronger than, the pre-existing implicit p < query_pred check.
         """
         # Note: previously rebuilt self.model from a legacy `_arch.json` sidecar here,
         # bypassing the model_params.json-driven architecture every other explain_*
@@ -1022,6 +1032,8 @@ class Explainer(Modelling):
 
         n_q = depth(query_graph)
 
+        min_gap_s = min_gap_hours * 3600.0
+
         def band_and_candidates(pool, preds):
             """Given a candidate pool + its predictions, compute the 'opposite' band
             over that pool and return the filtered (graph, pred) candidates."""
@@ -1036,6 +1048,7 @@ class Explainer(Modelling):
                 (g, p) for g, p in zip(pool, preds)
                 if g[vp]['id'][0].item() != query_oid and low <= p <= high
                 and (target_band != 'opposite' or p < query_pred)
+                and abs(query_pred - p) >= min_gap_s
             ]
 
         if n_events is None:
@@ -1106,14 +1119,18 @@ class Explainer(Modelling):
         return results[:n_results]
 
     def explain_counterfactual(self, order_id, target_band='opposite', n_results=3,
-                                min_candidates=5, n_events=None):
+                                min_candidates=5, n_events=None, min_gap_hours=0.0):
         """Print counterfactual comparison for a given order and save a node-type bar chart.
 
         n_events: None (default) explains the order's last recorded prefix; an int
                      explains the prefix with exactly that many Events nodes.
+        min_gap_hours: minimum |query - candidate| predicted-hours gap a counterfactual
+                     must have to be eligible (default 0.0 -- no minimum). A hard filter:
+                     see find_counterfactuals()'s docstring. Too strict a value can yield
+                     fewer than n_results, or none.
         """
         results = self.find_counterfactuals(order_id, target_band, n_results,
-                                             min_candidates, n_events)
+                                             min_candidates, n_events, min_gap_hours)
 
         query_graph = self._locate_test_graph(order_id, n_events)
         query_pred = self._predict_value_for_graph(query_graph, 0)
@@ -1126,7 +1143,11 @@ class Explainer(Modelling):
               ", ".join(f"{nt}={query_graph[nt].num_nodes}" for nt in query_graph.node_types))
 
         if not results:
-            print("  No counterfactuals found.")
+            if min_gap_hours > 0:
+                print(f"  No counterfactuals found with a predicted-time gap "
+                      f"≥ {min_gap_hours:g}h.")
+            else:
+                print("  No counterfactuals found.")
             print('=' * 60)
             return results
 
@@ -1185,7 +1206,8 @@ class Explainer(Modelling):
         print('=' * 60)
         return results
 
-    def explain_aggregate_counterfactuals(self, n_traces=50, target_band='opposite', save_dir=None):
+    def explain_aggregate_counterfactuals(self, n_traces=50, target_band='opposite',
+                                           save_dir=None, min_gap_hours=0.0):
         """Aggregate counterfactual retrieval across n_traces query traces -- the
         counterfactual analogue of explain_aggregate()/explain_feature_attribution(),
         closing the "no aggregate counterfactual mode" gap flagged in
@@ -1201,6 +1223,11 @@ class Explainer(Modelling):
         outcome quartile), so this is O(n_traces * pool_size) forward passes, not
         O(n_traces) -- the same default (50) as explain_aggregate() is used here for
         consistency, not because the per-call cost is comparable to LOO's.
+
+        min_gap_hours: minimum |query - candidate| predicted-hours gap required, passed
+                     through to find_counterfactuals() (default 0.0 -- no minimum). A
+                     hard filter: a query with no candidate clearing the bar is counted
+                     as a normal "no counterfactual found" failure, same as any other.
         """
         import pandas as pd
 
@@ -1219,7 +1246,8 @@ class Explainer(Modelling):
         for i, g in enumerate(sample):
             order_id = int(g[vp]['id'][0].item())
             try:
-                results = self.find_counterfactuals(order_id, target_band=target_band, n_results=1)
+                results = self.find_counterfactuals(order_id, target_band=target_band, n_results=1,
+                                                      min_gap_hours=min_gap_hours)
             except Exception as ex:
                 n_failed += 1
                 print(f"  [trace failed] order={order_id}: {type(ex).__name__}: {ex}")

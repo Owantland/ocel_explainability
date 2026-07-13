@@ -284,7 +284,28 @@ matching a 15-event trace just because both are in Q4). The window doubles progr
 5. Prints a comparison table (node-type counts, edge-type counts, predicted times).
 6. Saves a side-by-side bar chart of node-type compositions (`cf_node_type_comparison.png`).
 
-### Aggregated — `explain_aggregate_counterfactuals(n_traces=50, target_band='opposite')` (added 2026-07-13)
+### Minimum predicted-time gap — `min_gap_hours` (added 2026-07-13)
+
+`find_counterfactuals()`, `explain_counterfactual()`, and `explain_aggregate_counterfactuals()` all
+accept `min_gap_hours=0.0`: a candidate is only eligible if
+`|query_predicted_hours − candidate_predicted_hours| ≥ min_gap_hours`. This guards against a
+structurally-closest candidate being returned as "the" counterfactual when its predicted outcome is
+barely different from the query's — the point of a counterfactual is a *meaningfully* different
+outcome, not just a nearby one. The default (`0.0`) is a no-op, preserving prior behavior exactly.
+
+It composes as an independent, additional constraint on top of the existing band filter (including
+`target_band='opposite'`'s implicit `p < query_pred`), applied inside `band_and_candidates()` so it
+automatically covers both the last-event and `n_events=<int>` code paths.
+
+**Hard filter, never relaxed**: unlike the prefix-length window (which widens progressively when
+too few candidates survive), `min_gap_hours` is never loosened by that widening loop or by the
+last-resort skip-length-gate fallback. A threshold no candidate can clear yields fewer than
+`n_results` results — down to none — rather than silently substituting a below-threshold candidate.
+`explain_counterfactual()` prints a threshold-specific message ("No counterfactuals found with a
+predicted-time gap ≥ Xh.") in that case; `explain_aggregate_counterfactuals()` counts it as an
+ordinary per-query failure, same as any other "no counterfactual found" case.
+
+### Aggregated — `explain_aggregate_counterfactuals(n_traces=50, target_band='opposite', min_gap_hours=0.0)` (added 2026-07-13)
 
 Runs `find_counterfactuals()` across `n_traces` last-event query traces (same sampling convention
 as `explain_aggregate()`), retrieves each query's single best counterfactual, and aggregates the 4
