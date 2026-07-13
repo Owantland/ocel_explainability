@@ -879,12 +879,14 @@ if __name__ == '__main__':
     # hgg.trace_kpi()
     # verify_hetero_graphs(database, cant)
 
-    # Model training and testing
-    m = t.Modelling(database, cant)
+    # Model training and testing -- delegated to run_pipeline.py (2026-07-13) instead of
+    # duplicating the train/homo/compare orchestration inline; closes AUDIT.md's original
+    # "db_testing.py is not a test file" complaint for this specific block. The verify_*/
+    # compare_to_hoeg function library above remains this file's own, distinct
+    # responsibility and is untouched. Uses run_pipeline's fuller compare_to_baselines()
+    # (HGT vs HomoGNN vs Mean vs GBT) rather than training.py's narrower HGT-vs-HomoGNN-only
+    # compare_models(), a superset of what this block previously showed.
+    import run_pipeline
     # # Sweep1
-    # # m.sweep()
-    m.Modelling()
-
-    # Baseline comparison
-    m.Homo_Reg_Modelling()
-    m.compare_models()
+    # # run_pipeline.run(database, cant, {'sweep'})
+    run_pipeline.run(database, cant, {'train', 'homo', 'compare'})
