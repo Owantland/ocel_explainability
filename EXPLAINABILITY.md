@@ -278,11 +278,28 @@ matching a 15-event trace just because both are in Q4). The window doubles progr
 ### Single trace — `explain_counterfactual(order_id)`
 
 1. Identifies the query trace's outcome quartile.
-2. Defines the target band as the opposite quartile (or an explicit `(low_s, high_s)` tuple).
+2. Defines the target band as the opposite quartile — on the side controlled by `direction` — or an
+   explicit `(low_s, high_s)` tuple.
 3. Filters candidates by band + prefix-length window.
 4. Ranks by total dissimilarity; returns top-3.
 5. Prints a comparison table (node-type counts, edge-type counts, predicted times).
 6. Saves a side-by-side bar chart of node-type compositions (`cf_node_type_comparison.png`).
+
+### Direction — `direction='lower'|'higher'` (added 2026-07-14)
+
+`find_counterfactuals()`, `explain_counterfactual()`, and `explain_aggregate_counterfactuals()` all
+accept `direction='lower'` (default): which side of the query's own prediction `target_band='opposite'`
+searches. `'lower'` (the only behavior before this parameter existed, still the default) looks for
+traces below Q1 — or below the query's own value if the query is already in the fastest quartile.
+`'higher'` is the mirror image: traces above Q3, or above the query's own value if the query is
+already in the slowest quartile. Invalid values raise `ValueError`. Only meaningful for
+`target_band='opposite'` — a no-op when an explicit `(low_s, high_s)` tuple is passed, since the
+tuple already fully specifies the band.
+
+**Sign note**: `explain_aggregate_counterfactuals()`'s reported `predicted_hours_gap` is always
+`query_predicted_hours − cf_predicted_hours` (unchanged formula). With `direction='higher'` the
+candidate's prediction exceeds the query's, so this gap comes out **negative** — expected, not a
+bug; the sign itself tells you which direction was searched.
 
 ### Minimum predicted-time gap — `min_gap_hours` (added 2026-07-13)
 
@@ -305,7 +322,7 @@ last-resort skip-length-gate fallback. A threshold no candidate can clear yields
 predicted-time gap ≥ Xh.") in that case; `explain_aggregate_counterfactuals()` counts it as an
 ordinary per-query failure, same as any other "no counterfactual found" case.
 
-### Aggregated — `explain_aggregate_counterfactuals(n_traces=50, target_band='opposite', min_gap_hours=0.0)` (added 2026-07-13)
+### Aggregated — `explain_aggregate_counterfactuals(n_traces=50, target_band='opposite', min_gap_hours=0.0, direction='lower')` (added 2026-07-13)
 
 Runs `find_counterfactuals()` across `n_traces` last-event query traces (same sampling convention
 as `explain_aggregate()`), retrieves each query's single best counterfactual, and aggregates the 4

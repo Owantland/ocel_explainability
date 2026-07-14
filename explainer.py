@@ -995,13 +995,22 @@ class Explainer(Modelling):
         raise ValueError(f"Order ID {order_id} not found in test data.")
 
     def find_counterfactuals(self, order_id, target_band='opposite', n_results=3,
-                              min_candidates=5, n_events=None, min_gap_hours=0.0):
+                              min_candidates=5, n_events=None, min_gap_hours=0.0,
+                              direction='lower'):
         """Find the n_results most similar test traces with a contrasting predicted outcome.
 
-        target_band: 'opposite' (default) — always traces with a LOWER predicted time than
-                     the query: below Q1 normally, or below the query's own value if the
-                     query itself is already in the fastest quartile; or a (low_s, high_s)
-                     tuple in seconds.
+        target_band: 'opposite' (default) — a quartile-based band computed from the
+                     candidate pool and query_pred, whose side is controlled by
+                     direction (below); or an explicit (low_s, high_s) tuple in
+                     seconds, in which case direction is ignored (the tuple already
+                     fully specifies the band).
+        direction: 'lower' (default, preserves prior behavior exactly) or 'higher' --
+                     only meaningful when target_band == 'opposite'. 'lower': traces
+                     below Q1, or below the query's own value if the query itself is
+                     already in the fastest quartile (today's original, only
+                     behavior). 'higher': the mirror image -- traces above Q3, or
+                     above the query's own value if the query itself is already in
+                     the slowest quartile. Raises ValueError if not 'lower'/'higher'.
         min_candidates: minimum pool size before the length window is widened.
         n_events: None (default) queries the order's last recorded prefix, exactly as
                      before. An int queries the prefix with exactly that many Events
@@ -1016,10 +1025,13 @@ class Explainer(Modelling):
                      skip-length-gate fallback below, so a too-strict threshold can
                      legitimately return fewer than n_results, or none, rather than
                      silently substituting a below-threshold candidate. Composes with
-                     target_band as an independent, additional constraint (not tied to
-                     the 'opposite' branch specifically) -- orthogonal to, and strictly
-                     stronger than, the pre-existing implicit p < query_pred check.
+                     target_band/direction as an independent, additional constraint
+                     (not tied to the 'opposite' branch specifically) -- orthogonal
+                     to, and strictly stronger than, the direction-specific strict
+                     inequality check.
         """
+        if direction not in ('lower', 'higher'):
+            raise ValueError(f"direction must be 'lower' or 'higher', got {direction!r}")
         # Note: previously rebuilt self.model from a legacy `_arch.json` sidecar here,
         # bypassing the model_params.json-driven architecture every other explain_*
         # method relies on (_load_params() already prioritizes model_params.json over
@@ -1048,18 +1060,22 @@ class Explainer(Modelling):
 
         def band_and_candidates(pool, preds):
             """Given a candidate pool + its predictions, compute the 'opposite' band
-            over that pool and return the filtered (graph, pred) candidates."""
+            over that pool (mirrored by direction) and return the filtered
+            (graph, pred) candidates."""
             import numpy as np
             q1, _q2, q3 = np.percentile(preds, [25, 50, 75]).tolist()
             if target_band == 'opposite':
-                low = float('-inf')
-                high = q1 if query_pred > q1 else query_pred
+                if direction == 'lower':
+                    low, high = float('-inf'), (q1 if query_pred > q1 else query_pred)
+                else:
+                    low, high = (q3 if query_pred < q3 else query_pred), float('inf')
             else:
                 low, high = target_band
             return [
                 (g, p) for g, p in zip(pool, preds)
                 if g[vp]['id'][0].item() != query_oid and low <= p <= high
-                and (target_band != 'opposite' or p < query_pred)
+                and (target_band != 'opposite'
+                     or (p < query_pred if direction == 'lower' else p > query_pred))
                 and abs(query_pred - p) >= min_gap_s
             ]
 
@@ -1131,7 +1147,8 @@ class Explainer(Modelling):
         return results[:n_results]
 
     def explain_counterfactual(self, order_id, target_band='opposite', n_results=3,
-                                min_candidates=5, n_events=None, min_gap_hours=0.0):
+                                min_candidates=5, n_events=None, min_gap_hours=0.0,
+                                direction='lower'):
         """Print counterfactual comparison for a given order and save a node-type bar chart.
 
         n_events: None (default) explains the order's last recorded prefix; an int
@@ -1140,9 +1157,14 @@ class Explainer(Modelling):
                      must have to be eligible (default 0.0 -- no minimum). A hard filter:
                      see find_counterfactuals()'s docstring. Too strict a value can yield
                      fewer than n_results, or none.
+        direction: 'lower' (default) or 'higher' -- which side of the query's own
+                     prediction to search when target_band == 'opposite'; see
+                     find_counterfactuals()'s docstring. Ignored for an explicit
+                     target_band tuple.
         """
         results = self.find_counterfactuals(order_id, target_band, n_results,
-                                             min_candidates, n_events, min_gap_hours)
+                                             min_candidates, n_events, min_gap_hours,
+                                             direction)
 
         query_graph = self._locate_test_graph(order_id, n_events)
         query_pred = self._predict_value_for_graph(query_graph, 0)
@@ -1164,7 +1186,7 @@ class Explainer(Modelling):
             return results
 
         print(f"\n  Top {len(results)} counterfactual(s) [target band: "
-              f"{'opposite quartile' if target_band == 'opposite' else str(target_band)}]:")
+              f"{f'opposite quartile ({direction})' if target_band == 'opposite' else str(target_band)}]:")
 
         for i, r in enumerate(results, 1):
             win_str = (f"{r['length_window_used']:.0f}" if r['length_window_used'] != float('inf')
@@ -1219,7 +1241,8 @@ class Explainer(Modelling):
         return results
 
     def explain_aggregate_counterfactuals(self, n_traces=50, target_band='opposite',
-                                           save_dir=None, min_gap_hours=0.0):
+                                           save_dir=None, min_gap_hours=0.0,
+                                           direction='lower'):
         """Aggregate counterfactual retrieval across n_traces query traces -- the
         counterfactual analogue of explain_aggregate()/explain_feature_attribution(),
         closing the "no aggregate counterfactual mode" gap flagged in
@@ -1240,6 +1263,9 @@ class Explainer(Modelling):
                      through to find_counterfactuals() (default 0.0 -- no minimum). A
                      hard filter: a query with no candidate clearing the bar is counted
                      as a normal "no counterfactual found" failure, same as any other.
+        direction: 'lower' (default) or 'higher', passed through to
+                     find_counterfactuals() -- see its docstring. Only meaningful when
+                     target_band == 'opposite'.
         """
         import pandas as pd
 
@@ -1251,7 +1277,7 @@ class Explainer(Modelling):
         last_event_graphs = [g for g in self.test_data if g[vp]['last_event'][0].item()]
         sample = last_event_graphs[:n_traces]
         print(f"\nRunning aggregate counterfactual retrieval on {len(sample)} traces "
-              f"(target_band={target_band})…")
+              f"(target_band={target_band}, direction={direction})…")
 
         rows = []
         n_failed = 0
@@ -1259,7 +1285,7 @@ class Explainer(Modelling):
             order_id = int(g[vp]['id'][0].item())
             try:
                 results = self.find_counterfactuals(order_id, target_band=target_band, n_results=1,
-                                                      min_gap_hours=min_gap_hours)
+                                                      min_gap_hours=min_gap_hours, direction=direction)
             except Exception as ex:
                 n_failed += 1
                 print(f"  [trace failed] order={order_id}: {type(ex).__name__}: {ex}")
