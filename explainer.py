@@ -2137,6 +2137,16 @@ class Explainer(Modelling):
             )
         return self._gnn_explainer_cache[key]
 
+    def _run_gnn_explainer(self, gnn_explainer, x_dict, edge_index_dict, index):
+        """Run one GNNExplainer explanation with a fixed seed set immediately beforehand,
+        so its randomly-initialized mask parameters (torch.randn inside PyG's
+        _initialize_node_mask(), drawn from the global RNG) are reproducible -- matching
+        training.py's seed=42 convention, which nothing in this file previously extended
+        to GNNExplainer. Without this, results are only mostly stable across repeated
+        calls (verified empirically: a marginal top-k slot can flip between runs)."""
+        torch.manual_seed(42)
+        return gnn_explainer(x_dict, edge_index_dict, index=index)
+
     def explain_gnn_subgraph(self, order_id, epochs=200, lr=0.01, top_k=5,
                              n_events=None, save_dir=None):
         """Explain a single trace via GNNExplainer's learned node-feature and edge
@@ -2156,7 +2166,7 @@ class Explainer(Modelling):
         baseline_value = self._predict_value_for_graph(graph, 0)
 
         explainer = self._get_gnn_explainer(epochs, lr)
-        explanation = explainer(x_dict, graph.edge_index_dict, index=0)
+        explanation = self._run_gnn_explainer(explainer, x_dict, graph.edge_index_dict, index=0)
 
         node_mask_dict = {nt: explanation.node_mask_dict[nt].detach().cpu().numpy()
                           for nt in graph.node_types if nt in explanation.node_mask_dict}
@@ -2476,7 +2486,7 @@ class Explainer(Modelling):
                     type_loo_shifts[nt].append(shift / 3600.0)
 
                 x_dict = {nt: g[nt].x for nt in g.node_types}
-                explanation = gnn_explainer(x_dict, g.edge_index_dict, index=0)
+                explanation = self._run_gnn_explainer(gnn_explainer, x_dict, g.edge_index_dict, index=0)
                 node_mask_dict = {nt: explanation.node_mask_dict[nt].detach().cpu().numpy()
                                   for nt in g.node_types if nt in explanation.node_mask_dict}
                 gnn_scores = []
@@ -2657,7 +2667,7 @@ class Explainer(Modelling):
         # GNNExplainer identifies the important node instances.
         x_dict = {nt: graph[nt].x for nt in graph.node_types}
         gnn_explainer = self._get_gnn_explainer(epochs, lr)
-        explanation = gnn_explainer(x_dict, graph.edge_index_dict, index=object_idx)
+        explanation = self._run_gnn_explainer(gnn_explainer, x_dict, graph.edge_index_dict, index=object_idx)
         node_mask_dict = {nt: explanation.node_mask_dict[nt].detach().cpu().numpy()
                           for nt in graph.node_types if nt in explanation.node_mask_dict}
         gnn_ranking = self._gnn_node_instance_ranking(node_mask_dict)
@@ -2809,7 +2819,7 @@ class Explainer(Modelling):
                 object_idx = 0
                 baseline_value = self._predict_value_for_graph(g, object_idx)
                 x_dict = {nt: g[nt].x for nt in g.node_types}
-                explanation = gnn_explainer(x_dict, g.edge_index_dict, index=object_idx)
+                explanation = self._run_gnn_explainer(gnn_explainer, x_dict, g.edge_index_dict, index=object_idx)
                 node_mask_dict = {nt: explanation.node_mask_dict[nt].detach().cpu().numpy()
                                   for nt in g.node_types if nt in explanation.node_mask_dict}
                 gnn_ranking = self._gnn_node_instance_ranking(node_mask_dict)
@@ -2974,6 +2984,11 @@ class Explainer(Modelling):
                 f"edge mask is likely misaligned with the model's internal edge ordering."
             )
 
+            # Fixed seed (matching training.py's seed=42 convention and
+            # _run_gnn_explainer()'s fix for the main GNNExplainer path) --
+            # this re-randomization is what actually drives the real optimization
+            # below, so it's the draw that needs to be reproducible.
+            torch.manual_seed(42)
             edge_mask.data = torch.randn(total_edges) * std
             optimizer = torch.optim.Adam([edge_mask], lr=lr)
             EPS = 1e-15
