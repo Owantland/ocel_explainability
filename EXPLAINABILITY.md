@@ -353,13 +353,17 @@ an independent cross-check on LOO rather than a replacement for it.
   comparable in magnitude** — only rank/overlap is meaningful, and the method explicitly caveats
   this rather than plotting them on one axis.
 - **`compare_loo_gnn_importance_aggregate(n_traces=235, top_k=5, epochs=200, lr=0.01)`** —
-  full-test-set version. Most recent verified result (per `EXPLAINABILITY_DEPTH.md`,
-  order_management, n=235): mean top-5 node overlap between the two methods is **2.33/5** — partial,
-  not strong, agreement. `Events` is LOO's clear #1 by a wide margin but only GNNExplainer's #4
-  (GNNExplainer's top types are much less discriminating from each other than LOO's). Also handles
-  a real PyG limitation directly: `GNNExplainer._initialize_masks()` crashes on graphs with a
-  legitimately-empty edge type, so such traces are explicitly skipped (logged, not silently
-  dropped) rather than crashing the whole aggregate run.
+  full-test-set version. Handles a real PyG limitation directly: `GNNExplainer._initialize_masks()`
+  crashes on graphs with a legitimately-empty edge type, so such traces are explicitly skipped
+  (logged, not silently dropped) rather than crashing the whole aggregate run.
+  **Re-run 2026-07-14** (order_management, `n_traces=235` → 218 used, 17 skipped for empty edge
+  type, after the GNNExplainer seeding fix below): mean top-5 node overlap is **2.54/5** (σ=0.87) —
+  still partial, not strong, agreement (distribution: 0/5 in 0.0% of traces, 1/5 in 11.0%, 2/5 in
+  37.2%, 3/5 in 39.9%, 4/5 in 10.6%, 5/5 in 1.4%). This *supersedes* an earlier `n=235` figure of
+  2.33/5 (per `EXPLAINABILITY_DEPTH.md`), which predates the seeding fix. The per-type ranking also
+  changed materially: `Events` is now GNNExplainer's #1 too, not just LOO's (previously reported as
+  only GNNExplainer's #4) — `Items` #2, `Orders` #3, `Packages` #4, `Products` #5 for both methods,
+  a much closer type-level agreement than previously described.
 - **`explain_gnn_edge_importance_experimental(...)`** — a separate, explicitly experimental
   edge-importance method (reweights post-softmax `HGTConv` attention via `set_masks()`/
   `clear_masks()`, not true ablation) kept apart from the production `explain_gnn_subgraph` path
@@ -398,13 +402,50 @@ entry above) and of full exhaustive-LOO rankings.
   edges connecting the identified nodes + seed (`_induced_edges()`, with a placeholder zero
   importance score) so Fidelity- reflects real graph topology.
 - **Verified working on both datasets** (order_management, logistics): identified nodes largely
-  agree with `compare_loo_gnn_importance()`'s independent GNNExplainer ranking for the same order;
-  aggregate characterization on a 10-trace smoke sample came out noticeably lower than
-  `explain_aggregate()`'s exhaustive-LOO characterization on both datasets (order_management: 0.19
-  vs. the ~0.84 full-LOO figure tracked in `EXPLAINABILITY_DEPTH.md`; logistics: 0.02) — a real,
-  citable early signal that GNNExplainer's node selection is a weaker explanation than exhaustive
-  LOO's, not an artifact of the metric. Re-run at the full `n_traces=50` default before citing exact
-  numbers.
+  agree with `compare_loo_gnn_importance()`'s independent GNNExplainer ranking for the same order.
+  An early 10-trace smoke sample at `epochs=30` (well below the `epochs=200` default) put
+  characterization at a misleadingly low 0.19 (order_management) / 0.02 (logistics) — under-optimized
+  masks, not a fair reading of the method. **Re-run 2026-07-14 at the real citable scale
+  (`n_traces=50`, `epochs=200`, matching the default, after the GNNExplainer seeding fix below)**:
+  - order_management: Characterization **0.6845 ± 0.1817** (n=47/50 traces — 3 skipped, empty edge
+    type; `Events` selected in 53.2% of top-5 slots) — much closer to `explain_aggregate()`'s
+    exhaustive-LOO figure (~0.84, `EXPLAINABILITY_DEPTH.md`) than the smoke test suggested. At a
+    proper epoch count, GNNExplainer-primary is a meaningfully more competitive, cheaper alternative
+    to exhaustive LOO than first believed.
+  - logistics: Characterization **0.2437 ± 0.2295** (n=50/50 traces; `Events` selected in 44.8% of
+    top-5 slots, `HandlingUnit` in 40.8%) — also a large improvement over the smoke figure, but still
+    notably lower than order_management's, consistent with logistics being the harder dataset
+    throughout this project (deeper graphs, tighter reachability margins — see `TRAINING_VS_HOEG.md`).
+  Full per-trace figures: `aggregate_gnnprimary_metrics.csv` under each dataset's
+  `explainer_outputs/*/aggregate_gnnprimary/`.
+
+### ~~GNNExplainer non-determinism~~ RESOLVED (2026-07-14)
+
+PyG's `GNNExplainer._initialize_node_mask()` draws its initial mask parameters via
+`torch.randn(N, F) * 0.1` off the *global* torch RNG stream, and nothing in `explainer.py` ever
+seeded it — unlike `training.py`, which consistently sets `torch.manual_seed(42)` (plus
+`random.seed(42)`/`np.random.seed(42)`) for model training and data-split reproducibility. Confirmed
+empirically: six repeated calls to `explain_gnn_primary(1781, epochs=50)` in the same process
+returned a stable top-4 identified nodes but a genuinely different 5th-ranked node in 4 of the 6 runs.
+
+Fixed by `_run_gnn_explainer()`, a shared helper that calls `torch.manual_seed(42)` immediately before
+every GNNExplainer invocation (reset-per-call, not once-per-script, so a standalone single-trace call
+reproduces the same result whether it's the first or the Nth GNNExplainer call in a session — matching
+what it would produce inside an aggregate loop too). Wired into all four raw call sites:
+`explain_gnn_subgraph()`, `compare_loo_gnn_importance_aggregate()`, `explain_gnn_primary()`, and
+`explain_gnn_primary_aggregate()` (`compare_loo_gnn_importance()` inherits the fix transitively via
+`explain_gnn_subgraph()`). The separate custom-`randn` mask in the explicitly-experimental
+`explain_gnn_edge_importance_experimental()` was seeded the same way for consistency.
+
+Verified: the original 6x-repetition test is now stable; results also match byte-for-byte across
+independent process invocations; `explain_gnn_subgraph`/`compare_loo_gnn_importance`/`explain_gnn_
+primary_aggregate` all reproduce identically on repeat calls; the experimental method's own sanity
+check still passes; and different orders still produce genuinely different (non-collapsed) masks, so
+the fix removes run-to-run noise without flattening genuine cross-order variation. Since this changes
+GNNExplainer's entire random-initialization sequence, the `compare_loo_gnn_importance_aggregate`
+overlap figure and the `explain_gnn_primary_aggregate` characterization figures cited above both
+predate this fix and were re-verified under the new seeded regime — see the updated numbers in the
+bullets above and below.
 
 ---
 
