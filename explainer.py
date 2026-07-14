@@ -411,6 +411,57 @@ class Explainer(Modelling):
         plt.savefig(save_path, dpi=150)
         plt.close()
 
+    def plot_node_type_bars(self, rows, save_path, title, ylabel,
+                            show_error_bars=False, secondary_series=None, secondary_label=None):
+        """Shared node-type bar chart. Generalizes what used to be three separate,
+        visually-inconsistent implementations (this method's own single-trace body,
+        plus inline ax.bar() blocks duplicated in explain_aggregate() and
+        explain_gnn_primary_aggregate()) into one: bar height/color/optional error
+        bars/optional secondary-axis series, reused by both single-trace and
+        aggregate callers.
+
+        rows: list of {'node_type', 'value', 'signed_value', 'std'} dicts, in the
+              desired bar order. 'std' may be None when show_error_bars is False.
+        show_error_bars: draw yerr from each row's 'std' (aggregate use).
+        secondary_series: optional list of numbers (one per row) drawn as a dashed
+              secondary-axis line -- node count for single-trace, selection count
+              for GNNExplainer-primary aggregate.
+        """
+        types = [r['node_type'] for r in rows]
+        values = [r['value'] for r in rows]
+        bar_colors = ["#2ca02c" if r['signed_value'] > 0
+                      else ("#d62728" if r['signed_value'] < 0 else "#888888")
+                      for r in rows]
+        yerr = [r['std'] or 0.0 for r in rows] if show_error_bars else None
+
+        fig, ax1 = plt.subplots(figsize=(8, 4))
+        x = range(len(types))
+        ax1.bar(x, values, color=bar_colors, alpha=0.8, yerr=yerr,
+               capsize=4 if show_error_bars else 0, label=ylabel)
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(types, rotation=30, ha="right", fontsize=9)
+        ax1.set_ylabel(ylabel)
+        ax1.set_title(title)
+
+        lines2, labels2 = [], []
+        if secondary_series is not None:
+            ax2 = ax1.twinx()
+            ax2.plot(x, secondary_series, "o--", color="#e74c3c", label=secondary_label)
+            ax2.set_ylabel(secondary_label, color="#e74c3c")
+            ax2.tick_params(axis="y", labelcolor="#e74c3c")
+            lines2, labels2 = ax2.get_legend_handles_labels()
+
+        from matplotlib.patches import Patch
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        sign_handles = [Patch(color="#2ca02c", label="net: increases predicted time"),
+                        Patch(color="#d62728", label="net: decreases predicted time")]
+        ax1.legend(lines1 + lines2 + sign_handles, labels1 + labels2 +
+                   [h.get_label() for h in sign_handles], fontsize=8, loc="upper right")
+        ax1.grid(True, axis="y", alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150)
+        plt.close()
+
     def plot_node_type_summary(self, node_importances, save_path):
         """Bar chart of total influence per node type across the whole trace. Bar
         height is the magnitude sum (total impact); bar color reflects the sign of
@@ -425,36 +476,14 @@ class Explainer(Modelling):
             type_count[node_type] += 1
 
         types = sorted(type_shift, key=lambda t: type_shift[t], reverse=True)
-        total_shifts = [type_shift[t] for t in types]
+        rows = [{'node_type': t, 'value': type_shift[t],
+                'signed_value': type_signed_shift[t], 'std': None} for t in types]
         counts = [type_count[t] for t in types]
-        bar_colors = ["#2ca02c" if type_signed_shift[t] > 0
-                      else ("#d62728" if type_signed_shift[t] < 0 else "#888888")
-                      for t in types]
-
-        fig, ax1 = plt.subplots(figsize=(8, 4))
-        x = range(len(types))
-        bars = ax1.bar(x, total_shifts, color=bar_colors, alpha=0.8, label="Total shift (hours)")
-        ax1.set_xticks(x)
-        ax1.set_xticklabels(types, rotation=30, ha="right", fontsize=9)
-        ax1.set_ylabel("Cumulative value shift if type removed (hours)")
-        ax1.set_title("Node type importance summary")
-
-        ax2 = ax1.twinx()
-        ax2.plot(x, counts, "o--", color="#e74c3c", label="Node count")
-        ax2.set_ylabel("Number of nodes of this type", color="#e74c3c")
-        ax2.tick_params(axis="y", labelcolor="#e74c3c")
-
-        from matplotlib.patches import Patch
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        sign_handles = [Patch(color="#2ca02c", label="net: increases predicted time"),
-                        Patch(color="#d62728", label="net: decreases predicted time")]
-        ax1.legend(lines1 + lines2 + sign_handles, labels1 + labels2 +
-                   [h.get_label() for h in sign_handles], fontsize=8, loc="upper right")
-        ax1.grid(True, axis="y", alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150)
-        plt.close()
+        self.plot_node_type_bars(
+            rows, save_path, "Node type importance summary",
+            "Cumulative value shift if type removed (hours)",
+            secondary_series=counts, secondary_label="Number of nodes of this type",
+        )
 
     def explain_trace(self, order_id, top_k=5, save_dir=None, n_events=None):
         """Full LOO explanation for a single order trace. n_events=None (default)
@@ -718,8 +747,10 @@ class Explainer(Modelling):
         sample = last_event_graphs[:n_traces]
         print(f"Running aggregate explanation on {len(sample)} traces…")
 
+        import numpy as np
         from collections import defaultdict
         type_shifts = defaultdict(list)
+        type_signed_shifts = defaultdict(list)
         feat_shifts = defaultdict(lambda: defaultdict(list))
         all_metrics = []
 
@@ -733,8 +764,9 @@ class Explainer(Modelling):
                 print(f"  [trace failed] order={oid}: {type(ex).__name__}: {ex}")
                 continue
 
-            for nt, idx, shift, _, _ in node_imp:
+            for nt, idx, shift, _, signed_shift in node_imp:
                 type_shifts[nt].append(shift / 3600)
+                type_signed_shifts[nt].append(signed_shift / 3600)
 
             for f, shift, _, _ in seed_feats:
                 feat_shifts[self.kpi_viewpoint][f].append(shift / 3600)
@@ -747,16 +779,16 @@ class Explainer(Modelling):
 
         types = sorted(type_shifts, key=lambda t: -sum(type_shifts[t]) / max(len(type_shifts[t]), 1))
         mean_shifts = [sum(type_shifts[t]) / len(type_shifts[t]) for t in types]
+        mean_signed_shifts = [sum(type_signed_shifts[t]) / len(type_signed_shifts[t]) for t in types]
+        std_shifts = [float(np.array(type_shifts[t]).std()) for t in types]
 
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.bar(types, mean_shifts, color="#4C72B0", alpha=0.85)
-        ax.set_ylabel("Mean value shift if removed (hours)")
-        ax.set_title(f"Aggregate node type importance (n={len(sample)} traces)")
-        ax.set_xticklabels(types, rotation=30, ha="right", fontsize=9)
-        ax.grid(True, axis="y", alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, "aggregate_node_type_importance.png"), dpi=150)
-        plt.close()
+        rows = [{'node_type': t, 'value': v, 'signed_value': sv, 'std': sd}
+                for t, v, sv, sd in zip(types, mean_shifts, mean_signed_shifts, std_shifts)]
+        self.plot_node_type_bars(
+            rows, os.path.join(save_dir, "aggregate_node_type_importance.png"),
+            f"Aggregate node type importance (n={len(sample)} traces)",
+            "Mean value shift if removed (hours)", show_error_bars=True,
+        )
 
         names = self.feature_names
         for nt, fdict in feat_shifts.items():
@@ -2147,6 +2179,26 @@ class Explainer(Modelling):
         torch.manual_seed(42)
         return gnn_explainer(x_dict, edge_index_dict, index=index)
 
+    def _check_gnn_explainer_edges(self, graph, order_id):
+        """Raise a clear error if any edge type has zero edges. PyG's
+        GNNExplainer._initialize_masks() calls indices.max() on every relation's
+        edge_index unconditionally, which crashes with an opaque RuntimeError on a
+        legitimately-empty relation (not every trace touches every relation -- e.g.
+        a Customer with no directly-linked Employees is common and legitimate).
+        The aggregate GNNExplainer-based methods already pre-check and skip such
+        traces (compare_loo_gnn_importance_aggregate, explain_gnn_primary_aggregate);
+        this gives the single-trace callers (explain_gnn_subgraph, explain_gnn_primary)
+        the same clear, catchable failure instead of PyG's internal crash -- caught
+        directly by the empty-edge-type demo order dashboard_precompute.py hit."""
+        empty_etypes = [et for et in graph.edge_types if graph[et].edge_index.size(1) == 0]
+        if empty_etypes:
+            raise ValueError(
+                f"order={order_id}: {len(empty_etypes)} edge type(s) with zero edges "
+                f"(e.g. {empty_etypes[0]}) -- GNNExplainer can't initialize masks for an "
+                f"empty relation (PyG limitation, not a code bug). Use explain_trace() "
+                f"instead, which has no such restriction."
+            )
+
     def explain_gnn_subgraph(self, order_id, epochs=200, lr=0.01, top_k=5,
                              n_events=None, save_dir=None):
         """Explain a single trace via GNNExplainer's learned node-feature and edge
@@ -2162,6 +2214,7 @@ class Explainer(Modelling):
         self.model.eval()
 
         graph = self._locate_test_graph(order_id, n_events)
+        self._check_gnn_explainer_edges(graph, order_id)
         x_dict = {nt: graph[nt].x for nt in graph.node_types}
         baseline_value = self._predict_value_for_graph(graph, 0)
 
@@ -2660,6 +2713,7 @@ class Explainer(Modelling):
         self.model.eval()
 
         graph = self._locate_test_graph(order_id, n_events)
+        self._check_gnn_explainer_edges(graph, order_id)
         object_idx = 0
         baseline_value = self._predict_value_for_graph(graph, object_idx)
         n_q = graph['Events'].x.size(0) if 'Events' in graph.node_types else '?'
@@ -2799,6 +2853,7 @@ class Explainer(Modelling):
 
         type_counts = defaultdict(int)
         type_shifts = defaultdict(list)
+        type_signed_shifts = defaultdict(list)
         rows = []
         n_failed = 0
         n_skipped_empty_edges = 0
@@ -2830,6 +2885,7 @@ class Explainer(Modelling):
                 for nt, idx, shift, large, signed_shift in node_importances:
                     type_counts[nt] += 1
                     type_shifts[nt].append(shift / 3600.0)
+                    type_signed_shifts[nt].append(signed_shift / 3600.0)
 
                 included_keys = set(identified_keys) | {(vp, object_idx)}
                 induced_edges = self._induced_edges(g, included_keys)
@@ -2870,32 +2926,30 @@ class Explainer(Modelling):
         type_table_rows = []
         for nt in sorted(type_counts, key=lambda t: type_counts[t], reverse=True):
             shifts = np.array(type_shifts[nt])
+            signed_shifts = np.array(type_signed_shifts[nt])
             freq = type_counts[nt] / (len(table) * top_k) if len(table) else float('nan')
             print(f"  {nt:<12} selected {type_counts[nt]:>4}x  ({freq:.1%} of top-{top_k} slots)  "
                   f"mean shift={shifts.mean():.2f}h ± {shifts.std():.2f}h")
             type_table_rows.append({
                 'node_type': nt, 'selection_count': type_counts[nt], 'selection_frequency': freq,
                 'mean_shift_hours': shifts.mean(), 'std_shift_hours': shifts.std(),
+                'mean_signed_shift_hours': signed_shifts.mean(),
             })
         type_table = pd.DataFrame(type_table_rows)
         type_csv_path = os.path.join(save_dir, "aggregate_gnnprimary_type_summary.csv")
         type_table.to_csv(type_csv_path, index=False)
 
-        fig, ax = plt.subplots(figsize=(7, 4.5), facecolor='#fcfcfb')
-        ax.set_facecolor('#fcfcfb')
-        ax.bar(type_table['node_type'], type_table['mean_shift_hours'],
-              yerr=type_table['std_shift_hours'], color='#2a78d6', alpha=0.9, capsize=4)
-        ax.set_xlabel("Node type")
-        ax.set_ylabel("Mean LOO impact if masked (hours)")
-        ax.set_title(f"GNNExplainer-identified node impact by type (n={len(table)} traces)",
-                    fontsize=11, loc='left')
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        plt.xticks(rotation=30, ha='right')
-        plt.tight_layout()
         png_path = os.path.join(save_dir, "aggregate_gnnprimary_type_summary.png")
-        plt.savefig(png_path, dpi=150)
-        plt.close()
+        bar_rows = [{'node_type': r['node_type'], 'value': r['mean_shift_hours'],
+                    'signed_value': r['mean_signed_shift_hours'], 'std': r['std_shift_hours']}
+                    for r in type_table_rows]
+        self.plot_node_type_bars(
+            bar_rows, png_path,
+            f"GNNExplainer-identified node impact by type (n={len(table)} traces)",
+            "Mean LOO impact if masked (hours)", show_error_bars=True,
+            secondary_series=[r['selection_count'] for r in type_table_rows],
+            secondary_label="Times selected",
+        )
 
         print(f"\nSaved {csv_path}")
         print(f"Saved {type_csv_path}")

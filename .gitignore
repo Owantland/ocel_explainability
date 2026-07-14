@@ -218,6 +218,7 @@ __marimo__/
 /files/output_tables/
 /files/explainer_outputs/
 /files/results.csv
+/dashboard_cache/
 /data/
 
 # Legacy/vendored/reference material - large, not source, would otherwise be at risk of an
