@@ -23,7 +23,9 @@ DATASETS = {
 MODE_LABELS = {
     'loo': 'Exhaustive LOO',
     'gnn_primary': 'GNNExplainer-primary',
+    'ig': 'Feature Attribution (IG)',
 }
+IG_METHODS = ('InputXGradient', 'IntegratedGradients')
 
 st.set_page_config(page_title="Perturbation Analysis Explorer", layout="wide")
 
@@ -42,12 +44,35 @@ def order_ids_for(explainer):
     )
 
 
-def compute_local(explainer, database, cant, mode, order_id):
+def compute_local(explainer, database, cant, mode, order_id, ig_method=None):
     if mode == 'loo':
         compute_fn = lambda: explainer.explain_trace(order_id)
-    else:
+        return dc.get_or_compute(database, cant, mode, order_id, compute_fn)
+    if mode == 'gnn_primary':
         compute_fn = lambda: explainer.explain_gnn_primary(order_id)
-    return dc.get_or_compute(database, cant, mode, order_id, compute_fn)
+        return dc.get_or_compute(database, cant, mode, order_id, compute_fn)
+
+    # 'ig': deliberately NOT cached -- explain_trace_ig() is a single backward
+    # pass per method, already fast enough live (verified directly, no visible
+    # delay), so the cache's whole reason to exist (GNNExplainer's ~200-epoch
+    # cost) doesn't apply here. Its return value also isn't the same shape as
+    # the other two modes' (no save_dir/predicted_hours, raw numpy arrays
+    # instead of plain tuples -- not JSON-serializable as-is either), so it's
+    # reconstructed here rather than adapted into dashboard_cache's schema.
+    attribution = explainer.explain_trace_ig(order_id, methods=(ig_method,))
+    # No n_events picker in this dashboard (always the last-recorded prefix), so
+    # the suffix explain_trace_ig()/explain_trace() append for an earlier prefix
+    # is always empty here -- same save_dir convention as explain_trace() uses.
+    save_dir = os.path.join(explainer.path_dict['explainer_path'], f"order_{order_id}")
+    graph = explainer._locate_test_graph(order_id, None)
+    predicted_hours = explainer._predict_value_for_graph(graph, 0) / 3600.0
+    result = {
+        'save_dir': save_dir,
+        'predicted_hours': predicted_hours,
+        'method': ig_method,
+        'attribution': attribution,
+    }
+    return result, False
 
 
 def render_local(result, cached, mode):
@@ -97,8 +122,46 @@ def render_local(result, cached, mode):
                   "signal on this architecture. Switch to Exhaustive LOO for edge importance.")
 
 
-def render_global(database, mode):
+def render_local_ig(result):
+    """Feature attribution's return/artifact shape is genuinely different from
+    the other two modes' (no save_dir/predicted_hours in the return value, a
+    bar chart PER node type PER method rather than one fixed-name summary chart)
+    -- a separate render path rather than a branch inside render_local()."""
+    st.caption(f"Method: {result['method']} -- not cached (fast enough to compute live)")
+    st.metric("Predicted remaining time", f"{result['predicted_hours']:.1f} h")
+
+    save_dir = result['save_dir']
+    suffix = result['method'].lower()
+
+    heatmap_png = os.path.join(save_dir, f"ig_heatmap_{suffix}.png")
+    if os.path.exists(heatmap_png):
+        st.image(heatmap_png, caption="Attribution heatmap (all node types x feature dims)")
+
+    csv_path = os.path.join(save_dir, f"ig_attribution_{suffix}.csv")
+    if os.path.exists(csv_path):
+        df = pd.read_csv(csv_path)
+        top_types = (df.groupby('node_type')['abs'].mean()
+                     .sort_values(ascending=False).head(2).index.tolist())
+
+        if top_types:
+            st.subheader(f"Top node types by mean |attribution|: {', '.join(top_types)}")
+            cols = st.columns(len(top_types))
+            for col, nt in zip(cols, top_types):
+                with col:
+                    png = os.path.join(save_dir, f"ig_attribution_{nt.lower()}_{suffix}.png")
+                    if os.path.exists(png):
+                        st.image(png)
+
+        st.subheader("Full attribution table")
+        st.dataframe(df.sort_values('abs', ascending=False).head(20), width='stretch')
+
+
+def render_global(database, mode, ig_method=None):
     base = os.path.join("files", "explainer_outputs", database)
+    if mode == 'ig':
+        render_global_ig(base, ig_method)
+        return
+
     if mode == 'loo':
         csv_path = os.path.join(base, "aggregate", "aggregate_metrics.csv")
         png_path = os.path.join(base, "aggregate", "aggregate_node_type_importance.png")
@@ -119,17 +182,61 @@ def render_global(database, mode):
         st.image(png_path)
 
 
-def render_regenerate(explainer, database, cant, mode):
+def render_global_ig(base, ig_method):
+    """Dataset-wide feature attribution -- reads files/explainer_outputs/{database}/
+    attribution/, the fixed output folder explain_feature_attribution() already
+    writes to (not per-order like the other two modes' aggregate folders).
+    Different CSV columns (mean_signed/mean_abs, not signed/abs) and PNG naming
+    (ig_{node_type}_importance_{suffix}.png, not ig_attribution_{node_type}_{suffix}.png)
+    than the single-trace path, so this reuses the same top-2 curation idea as
+    render_local_ig() but can't reuse its code directly."""
+    out_dir = os.path.join(base, "attribution")
+    suffix = ig_method.lower()
+    csv_path = os.path.join(out_dir, f"ig_attribution_{suffix}.csv")
+    heatmap_png = os.path.join(out_dir, f"ig_heatmap_{suffix}.png")
+
+    if not os.path.exists(csv_path):
+        st.warning(f"No precomputed attribution found at {csv_path}. Run it via Regenerate below, "
+                  f"or from the command line first.")
+        return
+
+    df = pd.read_csv(csv_path)
+    st.caption(f"From {csv_path}")
+    if os.path.exists(heatmap_png):
+        st.image(heatmap_png, caption="Attribution heatmap (all node types x feature dims)")
+
+    top_types = (df.groupby('node_type')['mean_abs'].mean()
+                 .sort_values(ascending=False).head(2).index.tolist())
+    if top_types:
+        st.subheader(f"Top node types by mean |attribution|: {', '.join(top_types)}")
+        cols = st.columns(len(top_types))
+        for col, nt in zip(cols, top_types):
+            with col:
+                png = os.path.join(out_dir, f"ig_{nt.lower()}_importance_{suffix}.png")
+                if os.path.exists(png):
+                    st.image(png)
+
+    st.subheader("Full attribution table")
+    st.dataframe(df.sort_values('mean_abs', ascending=False).head(20), width='stretch')
+
+
+def render_regenerate(explainer, database, cant, mode, ig_method=None):
+    cost_notes = {
+        'loo': "Exhaustive LOO is slow (O(n_traces x nodes+edges) forward passes).",
+        'gnn_primary': "GNNExplainer-primary is much slower (n_traces x 200-epoch mask optimizations).",
+        'ig': "Feature attribution is the cheapest of the three -- a single backward pass per "
+              "trace, comparable to or faster than Exhaustive LOO's aggregate.",
+    }
     st.caption("Recomputes the aggregate from scratch and overwrites the CSV/PNG shown above -- "
-              "only needed after retraining the underlying model. Exhaustive LOO is slow "
-              "(O(n_traces x nodes+edges) forward passes); GNNExplainer-primary is much slower "
-              "(n_traces x 200-epoch mask optimizations).")
+              f"only needed after retraining the underlying model. {cost_notes[mode]}")
     if st.button(f"Regenerate {MODE_LABELS[mode]} aggregate (n_traces=50)", key=f"regen_{mode}"):
-        with st.spinner("Running aggregate explanation -- this can take several minutes..."):
+        with st.spinner("Running aggregate explanation -- this can take a while..."):
             if mode == 'loo':
                 explainer.explain_aggregate(n_traces=50)
-            else:
+            elif mode == 'gnn_primary':
                 explainer.explain_gnn_primary_aggregate(n_traces=50)
+            else:
+                explainer.explain_feature_attribution(n_traces=50, methods=(ig_method,))
         st.success("Done. Reload the page to see the updated figures.")
 
 
@@ -147,9 +254,15 @@ def main():
             "Explanation mode", list(MODE_LABELS.keys()),
             format_func=lambda m: MODE_LABELS[m],
         )
+        ig_method = None
         if mode == 'gnn_primary':
             st.caption("GNNExplainer identifies important nodes; LOO estimates their impact. "
                       "Node-only -- no edge importance.")
+        elif mode == 'ig':
+            ig_method = st.radio("IG method", IG_METHODS, key="ig_method_picker")
+            st.caption("Gradient-based feature sensitivity, not perturbation -- complements "
+                      "the other two modes rather than competing with them. Not cached; "
+                      "cheap enough to compute live every time.")
         else:
             st.caption("Exhaustive sweep over every node, edge, and feature. Slower, but the "
                       "only source of edge importance.")
@@ -166,8 +279,12 @@ def main():
                           if mode == 'gnn_primary' else "Computing...")
             try:
                 with st.spinner(spinner_msg):
-                    result, cached = compute_local(explainer, database, cant, mode, order_id)
-                render_local(result, cached, mode)
+                    result, cached = compute_local(explainer, database, cant, mode, order_id,
+                                                    ig_method=ig_method)
+                if mode == 'ig':
+                    render_local_ig(result)
+                else:
+                    render_local(result, cached, mode)
             except ValueError as ex:
                 # explain_gnn_primary()'s guard against a legitimately-empty edge
                 # type (a real PyG/GNNExplainer limitation, not every order supports
@@ -175,9 +292,9 @@ def main():
                 st.error(f"This order isn't explainable in {MODE_LABELS[mode]} mode: {ex}")
 
     with tab_global:
-        render_global(database, mode)
+        render_global(database, mode, ig_method=ig_method)
         with st.expander("Regenerate (advanced)"):
-            render_regenerate(explainer, database, cant, mode)
+            render_regenerate(explainer, database, cant, mode, ig_method=ig_method)
 
 
 if __name__ == '__main__':
