@@ -2679,6 +2679,146 @@ class Explainer(Modelling):
             'save_dir': save_dir,
         }
 
+    def validate_fidelity_comparison(self, n_traces=50, top_k=5, epochs=200, lr=0.01, save_dir=None):
+        """Paired statistical validation of the LOO-vs-GNNExplainer-primary fidelity
+        gap that explain_aggregate() and explain_gnn_primary_aggregate() each already
+        report as an independent mean +/- std (e.g. order_management Characterization:
+        exhaustive LOO ~0.84 vs. GNNExplainer-primary 0.6845 +/- 0.1817) -- but never
+        checked for statistical significance, and never on a genuine per-trace paired
+        basis despite both functions already sampling the identical
+        last_event_graphs[:n_traces] (same self.test_data ordering). Computes both
+        pathways' Fidelity+/-/Characterization for the SAME trace in the SAME pass
+        (mirroring compare_loo_gnn_importance_aggregate()'s lower-level-primitives
+        pattern above, rather than reconciling two separately-saved CSVs after the
+        fact -- aggregate_metrics.csv's LOO rows are keyed by a bare positional
+        'trace' index, not order_id, so they can't safely be joined post hoc), then
+        runs a paired Wilcoxon signed-rank test (primary -- no normality assumption
+        on a bounded/possibly-skewed metric) and a paired t-test (secondary) on the
+        per-trace difference for each metric.
+
+        Pairing is naturally limited to the intersection of traces both pathways can
+        process: LOO has no restriction, but GNNExplainer can't initialize masks for
+        a trace with a legitimately-empty edge type (same PyG limitation guarded by
+        _check_gnn_explainer_edges(), reused here instead of a second ad hoc check).
+        """
+        import numpy as np
+        import pandas as pd
+        from scipy import stats
+
+        if save_dir is None:
+            save_dir = os.path.join(self.path_dict['explainer_path'], "fidelity_validation")
+        os.makedirs(save_dir, exist_ok=True)
+
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        vp = self.kpi_viewpoint
+        last_event_graphs = [g for g in self.test_data if g[vp]['last_event'][0].item()]
+        sample = last_event_graphs[:n_traces]
+        print(f"Running paired fidelity validation on {len(sample)} traces…")
+
+        gnn_explainer = self._get_gnn_explainer(epochs, lr)
+
+        rows = []
+        n_skipped = 0
+        n_failed = 0
+        for g in sample:
+            oid = int(g[vp]['id'][0].item())
+            object_idx = 0
+
+            try:
+                self._check_gnn_explainer_edges(g, oid)
+            except ValueError:
+                n_skipped += 1
+                continue
+
+            try:
+                baseline_value = self._predict_value_for_graph(g, object_idx)
+
+                # Exhaustive LOO.
+                node_imp, edge_imp, _, _, _ = self.reg_explanation(g, object_idx, None, top_k)
+                loo_quality = self.evaluate_explanation_quality(
+                    g, object_idx, node_imp, edge_imp, node_top_k=10, edge_top_k=15, verbose=False
+                )
+
+                # GNNExplainer-primary.
+                x_dict = {nt: g[nt].x for nt in g.node_types}
+                explanation = self._run_gnn_explainer(gnn_explainer, x_dict, g.edge_index_dict,
+                                                       index=object_idx)
+                node_mask_dict = {nt: explanation.node_mask_dict[nt].detach().cpu().numpy()
+                                  for nt in g.node_types if nt in explanation.node_mask_dict}
+                gnn_ranking = self._gnn_node_instance_ranking(node_mask_dict)
+                identified_keys = [(nt, idx) for nt, idx, _ in gnn_ranking
+                                   if not (nt == vp and idx == object_idx)][:top_k]
+                gnn_node_imp = self._loo_shift_for_nodes(g, object_idx, baseline_value, identified_keys)
+                included_keys = set(identified_keys) | {(vp, object_idx)}
+                induced_edges = self._induced_edges(g, included_keys)
+                gnn_quality = self.evaluate_explanation_quality(
+                    g, object_idx, gnn_node_imp, induced_edges,
+                    node_top_k=top_k, edge_top_k=max(len(induced_edges), 1), verbose=False
+                )
+
+                rows.append({
+                    'order_id': oid,
+                    'loo_characterization': loo_quality['characterization_score'],
+                    'gnn_characterization': gnn_quality['characterization_score'],
+                    'loo_fidelity_plus': loo_quality['fidelity_plus'],
+                    'gnn_fidelity_plus': gnn_quality['fidelity_plus'],
+                    'loo_fidelity_minus': loo_quality['fidelity_minus'],
+                    'gnn_fidelity_minus': gnn_quality['fidelity_minus'],
+                })
+            except Exception as ex:
+                n_failed += 1
+                print(f"  [trace failed] order={oid}: {type(ex).__name__}: {ex}")
+                continue
+
+        table = pd.DataFrame(rows)
+        csv_path = os.path.join(save_dir, "fidelity_validation_paired.csv")
+        table.to_csv(csv_path, index=False)
+
+        print(f"\nPaired fidelity validation (n={len(table)} traces, {n_skipped} skipped "
+              f"[empty edge type], {n_failed} failed [other]):")
+
+        def _bootstrap_ci(diff, n_boot=2000, seed=42):
+            rng = np.random.default_rng(seed)
+            n = len(diff)
+            boot_means = np.array([rng.choice(diff, size=n, replace=True).mean()
+                                   for _ in range(n_boot)])
+            return float(np.percentile(boot_means, 2.5)), float(np.percentile(boot_means, 97.5))
+
+        results = {}
+        for metric in ['characterization', 'fidelity_plus', 'fidelity_minus']:
+            loo_vals = table[f'loo_{metric}'].values
+            gnn_vals = table[f'gnn_{metric}'].values
+            diff = loo_vals - gnn_vals
+            ci_low, ci_high = _bootstrap_ci(diff)
+            # Wilcoxon requires at least one non-zero difference.
+            if np.any(diff != 0):
+                _, p_wilcoxon = stats.wilcoxon(loo_vals, gnn_vals)
+            else:
+                p_wilcoxon = float('nan')
+            _, p_ttest = stats.ttest_rel(loo_vals, gnn_vals)
+
+            verdict = ("statistically significant" if p_wilcoxon < 0.05
+                       else "NOT statistically significant")
+            print(f"\n  {metric}:")
+            print(f"    LOO mean    : {loo_vals.mean():.4f} ± {loo_vals.std():.4f}")
+            print(f"    GNNExp mean : {gnn_vals.mean():.4f} ± {gnn_vals.std():.4f}")
+            print(f"    Paired mean diff (LOO - GNNExp): {diff.mean():.4f}  "
+                  f"[95% CI {ci_low:.4f}, {ci_high:.4f}]")
+            print(f"    Wilcoxon signed-rank p={p_wilcoxon:.2e}   Paired t-test p={p_ttest:.2e}")
+            print(f"    -> {verdict} at α=0.05")
+
+            results[metric] = {
+                'loo_mean': float(loo_vals.mean()), 'loo_std': float(loo_vals.std()),
+                'gnn_mean': float(gnn_vals.mean()), 'gnn_std': float(gnn_vals.std()),
+                'mean_diff': float(diff.mean()), 'ci_low': ci_low, 'ci_high': ci_high,
+                'wilcoxon_p': float(p_wilcoxon), 'ttest_p': float(p_ttest),
+            }
+
+        print(f"\nSaved {csv_path}")
+        return {'table': table, 'results': results, 'save_dir': save_dir}
+
     # ── GNNExplainer as PRIMARY structural identifier, LOO as targeted impact ───
     # estimator. Distinct from compare_loo_gnn_importance() above, which runs both
     # methods independently and compares their rankings -- here GNNExplainer's
