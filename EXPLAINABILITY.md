@@ -522,6 +522,16 @@ column (empty for non-`Events` rows). Implemented by reusing the existing
 plotting functions — rather than building a new lookup; verified working on a real order on both
 `order_management` and `logistics`.
 
+**Coverage extended (2026-07-17)**: `explain_trace()` was the only "top nodes" surface with this —
+`explain_gnn_primary()`'s console output/`gnnprimary_node_importance.csv` and the Streamlit
+dashboard's Local-tab "Top nodes" table (both LOO and GNNExplainer-primary modes) still showed raw
+`Events[N]` indices. Both now reuse the same `_decode_event_types_with_indices()` decoder (the
+dashboard re-derives it from the graph directly, since the underlying `node_importances` tuples don't
+carry it) — verified to produce byte-identical activity names to `explain_trace()`'s own output for
+the same order. Deliberately still Events-only: `Customers`/`Employees` are also fully one-hot
+(company name / department respectively) and could get the same treatment later, but `Items`/
+`Products`/`Packages`/`Orders` are purely numeric with no identity to decode — out of scope here.
+
 ### ~~Depth-stratified aggregation~~ RESOLVED (2026-07-13)
 
 `explain_aggregate` (LOO) pools shifts across all prefix depths. A 3-event prefix has ~20 nodes

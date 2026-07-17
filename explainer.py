@@ -2931,6 +2931,21 @@ class Explainer(Modelling):
         baseline_value = self._predict_value_for_graph(graph, object_idx)
         n_q = graph['Events'].x.size(0) if 'Events' in graph.node_types else '?'
 
+        # Decode Events node indices to their activity type name (e.g. "Events[6]"
+        # -> "Events[6](PaymentReminder)"), same decoder already used by
+        # explain_trace()'s console/CSV output -- reused here rather than
+        # duplicated, since these are also "top nodes" tables that previously
+        # lacked it.
+        ev_idx_to_name = {}
+        for _name, _idxs in self._decode_event_types_with_indices(graph).items():
+            for _i in _idxs:
+                ev_idx_to_name[_i] = _name
+
+        def _node_label(nt, idx):
+            if nt == 'Events' and idx in ev_idx_to_name:
+                return f"{nt}[{idx}]({ev_idx_to_name[idx]})"
+            return f"{nt}[{idx}]"
+
         # GNNExplainer identifies the important node instances.
         x_dict = {nt: graph[nt].x for nt in graph.node_types}
         gnn_explainer = self._get_gnn_explainer(epochs, lr)
@@ -2982,7 +2997,7 @@ class Explainer(Modelling):
         print(f"\nIdentified nodes (GNNExplainer rank → LOO impact):")
         for rank, (nt, idx, shift, large, signed_shift) in enumerate(node_importances, 1):
             flag = "  [LARGE SHIFT]" if large else ""
-            print(f"  {rank}. {nt}[{idx}]  gnn_score={gnn_score_map.get((nt, idx), float('nan')):.4f}  "
+            print(f"  {rank}. {_node_label(nt, idx)}  gnn_score={gnn_score_map.get((nt, idx), float('nan')):.4f}  "
                   f"shift={signed_shift/3600:+.2f}h{flag}")
 
         print(f"\nEdge importance: not available in this pathway -- GNNExplainer has no edge "
@@ -3013,6 +3028,7 @@ class Explainer(Modelling):
         csv_path = os.path.join(save_dir, "gnnprimary_node_importance.csv")
         pd.DataFrame([
             {'rank': r, 'node_type': nt, 'node_idx': idx,
+             'activity_name': ev_idx_to_name.get(idx, '') if nt == 'Events' else '',
              'gnn_score': gnn_score_map.get((nt, idx)),
              'loo_signed_shift_hours': signed_shift / 3600.0, 'large_shift': large}
             for r, (nt, idx, shift, large, signed_shift) in enumerate(node_importances, 1)

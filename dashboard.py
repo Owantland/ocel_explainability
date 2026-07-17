@@ -75,7 +75,7 @@ def compute_local(explainer, database, cant, mode, order_id, ig_method=None):
     return result, False
 
 
-def render_local(result, cached, mode):
+def render_local(result, cached, mode, explainer, order_id):
     st.caption("served from cache" if cached else "computed just now (now cached for next time)")
     st.metric("Predicted remaining time", f"{result['predicted_hours']:.1f} h")
 
@@ -99,7 +99,21 @@ def render_local(result, cached, mode):
         )
         df['shift_hours'] = df['shift_seconds'] / 3600.0
         df['signed_shift_hours'] = df['signed_shift_seconds'] / 3600.0
-        df = df[['node_type', 'node_idx', 'signed_shift_hours', 'large_shift']]
+
+        # Human-readable Events activity name, same decoder explain_trace()'s
+        # console/CSV output already uses -- re-derived here (cheap graph lookup,
+        # no model inference) since the raw node_importances tuples don't carry it.
+        graph = explainer._locate_test_graph(order_id, None)
+        ev_idx_to_name = {}
+        for name, idxs in explainer._decode_event_types_with_indices(graph).items():
+            for i in idxs:
+                ev_idx_to_name[i] = name
+        df['identifier'] = df.apply(
+            lambda r: ev_idx_to_name.get(r['node_idx'], '') if r['node_type'] == 'Events' else '',
+            axis=1,
+        )
+
+        df = df[['node_type', 'node_idx', 'identifier', 'signed_shift_hours', 'large_shift']]
         st.dataframe(df.head(10), width='stretch')
 
     if mode == 'loo':
@@ -284,7 +298,7 @@ def main():
                 if mode == 'ig':
                     render_local_ig(result)
                 else:
-                    render_local(result, cached, mode)
+                    render_local(result, cached, mode, explainer, order_id)
             except ValueError as ex:
                 # explain_gnn_primary()'s guard against a legitimately-empty edge
                 # type (a real PyG/GNNExplainer limitation, not every order supports
