@@ -100,16 +100,14 @@ def render_local(result, cached, mode, explainer, order_id):
         df['shift_hours'] = df['shift_seconds'] / 3600.0
         df['signed_shift_hours'] = df['signed_shift_seconds'] / 3600.0
 
-        # Human-readable Events activity name, same decoder explain_trace()'s
-        # console/CSV output already uses -- re-derived here (cheap graph lookup,
-        # no model inference) since the raw node_importances tuples don't carry it.
+        # Human-readable identifier (Events activity name, or a real identity for any
+        # other encoding-listed type), same decoder explain_trace()'s console/CSV
+        # output already uses -- re-derived here (cheap graph lookup, no model
+        # inference) since the raw node_importances tuples don't carry it.
         graph = explainer._locate_test_graph(order_id, None)
-        ev_idx_to_name = {}
-        for name, idxs in explainer._decode_event_types_with_indices(graph).items():
-            for i in idxs:
-                ev_idx_to_name[i] = name
+        id_map = explainer._decode_all_identifiers(graph)
         df['identifier'] = df.apply(
-            lambda r: ev_idx_to_name.get(r['node_idx'], '') if r['node_type'] == 'Events' else '',
+            lambda r: id_map.get((r['node_type'], r['node_idx']), ''),
             axis=1,
         )
 

@@ -536,18 +536,16 @@ class Explainer(Modelling):
 
         names = self.feature_names
 
-        # Decode Events node indices to their activity type name (e.g. "Events[1]"
-        # -> "Events[1](PlaceOrder)") wherever an Events node is printed below, reusing
-        # the same decoder already used for counterfactual output (_decode_event_types*)
-        # instead of leaving raw indices unexplained in LOO's console/CSV output.
-        ev_idx_to_name = {}
-        for _name, _idxs in self._decode_event_types_with_indices(explain_subgraph).items():
-            for _i in _idxs:
-                ev_idx_to_name[_i] = _name
+        # Decode node indices to a real-world identity (activity name for Events, e.g.
+        # "Events[1]" -> "Events[1](PlaceOrder)"; company/department/vehicle id for any
+        # other encoding-listed type, e.g. "Customers[0]" -> "Customers[0](Acme Inc)")
+        # wherever a node is printed below, instead of leaving raw indices unexplained
+        # in LOO's console/CSV output.
+        id_map = self._decode_all_identifiers(explain_subgraph)
 
         def _node_label(nt, idx):
-            if nt == 'Events' and idx in ev_idx_to_name:
-                return f"{nt}[{idx}]({ev_idx_to_name[idx]})"
+            if (nt, idx) in id_map:
+                return f"{nt}[{idx}]({id_map[(nt, idx)]})"
             return f"{nt}[{idx}]"
 
         print(f"\n{'='*60}")
@@ -576,7 +574,7 @@ class Explainer(Modelling):
         print(f"\nTop 3 nodes per type:")
         for nt in sorted(top_per_type):
             entries = ", ".join(
-                (f"({ev_idx_to_name[idx]})" if nt == 'Events' and idx in ev_idx_to_name else "")
+                (f"({id_map[(nt, idx)]})" if (nt, idx) in id_map else "")
                 + f"[{idx}]={signed_shift/3600:+.2f}h" + (" [LARGE]" if large else "")
                 for idx, shift, large, signed_shift in top_per_type[nt]
             )
@@ -585,7 +583,7 @@ class Explainer(Modelling):
         import pandas as pd
         pd.DataFrame([
             {'node_type': nt, 'rank': rank, 'node_idx': idx,
-             'activity_name': ev_idx_to_name.get(idx, '') if nt == 'Events' else '',
+             'identifier': id_map.get((nt, idx), ''),
              'shift_hours': shift / 3600, 'signed_shift_hours': signed_shift / 3600,
              'large_shift': large}
             for nt, entries in top_per_type.items()
@@ -593,10 +591,10 @@ class Explainer(Modelling):
         ]).to_csv(os.path.join(save_dir, "top_nodes_per_type.csv"), index=False)
 
         def _idx_label(nt, idx):
-            """Bare-index label for one endpoint of an edge, decorated with the
-            activity name only when nt is Events (no point repeating other types'
-            names, since et[0]/et[2] already print the type once for the whole edge)."""
-            return f"{idx}({ev_idx_to_name[idx]})" if nt == 'Events' and idx in ev_idx_to_name else str(idx)
+            """Bare-index label for one endpoint of an edge, decorated with its decoded
+            identity when available (no point repeating other types' names, since
+            et[0]/et[2] already print the type once for the whole edge)."""
+            return f"{idx}({id_map[(nt, idx)]})" if (nt, idx) in id_map else str(idx)
 
         print(f"\nTop {top_k} edges by influence:")
         for rank, (et, e, shift, large, signed_shift) in enumerate(edge_importances[:top_k], 1):
@@ -1539,6 +1537,49 @@ class Explainer(Modelling):
         for node_idx, t in enumerate(type_idx.tolist()):
             idx_by_type[type_names[t]].append(node_idx)
         return idx_by_type
+
+    def _decode_node_identifiers(self, graph, node_type):
+        """Decode a single non-Events node type's real-world identity (company name,
+        department, vehicle id, ...) via argmax over its full feature vector, mirroring
+        _decode_event_types_with_indices()'s approach. Only viable for node types listed
+        in config's 'encoding' -- those are the only ones training.py populates with real
+        identity names in self.feature_names rather than raw numeric attribute names (see
+        training.py's Modelling.__init__, ~line 148-180). Returns {} for anything not
+        decodable: not encoding-listed, absent from this graph, or collapsed to the
+        '{type}_present' fallback training.py uses when an entity has >50 distinct values
+        (too many to one-hot -- decoding that fallback would misleadingly print a fake
+        specific identity for what's really just a presence flag)."""
+        result = {}
+        if node_type == 'Events':
+            return result
+        if node_type not in (self.path_dict.get('encoding') or []):
+            return result
+        if node_type not in graph.node_types or graph[node_type].x.size(0) == 0:
+            return result
+        names = self.feature_names.get(node_type, [])
+        if not names or names == [f'{node_type}_present']:
+            return result
+        x = graph[node_type].x
+        if x.size(1) != len(names):
+            return result
+        idx = x.argmax(dim=1)
+        for node_idx, i in enumerate(idx.tolist()):
+            result[node_idx] = names[i]
+        return result
+
+    def _decode_all_identifiers(self, graph):
+        """Combine Events activity-name decoding with every encoding-listed node type's
+        identity decoding into one {(node_type, node_idx): name} lookup -- the single map
+        every 'top nodes' presentation surface (explain_trace, explain_gnn_primary,
+        dashboard.py's render_local) needs."""
+        id_map = {}
+        for name, idxs in self._decode_event_types_with_indices(graph).items():
+            for i in idxs:
+                id_map[('Events', i)] = name
+        for node_type in (self.path_dict.get('encoding') or []):
+            for node_idx, name in self._decode_node_identifiers(graph, node_type).items():
+                id_map[(node_type, node_idx)] = name
+        return id_map
 
     def _plot_cf_event_type_diff(self, query_graph, cf_graph, query_id, cf_id, save_dir):
         """Table of Events activity types whose count DIFFERS between query and
@@ -2931,19 +2972,16 @@ class Explainer(Modelling):
         baseline_value = self._predict_value_for_graph(graph, object_idx)
         n_q = graph['Events'].x.size(0) if 'Events' in graph.node_types else '?'
 
-        # Decode Events node indices to their activity type name (e.g. "Events[6]"
-        # -> "Events[6](PaymentReminder)"), same decoder already used by
-        # explain_trace()'s console/CSV output -- reused here rather than
-        # duplicated, since these are also "top nodes" tables that previously
-        # lacked it.
-        ev_idx_to_name = {}
-        for _name, _idxs in self._decode_event_types_with_indices(graph).items():
-            for _i in _idxs:
-                ev_idx_to_name[_i] = _name
+        # Decode node indices to a real-world identity (activity name for Events,
+        # company/department/vehicle id for any other encoding-listed type), same
+        # decoder already used by explain_trace()'s console/CSV output -- reused
+        # here rather than duplicated, since these are also "top nodes" tables
+        # that previously lacked it.
+        id_map = self._decode_all_identifiers(graph)
 
         def _node_label(nt, idx):
-            if nt == 'Events' and idx in ev_idx_to_name:
-                return f"{nt}[{idx}]({ev_idx_to_name[idx]})"
+            if (nt, idx) in id_map:
+                return f"{nt}[{idx}]({id_map[(nt, idx)]})"
             return f"{nt}[{idx}]"
 
         # GNNExplainer identifies the important node instances.
@@ -3028,7 +3066,7 @@ class Explainer(Modelling):
         csv_path = os.path.join(save_dir, "gnnprimary_node_importance.csv")
         pd.DataFrame([
             {'rank': r, 'node_type': nt, 'node_idx': idx,
-             'activity_name': ev_idx_to_name.get(idx, '') if nt == 'Events' else '',
+             'identifier': id_map.get((nt, idx), ''),
              'gnn_score': gnn_score_map.get((nt, idx)),
              'loo_signed_shift_hours': signed_shift / 3600.0, 'large_shift': large}
             for r, (nt, idx, shift, large, signed_shift) in enumerate(node_importances, 1)

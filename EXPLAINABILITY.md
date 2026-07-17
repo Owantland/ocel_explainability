@@ -532,6 +532,26 @@ the same order. Deliberately still Events-only: `Customers`/`Employees` are also
 (company name / department respectively) and could get the same treatment later, but `Items`/
 `Products`/`Packages`/`Orders` are purely numeric with no identity to decode — out of scope here.
 
+**Generalized to every `encoding`-configured node type (2026-07-17)**: rather than hardcoding
+Customers/Employees, this reuses `training.py`'s existing config-driven `self.path_dict['encoding']`
+list (the same node types `training.py` already builds real identity names for in
+`self.feature_names` — `Customers`/`Employees` for `order_management`,
+`HandlingUnit`/`Truck`/`Forklift`/`Vehicle` for `logistics`). Two new helpers in `explainer.py`:
+`_decode_node_identifiers()` (per-type argmax decode, mirroring `_decode_event_types_with_indices()`)
+and `_decode_all_identifiers()` (combines Events + every `encoding`-listed type into one
+`{(node_type, idx): name}` map). `explain_trace()`, `explain_gnn_primary()`, and the dashboard's
+`render_local()` all now use this general map; the CSV column was renamed `activity_name` →
+`identifier` accordingly. Verified on real orders: `order_management` #1781 correctly decodes
+`Customers[0](Nordica Systems GmbH)` and `Employees[4](Sales)`; `logistics` #864 correctly decodes
+`Truck[0](tr1)` and `Forklift[0](fl8)`. Correctly stays blank for `HandlingUnit`/`Vehicle` — these
+collapse to `training.py`'s `"{type}_present"` fallback when an entity has >50 distinct values (too
+many to reasonably one-hot), which is a presence flag, not a real distinguishing identity, so
+decoding it would print a misleading fake-specific label. `Items`/`Products`/`Packages`/`Orders`/
+`Container`/`CustomerOrder`/`TransportDocument` remain correctly blank too — purely numeric, no
+identity in the source data. `explain_aggregate()`/`explain_gnn_primary_aggregate()` (and the
+dashboard's Global tab) remain unextended: per-instance identity isn't meaningful once pooled across
+many different traces (a `Customers[0]` in one trace is a different company than in another).
+
 ### ~~Depth-stratified aggregation~~ RESOLVED (2026-07-13)
 
 `explain_aggregate` (LOO) pools shifts across all prefix depths. A 3-event prefix has ~20 nodes
