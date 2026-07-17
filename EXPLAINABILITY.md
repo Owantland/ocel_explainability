@@ -417,7 +417,9 @@ entry above) and of full exhaustive-LOO rankings.
     notably lower than order_management's, consistent with logistics being the harder dataset
     throughout this project (deeper graphs, tighter reachability margins — see `TRAINING_VS_HOEG.md`).
   Full per-trace figures: `aggregate_gnnprimary_metrics.csv` under each dataset's
-  `explainer_outputs/*/aggregate_gnnprimary/`.
+  `explainer_outputs/*/aggregate_gnnprimary/`. **These figures were independent-sample means with
+  large recorded std devs, not yet checked for statistical significance — see "Paired statistical
+  validation of the fidelity gap" below for the rigorous version.**
 
 ### ~~GNNExplainer non-determinism~~ RESOLVED (2026-07-14)
 
@@ -446,6 +448,46 @@ GNNExplainer's entire random-initialization sequence, the `compare_loo_gnn_impor
 overlap figure and the `explain_gnn_primary_aggregate` characterization figures cited above both
 predate this fix and were re-verified under the new seeded regime — see the updated numbers in the
 bullets above and below.
+
+### Paired statistical validation of the fidelity gap (added 2026-07-17)
+
+The fidelity comparison above (exhaustive LOO's ~0.84/0.68 vs. GNNExplainer-primary's 0.68/0.24
+Characterization) was reported as two **independent**-sample means with large recorded std devs —
+never checked for statistical significance, and never computed on a genuine per-trace **paired**
+basis, even though `explain_aggregate()` and `explain_gnn_primary_aggregate()` already sample the
+identical `last_event_graphs[:n_traces]` ordering. The existing `aggregate_metrics.csv` (LOO) keys
+its rows by a bare positional index, not `order_id`, so the two existing aggregate CSVs couldn't
+safely be joined after the fact to exploit that.
+
+`validate_fidelity_comparison(n_traces=50, epochs=200)` computes both pathways' Fidelity+/-/
+Characterization for the *same* trace in the *same* pass, then runs a paired Wilcoxon signed-rank
+test (primary — no normality assumption on a bounded/possibly-skewed metric) and a paired t-test
+(secondary) on the per-trace difference. Run on both datasets at the same `n_traces=50` scale as the
+figures above:
+
+| Dataset (n paired) | Metric | LOO mean | GNNExp-primary mean | Wilcoxon *p* | Verdict (α=0.05) |
+|---|---|---|---|---|---|
+| order_management (n=47) | Characterization | 0.8147 ± 0.1819 | 0.6845 ± 0.1797 | 1.85e-4 | significant |
+| order_management (n=47) | Fidelity+ | 102.69h ± 46.91h | 84.70h ± 36.62h | 6.95e-3 | significant |
+| order_management (n=47) | Fidelity− | 17.94h ± 13.36h | 40.92h ± 31.65h | 7.87e-5 | significant |
+| logistics (n=50) | Characterization | 0.3957 ± 0.2173 | 0.2437 ± 0.2272 | 1.54e-3 | significant |
+| logistics (n=50) | Fidelity+ | 246.10h ± 4.76h | 131.25h ± 138.69h | 4.88e-7 | significant |
+| logistics (n=50) | Fidelity− | 594.51h ± 454.18h | 343.81h ± 507.97h | 1.49e-4 | significant |
+
+All six (2 datasets × 3 metrics) are significant at α=0.05 under both tests — the previously-observed
+fidelity gap is real, not an artifact of comparing two noisy independent means. `n` excludes the same
+empty-edge-type traces `explain_gnn_primary_aggregate()` already skips (3 for order_management, 0 for
+logistics — consistent with the unpaired runs above).
+
+Incidental new finding: logistics's own **exhaustive-LOO** Characterization (0.3957) is markedly
+lower than order_management's (0.8147) — not a previously-cited figure (prior citations only covered
+order_management's exhaustive-LOO Characterization, ~0.84 at n=235). Consistent with logistics being
+the harder dataset throughout this project, but worth citing directly now that it's been measured.
+
+Verification: spot-checked two paired rows (order #1773, order_management) against direct
+`explain_trace()`/`explain_gnn_primary()` calls — exact match, since both LOO and the now-seeded
+GNNExplainer are fully deterministic. Full per-trace CSV: `fidelity_validation_paired.csv` under each
+dataset's `explainer_outputs/*/fidelity_validation/`.
 
 ---
 
