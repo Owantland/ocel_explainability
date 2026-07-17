@@ -2079,6 +2079,79 @@ class Explainer(Modelling):
         rows.append({'Model': 'GBT', **_flatten(m_all, m_last, ci_all, ci_last),
                      'fit_time_s': gbt_fit_time_s, 'pred_time_s': gbt_pred_time_s})
 
+        # ── Paired significance test: HGT vs. each baseline, last-event subset ──
+        # compare_to_baselines() only ever reported independent bootstrap CIs per
+        # model -- never tested whether HGT's accuracy edge over a given baseline
+        # is statistically significant, the same gap validate_fidelity_comparison()
+        # (added previously) closed for the LOO-vs-GNNExplainer-primary fidelity
+        # comparison. Same methodology here: paired Wilcoxon signed-rank (primary,
+        # no normality assumption) + paired t-test (secondary) on the per-example
+        # absolute-error difference. Restricted to the last-event subset because
+        # order_id is only a safe unique join key there -- the full test set has
+        # multiple prefix-rows per order_id, which last_event filters down to at
+        # most one -- and last-event is already this project's established primary
+        # evaluation slice (MAE_last/R2_last, cited throughout TRAINING_VS_HOEG.md,
+        # EXPLAINABILITY_DEPTH.md, and the combined baseline table). No new model
+        # inference needed -- reuses the predictions already computed above.
+        import numpy as np
+        from scipy import stats
+
+        def _bootstrap_ci(diff, n_boot=2000, seed=42):
+            rng = np.random.default_rng(seed)
+            n = len(diff)
+            boot_means = np.array([rng.choice(diff, size=n, replace=True).mean()
+                                   for _ in range(n_boot)])
+            return float(np.percentile(boot_means, 2.5)), float(np.percentile(boot_means, 97.5))
+
+        hgt_last_df = hgt_df[hgt_df['last_event']][['order_id', 'true_h', 'hgt_pred_h']].copy()
+        hgt_last_df['hgt_ae'] = (hgt_last_df['true_h'] - hgt_last_df['hgt_pred_h']).abs()
+
+        baseline_frames = {}
+        if os.path.exists(homo_model_path):
+            homo_last_df = homo_df[homo_df['last_event']][['order_id', 'homo_pred_h']].copy()
+            baseline_frames['HomoGNN (GCN)'] = homo_last_df.rename(columns={'homo_pred_h': 'pred_h'})
+
+        test_df_preds = test_df.copy()
+        test_df_preds['mean_pred_h'] = mean_preds
+        test_df_preds['gbt_pred_h'] = gbt_preds
+        test_last_df = test_df_preds[test_df_preds['last_event']]
+        baseline_frames['Mean predictor'] = (
+            test_last_df[['order_id', 'mean_pred_h']].rename(columns={'mean_pred_h': 'pred_h'}))
+        baseline_frames['GBT'] = (
+            test_last_df[['order_id', 'gbt_pred_h']].rename(columns={'gbt_pred_h': 'pred_h'}))
+
+        print(f"\nPaired significance test (HGT vs. each baseline, last-event subset, "
+              f"negative diff = HGT more accurate):")
+        sig_rows = []
+        for name, base_df in baseline_frames.items():
+            merged = hgt_last_df.merge(base_df, on='order_id', how='inner')
+            merged['pred_ae'] = (merged['true_h'] - merged['pred_h']).abs()
+            hgt_ae = merged['hgt_ae'].values
+            base_ae = merged['pred_ae'].values
+            diff = hgt_ae - base_ae
+            if np.any(diff != 0):
+                _, p_wilcoxon = stats.wilcoxon(hgt_ae, base_ae)
+            else:
+                p_wilcoxon = float('nan')
+            _, p_ttest = stats.ttest_rel(hgt_ae, base_ae)
+            ci_low, ci_high = _bootstrap_ci(diff)
+            verdict = "significant" if p_wilcoxon < 0.05 else "NOT significant"
+            print(f"  vs. {name} (n={len(merged)}): HGT MAE={hgt_ae.mean():.2f}h  "
+                  f"{name} MAE={base_ae.mean():.2f}h  diff={diff.mean():+.2f}h "
+                  f"[{ci_low:.2f}, {ci_high:.2f}]  Wilcoxon p={p_wilcoxon:.2e}  "
+                  f"t-test p={p_ttest:.2e}  -> {verdict} at α=0.05")
+            sig_rows.append({
+                'baseline': name, 'n_paired': len(merged),
+                'hgt_mae': float(hgt_ae.mean()), 'baseline_mae': float(base_ae.mean()),
+                'mean_diff': float(diff.mean()), 'ci_low': ci_low, 'ci_high': ci_high,
+                'wilcoxon_p': float(p_wilcoxon), 'ttest_p': float(p_ttest),
+            })
+
+        sig_df = pd.DataFrame(sig_rows)
+        sig_csv_path = os.path.join(save_dir, "baseline_significance.csv")
+        sig_df.to_csv(sig_csv_path, index=False)
+        print(f"Saved paired significance results to {sig_csv_path}")
+
         # ── Assemble, save CSV ────────────────────────────────────────────────
         df = pd.DataFrame(rows)
         csv_path = os.path.join(save_dir, "model_comparison.csv")
