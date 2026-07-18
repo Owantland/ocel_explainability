@@ -123,7 +123,11 @@ class Modelling:
         _temporal_names = ['elapsed_h', 'waiting_h', 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos']
         _order_extra = ['n_items', 'total_weight', 'n_products', 'n_packages']
         if self.train_data and self.train_data[0]['Events'].num_nodes > 0:
-            _ocel      = pd.read_csv(f"{self.path_dict['graph_output_path']}ocel.csv")
+            # Cached on self (not a local var) so callers needing per-order lookups later
+            # (e.g. explainer.py's _decode_ocel_ids()) can reuse this same read rather than
+            # re-parsing this file -- 20-40MB depending on dataset -- on every call.
+            self._ocel_df = pd.read_csv(f"{self.path_dict['graph_output_path']}ocel.csv")
+            _ocel      = self._ocel_df
             _n_types   = len(ast.literal_eval(_ocel['ev_type'].iloc[0]))
             _obj_types = [c.replace('::ids', '') for c in _ocel.columns if c.endswith('::ids')]
 

@@ -620,7 +620,7 @@ class Explainer(Modelling):
         # other encoding-listed type, e.g. "Customers[0]" -> "Customers[0](Acme Inc)")
         # wherever a node is printed below, instead of leaving raw indices unexplained
         # in LOO's console/CSV output.
-        id_map = self._decode_all_identifiers(explain_subgraph)
+        id_map = self._decode_all_identifiers(explain_subgraph, order_id, n_events)
 
         def _node_label(nt, idx):
             if (nt, idx) in id_map:
@@ -1646,12 +1646,63 @@ class Explainer(Modelling):
             result[node_idx] = names[i]
         return result
 
-    def _decode_all_identifiers(self, graph):
-        """Combine Events activity-name decoding with every encoding-listed node type's
-        identity decoding into one {(node_type, node_idx): name} lookup -- the single map
-        every 'top nodes' presentation surface (explain_trace, explain_gnn_primary,
-        dashboard.py's render_local) needs."""
+    def _get_ocel_df(self):
+        """Lazily-cached ocel.csv, reused across calls -- Modelling.__init__ already reads
+        this file once for feature_names construction and caches it as self._ocel_df when
+        it runs (training.py, ~line 126); this covers the case where that guard didn't fire
+        (e.g. no Events nodes at init) by loading and caching it here on first use instead.
+        Never re-read per call -- this file is 20-40MB depending on dataset, and
+        _decode_ocel_ids() is called once per node-identifier lookup (every trace explained,
+        every aggregate loop iteration)."""
+        if not hasattr(self, '_ocel_df'):
+            import pandas as pd
+            self._ocel_df = pd.read_csv(f"{self.path_dict['graph_output_path']}ocel.csv")
+        return self._ocel_df
+
+    def _decode_ocel_ids(self, order_id, n_events=None):
+        """Real OCEL_IDs (e.g. 'i-880001'), positionally aligned with each object type's
+        node order in the graph -- confirmed empirically against ocel.csv directly: a type's
+        '{type}::ids' column is stable/cumulative across an order's events and its list order
+        matches '{type}::attributes' (what graph node features are built from) and
+        '{type}::idx' exactly. hetero_graphs.py's get_learning_set() never reads '::ids' when
+        building the .pt graphs, so this is the only place these real identifiers survive --
+        read fresh from ocel.csv here rather than stored on the graph object itself.
+
+        Picks the same prefix-boundary row _locate_test_graph() uses: the last row for this
+        order when n_events is None, otherwise the row at that exact event count. Returns
+        {(node_type, idx): ocel_id}, covering every object type with a '::ids' column in
+        ocel.csv -- discovered dynamically, not a hardcoded type list."""
+        import ast as _ast
+        ocel_df = self._get_ocel_df()
+        rows = ocel_df[ocel_df['vwpnt_id'] == order_id]
+        if rows.empty:
+            return {}
+        row = rows.iloc[-1] if n_events is None else rows.iloc[n_events - 1]
+
         id_map = {}
+        for col in ocel_df.columns:
+            if not col.endswith('::ids'):
+                continue
+            node_type = col[:-len('::ids')]
+            ids = _ast.literal_eval(row[col])
+            for idx, ocel_id in enumerate(ids):
+                id_map[(node_type, idx)] = ocel_id
+        return id_map
+
+    def _decode_all_identifiers(self, graph, order_id=None, n_events=None):
+        """Combine Events activity-name decoding, every encoding-listed node type's identity
+        decoding, and (when order_id is given) real OCEL_IDs for everything else, into one
+        {(node_type, node_idx): name} lookup -- the single map every 'top nodes' presentation
+        surface (explain_trace, explain_gnn_primary, explain_gnn_primary_aggregate,
+        dashboard.py's render_local) needs. Precedence: feature-decoded identities (activity
+        name, company name, ...) win where they exist -- they're more human-meaningful than a
+        raw database id -- OCEL_IDs only fill in node types with no feature-based identity to
+        decode (Items, Products, Packages, Container, TransportDocument, ...). order_id=None
+        skips the OCEL_ID layer entirely (falls back to the old encoding/Events-only
+        behavior), for any caller that doesn't have an order_id in scope."""
+        id_map = {}
+        if order_id is not None:
+            id_map.update(self._decode_ocel_ids(order_id, n_events))
         for name, idxs in self._decode_event_types_with_indices(graph).items():
             for i in idxs:
                 id_map[('Events', i)] = name
@@ -3056,7 +3107,7 @@ class Explainer(Modelling):
         # decoder already used by explain_trace()'s console/CSV output -- reused
         # here rather than duplicated, since these are also "top nodes" tables
         # that previously lacked it.
-        id_map = self._decode_all_identifiers(graph)
+        id_map = self._decode_all_identifiers(graph, order_id, n_events)
 
         def _node_label(nt, idx):
             if (nt, idx) in id_map:
@@ -3201,11 +3252,14 @@ class Explainer(Modelling):
         type_shifts = defaultdict(list)
         type_signed_shifts = defaultdict(list)
         # Per-decoded-identity signed shifts (e.g. "Events=PlaceOrder",
-        # "Customers=Nordica Systems GmbH"), for plot_aggregate_explanation_bars() --
-        # a finer granularity than type_signed_shifts above, which only aggregates
-        # at the node-TYPE level. Falls back to the bare node type (no fabricated
-        # "value") for types _decode_all_identifiers() can't resolve (Items,
-        # Products, Container, etc. -- purely numeric, no identity to decode).
+        # "Customers=Nordica Systems GmbH", "Items=i-880001"), for
+        # plot_aggregate_explanation_bars() -- a finer granularity than
+        # type_signed_shifts above, which only aggregates at the node-TYPE level.
+        # _decode_all_identifiers() now resolves every real object type via its
+        # OCEL_ID (from ocel.csv) when no richer feature-decoded identity exists,
+        # so the bare-node-type fallback below is effectively unreachable for any
+        # type with a '::ids' column in ocel.csv -- kept as a defensive fallback
+        # only (e.g. a node type ocel.csv genuinely has no id list for).
         explanation_signed_shifts = defaultdict(list)
         rows = []
         n_failed = 0
@@ -3235,7 +3289,7 @@ class Explainer(Modelling):
                                    if not (nt == vp and idx == object_idx)][:top_k]
 
                 node_importances = self._loo_shift_for_nodes(g, object_idx, baseline_value, identified_keys)
-                id_map = self._decode_all_identifiers(g)
+                id_map = self._decode_all_identifiers(g, oid)
                 for nt, idx, shift, large, signed_shift in node_importances:
                     type_counts[nt] += 1
                     type_shifts[nt].append(shift / 3600.0)

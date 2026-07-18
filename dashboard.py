@@ -101,23 +101,12 @@ def render_local(result, cached, mode, explainer, order_id):
         st.metric("Predicted remaining time", f"{result['predicted_hours']:.1f} h")
     with score_col:
         st.markdown(
-            f"<div style='font-size: 0.875rem; color: rgba(49, 51, 63, 0.6);'>"
+            f"<div style='font-size: 0.875rem; color: white;'>"
             f"Characterization score</div>"
             f"<div style='font-size: 2.25rem; font-weight: 600; "
             f"color: {_characterization_color(score)};'>{score:.2f}</div>",
             unsafe_allow_html=True,
         )
-
-    save_dir = result['save_dir']
-    col1, col2 = st.columns(2)
-    with col1:
-        png = os.path.join(save_dir, "node_type_summary.png")
-        if os.path.exists(png):
-            st.image(png, caption="Node-type importance")
-    with col2:
-        png = os.path.join(save_dir, "explanation_subgraph.png")
-        if os.path.exists(png):
-            st.image(png, caption="Explanation subgraph")
 
     node_rows = result.get('node_importances') or []
     if node_rows:
@@ -130,18 +119,36 @@ def render_local(result, cached, mode, explainer, order_id):
         df['signed_shift_hours'] = df['signed_shift_seconds'] / 3600.0
 
         # Human-readable identifier (Events activity name, or a real identity for any
-        # other encoding-listed type), same decoder explain_trace()'s console/CSV
-        # output already uses -- re-derived here (cheap graph lookup, no model
-        # inference) since the raw node_importances tuples don't carry it.
+        # other encoding-listed type, real OCEL_ID from ocel.csv for everything
+        # else -- Items/Products/Packages/... now resolve to their actual
+        # database identifier, e.g. "i-880001", not a positional placeholder),
+        # same decoder explain_trace()'s console/CSV output already uses --
+        # re-derived here (cheap graph lookup, no model inference) since the raw
+        # node_importances tuples don't carry it. The positional
+        # "{node_type}[{node_idx}]" fallback is kept only as a defensive safety
+        # net (e.g. a node type genuinely absent from ocel.csv) -- in practice
+        # _decode_all_identifiers() now resolves every real object type.
         graph = explainer._locate_test_graph(order_id, None)
-        id_map = explainer._decode_all_identifiers(graph)
+        id_map = explainer._decode_all_identifiers(graph, order_id)
         df['identifier'] = df.apply(
-            lambda r: id_map.get((r['node_type'], r['node_idx']), ''),
+            lambda r: id_map.get((r['node_type'], r['node_idx']),
+                                 f"{r['node_type']}[{r['node_idx']}]"),
             axis=1,
         )
 
         df = df[['node_type', 'node_idx', 'identifier', 'signed_shift_hours', 'large_shift']]
         st.dataframe(df.head(10), width='stretch')
+
+    save_dir = result['save_dir']
+    col1, col2 = st.columns(2)
+    with col1:
+        png = os.path.join(save_dir, "node_type_summary.png")
+        if os.path.exists(png):
+            st.image(png, caption="Node-type importance")
+    with col2:
+        png = os.path.join(save_dir, "explanation_subgraph.png")
+        if os.path.exists(png):
+            st.image(png, caption="Explanation subgraph")
 
     if mode == 'loo':
         st.subheader("Explanation quality (exhaustive sweep)")
