@@ -21,8 +21,8 @@ DATASETS = {
     'logistics': 1000,
 }
 MODE_LABELS = {
-    'loo': 'Exhaustive LOO',
     'gnn_primary': 'GNNExplainer-primary',
+    'loo': 'Exhaustive LOO',
     'ig': 'Feature Attribution (IG)',
 }
 IG_METHODS = ('InputXGradient', 'IntegratedGradients')
@@ -75,9 +75,38 @@ def compute_local(explainer, database, cant, mode, order_id, ig_method=None):
     return result, False
 
 
+def _characterization_color(score):
+    """Linear red->green interpolation for a characterization score in [0, 1],
+    reusing this project's own established increase/decrease palette (the same
+    hex pair plot_feature_importances()/plot_aggregate_explanation_bars() use in
+    explainer.py) rather than introducing a new one. Clamped defensively --
+    characterization_score is documented as bounded [0, 1] but isn't asserted
+    to be at the call site."""
+    score = max(0.0, min(1.0, score))
+    red = (0xd6, 0x27, 0x28)
+    green = (0x2c, 0xa0, 0x2c)
+    r = round(red[0] + (green[0] - red[0]) * score)
+    g = round(red[1] + (green[1] - red[1]) * score)
+    b = round(red[2] + (green[2] - red[2]) * score)
+    return f"rgb({r}, {g}, {b})"
+
+
 def render_local(result, cached, mode, explainer, order_id):
     st.caption("served from cache" if cached else "computed just now (now cached for next time)")
-    st.metric("Predicted remaining time", f"{result['predicted_hours']:.1f} h")
+
+    quality = result['metrics'] if mode == 'loo' else result['quality']
+    score = quality['characterization_score']
+    metric_col, score_col = st.columns(2)
+    with metric_col:
+        st.metric("Predicted remaining time", f"{result['predicted_hours']:.1f} h")
+    with score_col:
+        st.markdown(
+            f"<div style='font-size: 0.875rem; color: rgba(49, 51, 63, 0.6);'>"
+            f"Characterization score</div>"
+            f"<div style='font-size: 2.25rem; font-weight: 600; "
+            f"color: {_characterization_color(score)};'>{score:.2f}</div>",
+            unsafe_allow_html=True,
+        )
 
     save_dir = result['save_dir']
     col1, col2 = st.columns(2)

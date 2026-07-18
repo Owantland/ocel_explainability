@@ -456,6 +456,11 @@ class Modelling:
             load_if_exists=True,
         )
 
+        # Whether this is a genuinely new study (vs. one loaded from an existing sweep_*.db)
+        # matters for the enqueue below -- checked before the stale-RUNNING-trial handling
+        # runs, since that loop can itself add FAIL-state trials to `study.trials`.
+        _is_fresh_study = len(study.trials) == 0
+
         # A killed process leaves its in-flight trial stuck at RUNNING forever (Optuna has no
         # liveness check without heartbeat monitoring configured), and GridSampler treats RUNNING
         # trials as claiming their grid cell -- so on resume it would otherwise skip that
@@ -472,13 +477,23 @@ class Modelling:
         # directly into hidden_choices above rather than only seeded here. Enqueuing this combo
         # first just means the most-likely-good result is available early if the sweep is
         # interrupted; GridSampler still covers the rest of the grid regardless.
-        _hidden_prior = 256 if self.database == 'order_management' else 64
-        _prior_trial = {'hidden_channels': _hidden_prior, 'lr': 1e-3}
-        if is_logistics:
-            # Deepest choice first: this session's evidence points toward more depth helping
-            # logistics specifically (see docstring).
-            _prior_trial['num_layers'] = 5
-        study.enqueue_trial(_prior_trial)
+        #
+        # Only on a fresh study: GridSampler assigns manually-enqueued trials no `grid_id`
+        # system attribute (only trials it samples itself via ask() get one), so re-enqueuing
+        # this same combo on a resumed, already-(near-)fully-explored study makes
+        # GridSampler.after_trial() crash with `KeyError: 'grid_id'` once it revisits a grid
+        # cell that a prior run already completed -- confirmed directly by hitting this on a
+        # resumed order_management study. The prior's whole purpose (an early good result if
+        # interrupted) is moot on a resume anyway, so skipping it there is correct, not just a
+        # workaround.
+        if _is_fresh_study:
+            _hidden_prior = 256 if self.database == 'order_management' else 64
+            _prior_trial = {'hidden_channels': _hidden_prior, 'lr': 1e-3}
+            if is_logistics:
+                # Deepest choice first: this session's evidence points toward more depth helping
+                # logistics specifically (see docstring).
+                _prior_trial['num_layers'] = 5
+            study.enqueue_trial(_prior_trial)
 
         study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 

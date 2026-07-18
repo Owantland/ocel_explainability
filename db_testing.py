@@ -9,7 +9,7 @@ import ast
 import json
 import numpy as np
 import sqlite3
-import pandas as pdUpda
+import pandas as pd
 import sup_funcs as sup
 
 

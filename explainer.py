@@ -411,6 +411,85 @@ class Explainer(Modelling):
         plt.savefig(save_path, dpi=150)
         plt.close()
 
+    def plot_aggregate_explanation_bars(self, explanation_signed_shifts, save_path, title,
+                                        dataset_label=None, n_traces=None, top_n=15):
+        """Single, global, ranked horizontal bar chart of the most influential
+        'attr=value' explanations across many traces -- cf. Galanti et al. 2023b's
+        Fig. 1 (a global explanation bar chart for remaining-time prediction).
+        Layout matches Fig. 1 (ranked attr=value labels, magnitude on the x-axis,
+        signed/colored bars); color semantics deliberately keep this project's own
+        established convention (green = increases predicted time, red = decreases,
+        thick edge = >1 std 'large' shift -- see plot_feature_importances()) rather
+        than Galanti's own literal red-for-increase choice, for consistency with
+        every other importance chart in this project.
+
+        explanation_signed_shifts: {label: [signed_shift_hours, ...]} -- one entry
+        per (decoded identity or bare node type) label, values already in hours."""
+        import numpy as np
+        summary = []
+        for label, vals in explanation_signed_shifts.items():
+            arr = np.array(vals)
+            summary.append({
+                'label': label, 'mean_signed_shift': float(arr.mean()),
+                'std_shift': float(arr.std()), 'count': len(vals),
+            })
+        summary.sort(key=lambda r: abs(r['mean_signed_shift']), reverse=True)
+        summary = summary[:top_n]
+
+        if not summary:
+            return summary
+
+        labels = [r['label'] for r in summary]
+        means = [r['mean_signed_shift'] for r in summary]
+        larges = [abs(r['mean_signed_shift']) > self.target_std.item() / 3600.0 for r in summary]
+
+        fig, ax = plt.subplots(figsize=(8, max(3, len(labels) * 0.4)))
+        colors = ["#2ca02c" if m > 0 else ("#d62728" if m < 0 else "#888888") for m in means]
+        edgecolors = ["black" if l else "none" for l in larges]
+        linewidths = [2.0 if l else 0 for l in larges]
+        bars = ax.barh(range(len(labels)), means, color=colors,
+                       edgecolor=edgecolors, linewidth=linewidths)
+        ax.set_yticks(range(len(labels)))
+        ax.set_yticklabels(labels, fontsize=9)
+        ax.invert_yaxis()
+        ax.axvline(0, color="black", linewidth=0.8)
+        ax.set_xlabel("Average influence on predicted remaining time (hours)")
+        full_title = title
+        if dataset_label is not None:
+            full_title += f" — {dataset_label}"
+        if n_traces is not None:
+            full_title += f" (n={n_traces} traces)"
+        ax.set_title(full_title)
+        # Offset scaled to the axis range (not a fixed constant) -- a fixed offset is
+        # invisible next to a large-magnitude bar (e.g. -31h) and crowds the value
+        # text right up against the y-axis/tick-label area; a fixed axis-fraction
+        # margin (added to xlim below) keeps it legible regardless of scale.
+        max_abs = max((abs(m) for m in means), default=1.0) or 1.0
+        offset = 0.03 * max_abs
+        for bar, val in zip(bars, means):
+            ha = "left" if val >= 0 else "right"
+            ax.text(bar.get_width() + (offset if val >= 0 else -offset),
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{val:+.2f}h", va="center", ha=ha, fontsize=8)
+        xmin = min((m for m in means if m < 0), default=0.0)
+        xmax = max((m for m in means if m > 0), default=0.0)
+        ax.set_xlim(xmin - offset * 4, xmax + offset * 4)
+        from matplotlib.patches import Patch
+        # Placed outside the axes (below the x-label) rather than inside a corner --
+        # bars are sorted by magnitude, so the smallest (near-zero) bars always end
+        # up at the bottom, where an in-plot legend corner would otherwise sit
+        # directly on top of their value labels.
+        ax.legend(handles=[Patch(color="#2ca02c", label="increases predicted time"),
+                            Patch(color="#d62728", label="decreases predicted time"),
+                            Patch(facecolor="white", edgecolor="black", linewidth=2,
+                                  label=">1 std shift (thick edge)")],
+                  fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3)
+        ax.grid(True, axis="x", alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        return summary
+
     def plot_node_type_bars(self, rows, save_path, title, ylabel,
                             show_error_bars=False, secondary_series=None, secondary_label=None):
         """Shared node-type bar chart. Generalizes what used to be three separate,
@@ -3121,6 +3200,13 @@ class Explainer(Modelling):
         type_counts = defaultdict(int)
         type_shifts = defaultdict(list)
         type_signed_shifts = defaultdict(list)
+        # Per-decoded-identity signed shifts (e.g. "Events=PlaceOrder",
+        # "Customers=Nordica Systems GmbH"), for plot_aggregate_explanation_bars() --
+        # a finer granularity than type_signed_shifts above, which only aggregates
+        # at the node-TYPE level. Falls back to the bare node type (no fabricated
+        # "value") for types _decode_all_identifiers() can't resolve (Items,
+        # Products, Container, etc. -- purely numeric, no identity to decode).
+        explanation_signed_shifts = defaultdict(list)
         rows = []
         n_failed = 0
         n_skipped_empty_edges = 0
@@ -3149,10 +3235,14 @@ class Explainer(Modelling):
                                    if not (nt == vp and idx == object_idx)][:top_k]
 
                 node_importances = self._loo_shift_for_nodes(g, object_idx, baseline_value, identified_keys)
+                id_map = self._decode_all_identifiers(g)
                 for nt, idx, shift, large, signed_shift in node_importances:
                     type_counts[nt] += 1
                     type_shifts[nt].append(shift / 3600.0)
                     type_signed_shifts[nt].append(signed_shift / 3600.0)
+                    decoded = id_map.get((nt, idx))
+                    label = f"{nt}={decoded}" if decoded else nt
+                    explanation_signed_shifts[label].append(signed_shift / 3600.0)
 
                 included_keys = set(identified_keys) | {(vp, object_idx)}
                 induced_edges = self._induced_edges(g, included_keys)
@@ -3218,13 +3308,29 @@ class Explainer(Modelling):
             secondary_label="Times selected",
         )
 
+        # Global, ranked 'attr=value' explanation bars -- cf. Galanti et al. 2023b Fig. 1.
+        # A finer-grained companion to the node-TYPE-level chart above: same underlying
+        # per-trace data, but bucketed by decoded identity (e.g. "Events=PlaceOrder")
+        # instead of just node type, in one combined cross-type ranking.
+        explanation_csv_path = os.path.join(save_dir, "aggregate_explanation_bars.csv")
+        explanation_png_path = os.path.join(save_dir, "aggregate_explanation_bars.png")
+        explanation_summary = self.plot_aggregate_explanation_bars(
+            explanation_signed_shifts, explanation_png_path,
+            "Global explanations for remaining time prediction",
+            dataset_label=self.database, n_traces=len(table),
+        )
+        pd.DataFrame(explanation_summary).to_csv(explanation_csv_path, index=False)
+
         print(f"\nSaved {csv_path}")
         print(f"Saved {type_csv_path}")
         print(f"Saved {png_path}")
+        print(f"Saved {explanation_csv_path}")
+        print(f"Saved {explanation_png_path}")
 
         return {
             'table': table,
             'type_table': type_table,
+            'explanation_summary': explanation_summary,
             'n_failed': n_failed,
             'n_skipped_empty_edges': n_skipped_empty_edges,
             'save_dir': save_dir,
