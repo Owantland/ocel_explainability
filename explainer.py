@@ -112,7 +112,7 @@ class Explainer(Modelling):
 
         return G
 
-    def reg_visualize_explanation_subgraph(self, G, save_path="explanation_subgraph_regression.png"):
+    def reg_visualize_explanation_subgraph(self, G, save_path="explanation_subgraph_regression.png", id_map=None):
         """Draw regression explanation subgraph with node-size proportional to value shift."""
         import matplotlib.pyplot as plt
         import networkx as nx
@@ -179,7 +179,11 @@ class Explainer(Modelling):
             G, pos, edge_color=edge_colors, width=edge_widths,
             arrows=True, connectionstyle="arc3,rad=0.1", alpha=0.7,
         )
-        labels = {node: f"{node[0]}[{node[1]}]" for node in G.nodes if not G.nodes[node].get("is_connector")}
+        labels = {
+            node: (f"{node[0]}[{node[1]}]({id_map[node]})" if id_map and node in id_map
+                   else f"{node[0]}[{node[1]}]")
+            for node in G.nodes if not G.nodes[node].get("is_connector")
+        }
         nx.draw_networkx_labels(G, pos, labels=labels, font_size=7)
 
         legend_handles = [
@@ -606,21 +610,23 @@ class Explainer(Modelling):
             os.path.join(save_dir, "node_type_summary.png")
         )
 
-        exp_graph = self.reg_explanation_subgraph(
-            explain_subgraph, 0, node_importances, edge_importances, node_top_k=10
-        )
-        self.reg_visualize_explanation_subgraph(
-            exp_graph, save_path=os.path.join(save_dir, "explanation_subgraph.png")
-        )
-
-        names = self.feature_names
-
         # Decode node indices to a real-world identity (activity name for Events, e.g.
         # "Events[1]" -> "Events[1](PlaceOrder)"; company/department/vehicle id for any
         # other encoding-listed type, e.g. "Customers[0]" -> "Customers[0](Acme Inc)")
         # wherever a node is printed below, instead of leaving raw indices unexplained
-        # in LOO's console/CSV output.
+        # in LOO's console/CSV output. Computed here (before the subgraph plot) so it
+        # can also label explanation_subgraph.png's nodes, not just the console/CSV.
         id_map = self._decode_all_identifiers(explain_subgraph, order_id, n_events)
+
+        exp_graph = self.reg_explanation_subgraph(
+            explain_subgraph, 0, node_importances, edge_importances, node_top_k=10
+        )
+        self.reg_visualize_explanation_subgraph(
+            exp_graph, save_path=os.path.join(save_dir, "explanation_subgraph.png"),
+            id_map=id_map
+        )
+
+        names = self.feature_names
 
         def _node_label(nt, idx):
             if (nt, idx) in id_map:
@@ -1328,9 +1334,14 @@ class Explainer(Modelling):
         self._plot_cf_node_comparison(query_graph, results[0]['graph'], order_id,
                                       results[0]['order_id'], save_dir)
         self._plot_cf_dissimilarity_breakdown(results[0], order_id, save_dir)
+        id_map_q = self._decode_all_identifiers(query_graph, order_id, n_events)
+        id_map_cf = self._decode_all_identifiers(
+            results[0]['graph'], results[0]['order_id'], results[0]['n_events']
+        )
         self._plot_cf_graph_structures(query_graph, results[0]['graph'], order_id,
                                        results[0]['order_id'], query_pred / 3600.0,
-                                       results[0]['predicted_hours'], save_dir)
+                                       results[0]['predicted_hours'], save_dir,
+                                       id_map_q=id_map_q, id_map_cf=id_map_cf)
         self._plot_cf_event_type_diff(query_graph, results[0]['graph'], order_id,
                                       results[0]['order_id'], save_dir)
         self._plot_cf_viewpoint_feature_diff(query_graph, results[0]['graph'], order_id,
@@ -1513,7 +1524,7 @@ class Explainer(Modelling):
                 G.add_edge((src_type, src), (dst_type, dst), edge_type=rel)
         return G
 
-    def _draw_hetero_nx(self, G, ax, type_colors, seed_key=None, title=""):
+    def _draw_hetero_nx(self, G, ax, type_colors, seed_key=None, title="", id_map=None):
         """Draw one full hetero graph onto a given axis -- plain structural view,
         no importance weighting. Independent axes/layouts per subplot (not meant
         to overlay one graph onto the other)."""
@@ -1536,14 +1547,19 @@ class Explainer(Modelling):
                                 arrows=True, connectionstyle="arc3,rad=0.1")
 
         if G.number_of_nodes() <= 20:  # keep dense graphs (e.g. #1812) readable
-            labels = {node: f"{node[0]}[{node[1]}]" for node in G.nodes}
+            labels = {
+                node: (f"{node[0]}[{node[1]}]({id_map[node]})" if id_map and node in id_map
+                       else f"{node[0]}[{node[1]}]")
+                for node in G.nodes
+            }
             nx.draw_networkx_labels(G, pos, ax=ax, labels=labels, font_size=6)
 
         ax.set_title(title, fontsize=10)
         ax.axis("off")
 
     def _plot_cf_graph_structures(self, query_graph, cf_graph, query_id, cf_id,
-                                   query_hours, cf_hours, save_dir):
+                                   query_hours, cf_hours, save_dir,
+                                   id_map_q=None, id_map_cf=None):
         """Side-by-side node-link diagrams of the FULL query and CF graphs --
         complementary to the aggregate bar charts, shows actual topology."""
         palette = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2",
@@ -1561,9 +1577,11 @@ class Explainer(Modelling):
         seed_key_q = (self.kpi_viewpoint, 0)
         seed_key_cf = (self.kpi_viewpoint, 0)
         self._draw_hetero_nx(G_q, axes[0], type_colors, seed_key=seed_key_q,
-                              title=f"Query #{query_id}\n{n_q} events, {query_hours:.1f}h predicted")
+                              title=f"Query #{query_id}\n{n_q} events, {query_hours:.1f}h predicted",
+                              id_map=id_map_q)
         self._draw_hetero_nx(G_cf, axes[1], type_colors, seed_key=seed_key_cf,
-                              title=f"CF #{cf_id}\n{n_cf} events, {cf_hours:.1f}h predicted")
+                              title=f"CF #{cf_id}\n{n_cf} events, {cf_hours:.1f}h predicted",
+                              id_map=id_map_cf)
 
         legend_handles = [plt.Line2D([0], [0], marker="o", color="w", label=nt,
                                       markerfacecolor=c, markersize=10)
@@ -3190,7 +3208,9 @@ class Explainer(Modelling):
                 os.path.join(save_dir, f"feat_importance_{top_node_type}.png"), order_id=order_id
             )
         G = self.reg_explanation_subgraph(graph, object_idx, node_importances, [], node_top_k=top_k)
-        self.reg_visualize_explanation_subgraph(G, os.path.join(save_dir, "explanation_subgraph.png"))
+        self.reg_visualize_explanation_subgraph(
+            G, os.path.join(save_dir, "explanation_subgraph.png"), id_map=id_map
+        )
 
         import pandas as pd
         csv_path = os.path.join(save_dir, "gnnprimary_node_importance.csv")
