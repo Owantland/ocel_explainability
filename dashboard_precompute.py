@@ -9,6 +9,8 @@ cached from then on. This script only pre-warms a curated subset ahead of time.
 
 Usage: python3 dashboard_precompute.py
 """
+import os
+
 import explainer as exp
 import dashboard_cache as dc
 
@@ -29,6 +31,10 @@ def main():
         e = exp.Explainer(database, cant)
         order_ids = demo_order_ids(e, DEMO_N)
         print(f"Demo orders: {order_ids}")
+        # Ties every cache entry this script writes to the exact checkpoint that produced
+        # it -- see dashboard_cache.py's own docstring for why (a retrain must not leave
+        # stale predictions silently matched against a newer checkpoint).
+        checkpoint_fingerprint = int(os.path.getmtime(e.model_path))
 
         for order_id in order_ids:
             # No save_dir override -- let both functions use their normal default
@@ -41,6 +47,7 @@ def main():
                 _, cached = dc.get_or_compute(
                     database, cant, 'loo', order_id,
                     lambda oid=order_id: e.explain_trace(oid),
+                    checkpoint_fingerprint=checkpoint_fingerprint,
                 )
                 print("cached" if cached else "computed")
             except Exception as ex:
@@ -51,6 +58,7 @@ def main():
                 _, cached = dc.get_or_compute(
                     database, cant, 'gnn_primary', order_id,
                     lambda oid=order_id: e.explain_gnn_primary(oid),
+                    checkpoint_fingerprint=checkpoint_fingerprint,
                 )
                 print("cached" if cached else "computed")
             except ValueError as ex:

@@ -7,6 +7,23 @@ from torch_geometric.explain import Explainer as PyGExplainer, CaptumExplainer, 
 
 
 class Explainer(Modelling):
+    def __init__(self, database, cant):
+        super().__init__(database, cant)
+        # Found via direct investigation: identical inputs (bit-identical node features
+        # and edges, confirmed directly) + identical, fully state_dict-matched weights
+        # still produced different raw model outputs across separate Explainer()
+        # instantiations, while repeated calls WITHIN one instantiation were stable --
+        # no dropout or non-persistent buffers exist to explain this architecturally.
+        # Consistent with known floating-point non-determinism in PyTorch/PyG's
+        # parallel scatter/reduce ops (used heavily in HGTConv's attention
+        # aggregation) when not explicitly disabled. Scoped to Explainer, not
+        # Modelling.__init__, so training/sweep() isn't slowed by deterministic algos --
+        # reproducibility matters far more at explanation time than during a
+        # many-hour hyperparameter sweep.
+        torch.manual_seed(42)
+        os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')  # required for CUDA determinism, harmless on CPU
+        torch.use_deterministic_algorithms(True, warn_only=True)
+
     # ------------------------------------------------------------------
     # Regression explanations
     # ------------------------------------------------------------------
@@ -339,16 +356,24 @@ class Explainer(Modelling):
     # Explainability — visualizations and entry points
     # ------------------------------------------------------------------
 
-    def plot_feature_importances(self, node_type, feature_importances, save_path, order_id=None):
+    def plot_feature_importances(self, node_type, feature_importances, save_path, order_id=None,
+                                 label_map=None):
         """Horizontal bar chart of per-feature value shifts for one node. Bar color
         encodes sign (green = this feature's real value pushed the prediction toward
         a longer remaining time than the population-mean substitute would; red =
         toward shorter -- see explain_trace()'s signed_shift docs for the full
-        caveat), bar edge (black, thick) flags a >1 std ('large') shift."""
+        caveat), bar edge (black, thick) flags a >1 std ('large') shift.
+
+        label_map: optional {raw_feature_name: readable_label} override, applied
+        after the raw name lookup below. None (every existing caller) preserves
+        raw/technical labels -- this is opt-in, for dashboard.py's humanized
+        display only, and doesn't affect any thesis-citable saved PNG."""
         names = self.feature_names.get(node_type, [])
         feats, shifts, larges, signs = [], [], [], []
         for f, shift, large, signed_shift in feature_importances:
             label = names[f] if f < len(names) else f"feat_{f}"
+            if label_map:
+                label = label_map.get(label, label)
             feats.append(label)
             shifts.append(shift / 3600)
             larges.append(large)
@@ -380,6 +405,29 @@ class Explainer(Modelling):
                             Patch(facecolor="white", edgecolor="black", linewidth=2,
                                   label=">1 std shift (thick edge)")],
                   fontsize=8, loc="lower right")
+        ax.grid(True, axis="x", alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150)
+        plt.close()
+
+    def plot_top_features_bar(self, labels, signed_values, save_path, title, method='InputXGradient'):
+        """Horizontal bar chart of pre-resolved (label, signed attribution value)
+        pairs, sorted by the caller. Generic, unlike plot_feature_importances() --
+        takes fully-resolved label strings directly rather than deriving them from
+        one node type's feature_names, since labels here may mix multiple node
+        types/instances from one trace (e.g. dashboard.py's trace-wide top-K
+        attribution view)."""
+        if not labels:
+            return
+
+        fig, ax = plt.subplots(figsize=(7, max(3, len(labels) * 0.45)))
+        colors = ["#2ca02c" if v > 0 else ("#d62728" if v < 0 else "#888888") for v in signed_values]
+        ax.barh(range(len(labels)), signed_values, color=colors)
+        ax.set_yticks(range(len(labels)))
+        ax.set_yticklabels(labels, fontsize=9)
+        ax.invert_yaxis()
+        ax.set_xlabel(f"{method} attribution")
+        ax.set_title(title)
         ax.grid(True, axis="x", alpha=0.3)
         plt.tight_layout()
         plt.savefig(save_path, dpi=150)

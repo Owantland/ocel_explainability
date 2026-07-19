@@ -60,14 +60,21 @@ def prefix_options_for(explainer, order_id):
 
 def compute_local(explainer, database, cant, mode, order_id, ig_method=None,
                    min_gap_hours=0.0, direction='lower', n_events=None, top_k=5):
+    # Ties a cached result to the exact model checkpoint that produced it -- found via
+    # direct investigation that a retrain silently orphans old cached predictions (e.g.
+    # predicted_hours) without this, since nothing about the cache key otherwise reflects
+    # which checkpoint the cached values came from.
+    checkpoint_fingerprint = int(os.path.getmtime(explainer.model_path))
     if mode == 'loo':
         compute_fn = lambda: explainer.explain_trace(order_id, top_k=top_k, n_events=n_events)
         return dc.get_or_compute(database, cant, mode, order_id, compute_fn,
-                                 n_events=n_events, top_k=top_k)
+                                 n_events=n_events, top_k=top_k,
+                                 checkpoint_fingerprint=checkpoint_fingerprint)
     if mode == 'gnn_primary':
         compute_fn = lambda: explainer.explain_gnn_primary(order_id, top_k=top_k, n_events=n_events)
         return dc.get_or_compute(database, cant, mode, order_id, compute_fn,
-                                 n_events=n_events, top_k=top_k)
+                                 n_events=n_events, top_k=top_k,
+                                 checkpoint_fingerprint=checkpoint_fingerprint)
 
     if mode == 'cf':
         # Deliberately NOT cached -- explain_counterfactual() returns a bare list of
@@ -111,6 +118,38 @@ def compute_local(explainer, database, cant, mode, order_id, ig_method=None,
     return result, False
 
 
+_TEMPORAL_LABELS = {
+    'elapsed_h': 'Elapsed time', 'waiting_h': 'Waiting time',
+    'hour_sin': 'Hour of day (sin)', 'hour_cos': 'Hour of day (cos)',
+    'dow_sin': 'Day of week (sin)', 'dow_cos': 'Day of week (cos)',
+}
+_VIEWPOINT_LABELS = {
+    'n_items': 'Number of items', 'n_products': 'Number of products',
+    'n_packages': 'Number of packages', 'total_weight': 'Total weight',
+}
+
+
+def humanize_feature_name(raw_name):
+    """Raw internal column name -> readable label, for features calculated
+    following Adams et al. 2022's OCEL feature-extraction definitions (temporal,
+    C3 activity-frequency counts, O1 object counts). Literal pass-through data
+    values (raw attribute columns, event/role/company/ID names) are left
+    unchanged -- they're not "calculated" features and mostly already read fine
+    as-is. Dashboard-display-only; explainer.py's own saved/thesis-citable PNGs
+    are unaffected (this is never applied there by default)."""
+    if raw_name in _TEMPORAL_LABELS:
+        return _TEMPORAL_LABELS[raw_name]
+    if raw_name in _VIEWPOINT_LABELS:
+        return _VIEWPOINT_LABELS[raw_name]
+    if raw_name.startswith('c3_'):
+        return f"Count_{raw_name[len('c3_'):]}"
+    if raw_name.startswith('o1_'):
+        return f"Count_{raw_name[len('o1_'):]}"
+    if raw_name.endswith('_present'):
+        return f"{raw_name[:-len('_present')]} present"
+    return raw_name
+
+
 def _characterization_color(score):
     """Linear red->green interpolation for a characterization score in [0, 1],
     reusing this project's own established increase/decrease palette (the same
@@ -146,6 +185,28 @@ def render_local(result, cached, mode, explainer, order_id, top_k=5):
             unsafe_allow_html=True,
         )
 
+    save_dir = result['save_dir']
+    col1, col2 = st.columns(2)
+    with col1:
+        png = os.path.join(save_dir, "node_type_summary.png")
+        if os.path.exists(png):
+            st.image(png, caption="Node-type importance")
+    with col2:
+        png = os.path.join(save_dir, "explanation_subgraph.png")
+        if os.path.exists(png):
+            st.image(png, caption="Explanation subgraph")
+
+    # Human-readable identifier (Events activity name, or a real identity for any
+    # other encoding-listed type, real OCEL_ID from ocel.csv for everything
+    # else -- Items/Products/Packages/... now resolve to their actual
+    # database identifier, e.g. "i-880001", not a positional placeholder),
+    # same decoder explain_trace()'s console/CSV output already uses -- computed
+    # here (cheap graph lookup, no model inference) rather than inside the "Top
+    # nodes" block below, since the node-type/instance selectors further down
+    # need graph/id_map too, regardless of whether node_rows is non-empty.
+    graph = explainer._locate_test_graph(order_id, result['n_events'])
+    id_map = explainer._decode_all_identifiers(graph, order_id, result['n_events'])
+
     node_rows = result.get('node_importances') or []
     if node_rows:
         st.subheader("Top nodes")
@@ -155,19 +216,6 @@ def render_local(result, cached, mode, explainer, order_id, top_k=5):
         )
         df['shift_hours'] = df['shift_seconds'] / 3600.0
         df['signed_shift_hours'] = df['signed_shift_seconds'] / 3600.0
-
-        # Human-readable identifier (Events activity name, or a real identity for any
-        # other encoding-listed type, real OCEL_ID from ocel.csv for everything
-        # else -- Items/Products/Packages/... now resolve to their actual
-        # database identifier, e.g. "i-880001", not a positional placeholder),
-        # same decoder explain_trace()'s console/CSV output already uses --
-        # re-derived here (cheap graph lookup, no model inference) since the raw
-        # node_importances tuples don't carry it. The positional
-        # "{node_type}[{node_idx}]" fallback is kept only as a defensive safety
-        # net (e.g. a node type genuinely absent from ocel.csv) -- in practice
-        # _decode_all_identifiers() now resolves every real object type.
-        graph = explainer._locate_test_graph(order_id, result['n_events'])
-        id_map = explainer._decode_all_identifiers(graph, order_id, result['n_events'])
         df['identifier'] = df.apply(
             lambda r: id_map.get((r['node_type'], r['node_idx']),
                                  f"{r['node_type']}[{r['node_idx']}]"),
@@ -189,16 +237,7 @@ def render_local(result, cached, mode, explainer, order_id, top_k=5):
             st.dataframe(edf[['edge_type', 'signed_shift_hours', 'large_shift']].head(top_k),
                         width='stretch')
 
-    save_dir = result['save_dir']
-    col1, col2 = st.columns(2)
-    with col1:
-        png = os.path.join(save_dir, "node_type_summary.png")
-        if os.path.exists(png):
-            st.image(png, caption="Node-type importance")
-    with col2:
-        png = os.path.join(save_dir, "explanation_subgraph.png")
-        if os.path.exists(png):
-            st.image(png, caption="Explanation subgraph")
+    render_top_features_by_attribution(explainer, graph, id_map, result, order_id, top_k)
 
     if mode == 'loo':
         st.subheader("Explanation quality (exhaustive sweep)")
@@ -208,6 +247,40 @@ def render_local(result, cached, mode, explainer, order_id, top_k=5):
         st.json(result['quality'])
         st.caption("Edge importance isn't available in this mode -- GNNExplainer has no edge "
                   "signal on this architecture. Switch to Exhaustive LOO for edge importance.")
+
+
+def render_top_features_by_attribution(explainer, graph, id_map, result, order_id, top_k):
+    """Top-K (node, feature) pairs across the WHOLE trace, ranked by |attribution|
+    -- not scoped to one selected node. Computed live (no caching), same cost
+    tier as before: one Captum backward pass over the whole graph already
+    returns every node instance's own attribution vector -- flattening and
+    ranking it is cheap by comparison."""
+    masks = explainer._compute_attribution_for_graph(graph, method='InputXGradient')
+    rows = []
+    for node_type, arr in masks.items():
+        feat_names = explainer.feature_names.get(node_type, [])
+        for node_idx in range(arr.shape[0]):
+            for f in range(arr.shape[1]):
+                v = float(arr[node_idx, f])
+                fname = feat_names[f] if f < len(feat_names) else f"feat_{f}"
+                rows.append({
+                    'node_type': node_type,
+                    'node': id_map.get((node_type, node_idx), f"{node_type}[{node_idx}]"),
+                    'feature': humanize_feature_name(fname),
+                    'signed': v, 'abs': abs(v),
+                })
+    df = pd.DataFrame(rows).sort_values('abs', ascending=False).head(top_k)
+
+    save_dir = result['save_dir']
+    png = os.path.join(save_dir, "top_features_attribution.png")
+    labels = [f"{r['node']}: {r['feature']}" for _, r in df.iterrows()]
+    explainer.plot_top_features_bar(labels, df['signed'].tolist(), png,
+                                    title=f"Top {top_k} features by attribution, order #{order_id}")
+
+    st.subheader(f"Top {top_k} features by attribution (InputXGradient)")
+    if os.path.exists(png):
+        st.image(png)
+    st.dataframe(df[['node_type', 'node', 'feature', 'signed', 'abs']], width='stretch')
 
 
 def render_local_ig(result):
@@ -232,6 +305,7 @@ def render_local_ig(result):
     csv_path = os.path.join(save_dir, f"ig_attribution_{suffix}.csv")
     if os.path.exists(csv_path):
         df = pd.read_csv(csv_path)
+        df['feature_name'] = df['feature_name'].apply(humanize_feature_name)
         top_types = (df.groupby('node_type')['abs'].mean()
                      .sort_values(ascending=False).head(2).index.tolist())
 
@@ -350,6 +424,7 @@ def render_global_ig(base, ig_method):
         return
 
     df = pd.read_csv(csv_path)
+    df['feature_name'] = df['feature_name'].apply(humanize_feature_name)
     st.caption(f"From {csv_path}")
     if os.path.exists(heatmap_png):
         st.image(heatmap_png, caption="Attribution heatmap (all node types x feature dims)")
@@ -483,12 +558,28 @@ def main():
             elif mode == 'cf':
                 render_local_cf(result, explainer)
             else:
-                render_local(result, cached, mode, explainer, order_id, top_k=top_k)
+                # Stored rather than rendered inline -- render_local()'s node-type/instance
+                # drill-down selectors need to trigger their own reruns (e.g. picking a
+                # different node) without forcing the user to re-click "Explain this order"
+                # each time. See the persisted-render block below.
+                st.session_state['local_ctx'] = (database, cant, mode, order_id, n_events, top_k)
+                st.session_state['local_result'] = result
+                st.session_state['local_cached'] = cached
         except ValueError as ex:
             # explain_gnn_primary()'s guard against a legitimately-empty edge
             # type (a real PyG/GNNExplainer limitation, not every order/prefix
             # supports this mode) -- show a clear message instead of a raw traceback.
             st.error(f"This order isn't explainable in {MODE_LABELS[mode]} mode: {ex}")
+
+    # loo/gnn_primary render from persisted state, not inline in the button block above --
+    # this fires both on the same rerun right after a successful click (ctx matches
+    # immediately) and on later reruns triggered by the drill-down selectors inside
+    # render_local() itself. Any sidebar change (dataset/mode/order/prefix/top_k) changes
+    # ctx and naturally stops the stale render, with no extra invalidation logic needed.
+    ctx = (database, cant, mode, order_id, n_events, top_k)
+    if mode in ('loo', 'gnn_primary') and st.session_state.get('local_ctx') == ctx:
+        render_local(st.session_state['local_result'], st.session_state['local_cached'],
+                    mode, explainer, order_id, top_k=top_k)
 
 
 if __name__ == '__main__':
