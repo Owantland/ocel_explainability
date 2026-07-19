@@ -113,7 +113,9 @@ class Explainer(Modelling):
         return G
 
     def reg_visualize_explanation_subgraph(self, G, save_path="explanation_subgraph_regression.png", id_map=None):
-        """Draw regression explanation subgraph with node-size proportional to value shift."""
+        """Draw regression explanation subgraph -- fixed-size/plain-edge style matching
+        _draw_hetero_nx's counterfactual-comparison plots (no importance-based sizing
+        or coloring); nodes colored by type, seed node distinguished by size/border."""
         import matplotlib.pyplot as plt
         import networkx as nx
 
@@ -129,46 +131,20 @@ class Explainer(Modelling):
                   f"falling back to spring_layout")
             pos = nx.spring_layout(G, seed=42, k=0.9)
 
-        # Sign color: green = this element's actual value pushed the prediction toward a
-        # LONGER remaining time than the population-mean substitute would; red = toward
-        # SHORTER. Neutral gray for the seed/connector nodes, where signed_importance isn't
-        # meaningful. Kept on a separate visual channel (border color) from large_shift
-        # (border linewidth, below) rather than overloading one color for both.
-        POS_COLOR, NEG_COLOR, NEUTRAL_COLOR = "#2ca02c", "#d62728", "#888888"
-
-        def sign_color(attrs):
-            if attrs.get("is_seed") or attrs.get("is_connector"):
-                return NEUTRAL_COLOR
-            signed = attrs.get("signed_importance", 0.0)
-            if signed > 0:
-                return POS_COLOR
-            elif signed < 0:
-                return NEG_COLOR
-            return NEUTRAL_COLOR
-
+        # Fixed, non-importance-based visual encoding -- matches _draw_hetero_nx's style
+        # (the plot used for counterfactual graph comparisons). Node fill color is the
+        # only channel that still varies (by node_type, via type_colors above); size and
+        # border are seed-vs-everything-else only. Connector nodes (path-filler pulled in
+        # only to keep the pruned subgraph connected to the seed, not because they were
+        # ranked important) keep the alpha fade below -- that's a structural/topological
+        # distinction, not an importance encoding, so it's kept.
         node_colors, node_sizes, edge_colors_outline, node_linewidths, alphas = [], [], [], [], []
         for node, attrs in G.nodes(data=True):
             node_colors.append(type_colors.get(attrs["node_type"], "gray"))
-            if attrs.get("is_seed"):
-                node_sizes.append(900)
-            elif attrs.get("is_connector"):
-                node_sizes.append(150)
-            else:
-                # sqrt scaling (not linear+cap): LOO shifts span orders of magnitude
-                # (sub-1h to 280+h in the same trace) -- a linear map either saturates
-                # almost everything to one size or needs a cap so high it makes small
-                # differences invisible. sqrt compresses large values gracefully while
-                # still separating them, so e.g. a 283h and a 75h node stay visually
-                # distinct instead of both hitting the same ceiling.
-                node_sizes.append(min(250 + 300 * max(attrs.get("importance", 0), 0) ** 0.5, 6000))
-            edge_colors_outline.append(sign_color(attrs))
-            node_linewidths.append(3.0 if attrs.get("large_shift") else 1.2)
+            node_sizes.append(420 if attrs.get("is_seed") else 180)
+            edge_colors_outline.append("black" if attrs.get("is_seed") else "none")
+            node_linewidths.append(1.8 if attrs.get("is_seed") else 0)
             alphas.append(0.4 if attrs.get("is_connector") else 0.9)
-
-        edge_colors, edge_widths = [], []
-        for _, _, attrs in G.edges(data=True):
-            edge_colors.append(sign_color(attrs))
-            edge_widths.append(min(1 + 1.2 * max(attrs.get("importance", 0), 0) ** 0.5, 14))
 
         plt.figure(figsize=(10, 8))
         nx.draw_networkx_nodes(
@@ -176,11 +152,11 @@ class Explainer(Modelling):
             edgecolors=edge_colors_outline, linewidths=node_linewidths, alpha=alphas,
         )
         nx.draw_networkx_edges(
-            G, pos, edge_color=edge_colors, width=edge_widths,
-            arrows=True, connectionstyle="arc3,rad=0.1", alpha=0.7,
+            G, pos, edge_color="gray", width=1.0,
+            arrows=True, connectionstyle="arc3,rad=0.1", alpha=0.5,
         )
         labels = {
-            node: (f"{node[0]}[{node[1]}]({id_map[node]})" if id_map and node in id_map
+            node: (str(id_map[node]) if id_map and node in id_map
                    else f"{node[0]}[{node[1]}]")
             for node in G.nodes if not G.nodes[node].get("is_connector")
         }
@@ -191,12 +167,6 @@ class Explainer(Modelling):
                        markerfacecolor=color, markersize=10)
             for nt, color in type_colors.items()
         ]
-        legend_handles.append(plt.Line2D([0], [0], color=POS_COLOR, lw=2,
-                                         label="border: increases predicted time"))
-        legend_handles.append(plt.Line2D([0], [0], color=NEG_COLOR, lw=2,
-                                         label="border: decreases predicted time"))
-        legend_handles.append(plt.Line2D([0], [0], color="black", lw=3,
-                                         label="thick border: large shift (>1 std)"))
         legend_handles.append(plt.Line2D([0], [0], marker="o", color="w", label="connector (faded)",
                                          markerfacecolor="gray", alpha=0.4, markersize=8))
         plt.legend(handles=legend_handles, loc="best", fontsize=8)
@@ -707,6 +677,7 @@ class Explainer(Modelling):
         return {
             "order_id": order_id,
             "predicted_hours": baseline_value / 3600,
+            "n_events": explain_subgraph['Events'].x.size(0) if 'Events' in explain_subgraph.node_types else 0,
             "node_importances": node_importances,
             "edge_importances": edge_importances,
             "seed_feature_importances": seed_feats,
@@ -810,6 +781,42 @@ class Explainer(Modelling):
             plt.colorbar(im, ax=ax, shrink=0.8)
             plt.tight_layout()
             plt.savefig(os.path.join(save_dir, f"ig_heatmap_{suffix}.png"), dpi=150)
+            plt.close()
+
+            # Signed companion heatmap -- matches Zhai et al. 2025's own heatmap
+            # convention (diverging colormap over signed values, not magnitude
+            # only). NOT a replacement for the |...| heatmap above: a feature
+            # whose sign flips across node instances/traces can average toward
+            # zero here while still showing up as large in the abs heatmap --
+            # the two are meant to be read together, not one in place of the
+            # other. Zero-padded cells (node types with fewer feature dims than
+            # max_dims) are masked as NaN/gray rather than left as literal 0.0,
+            # since on a diverging colormap 0.0 is visually indistinguishable
+            # from "no such feature dimension" -- unlike the sequential |...|
+            # heatmap above, where 0 reads unambiguously as "no magnitude".
+            heat_signed = np.full((len(all_types), max_dims), np.nan)
+            for i, nt in enumerate(all_types):
+                arr = mean_signed[nt]
+                heat_signed[i, :len(arr)] = arr
+
+            cmap_signed = plt.get_cmap('RdBu_r').copy()
+            cmap_signed.set_bad('lightgray')
+
+            fig, ax = plt.subplots(figsize=(max(8, max_dims * 0.5 + 2), len(all_types) + 1))
+            im = ax.imshow(heat_signed, aspect='auto', cmap=cmap_signed)
+            ax.set_yticks(range(len(all_types)))
+            ax.set_yticklabels(all_types)
+            ax.set_xlabel("Feature dimension index")
+            ax.set_title(f"Feature attribution heatmap (signed {method}), order #{order_id}")
+            plt.colorbar(im, ax=ax, shrink=0.8)
+            if max_dims <= 20:  # keep cell-value annotations legible on narrow heatmaps only
+                for i in range(len(all_types)):
+                    for j in range(max_dims):
+                        val = heat_signed[i, j]
+                        if not np.isnan(val):
+                            ax.text(j, i, f"{val:.2f}", ha='center', va='center', fontsize=6)
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, f"ig_heatmap_signed_{suffix}.png"), dpi=150)
             plt.close()
 
         print(f"\nOutputs saved to: {save_dir}")
@@ -1548,7 +1555,7 @@ class Explainer(Modelling):
 
         if G.number_of_nodes() <= 20:  # keep dense graphs (e.g. #1812) readable
             labels = {
-                node: (f"{node[0]}[{node[1]}]({id_map[node]})" if id_map and node in id_map
+                node: (str(id_map[node]) if id_map and node in id_map
                        else f"{node[0]}[{node[1]}]")
                 for node in G.nodes
             }
@@ -2025,6 +2032,44 @@ class Explainer(Modelling):
             plt.colorbar(im, ax=ax, shrink=0.8)
             plt.tight_layout()
             plt.savefig(os.path.join(out_dir, f"ig_heatmap_{suffix}.png"), dpi=150)
+            plt.close()
+
+            # Signed companion heatmap -- matches Zhai et al. 2025's own heatmap
+            # convention (diverging colormap over signed values, not magnitude
+            # only). NOT a replacement for the |...| heatmap above: mean_signed
+            # is a mean across up to n_traces different orders' per-graph means,
+            # so a context-dependent feature (positive effect in some orders,
+            # negative in others) can cancel toward zero here while still
+            # showing up as large in the abs heatmap -- read the two together,
+            # a near-zero signed cell next to a large abs cell is itself a
+            # meaningful finding, not a defect. Zero-padded cells (node types
+            # with fewer feature dims than max_dims) are masked as NaN/gray
+            # rather than left as literal 0.0, since on a diverging colormap
+            # 0.0 is visually indistinguishable from "no such feature
+            # dimension" -- unlike the sequential |...| heatmap above.
+            heat_signed = np.full((len(all_types), max_dims), np.nan)
+            for i, nt in enumerate(all_types):
+                arr = mean_signed[nt]
+                heat_signed[i, :len(arr)] = arr
+
+            cmap_signed = plt.get_cmap('RdBu_r').copy()
+            cmap_signed.set_bad('lightgray')
+
+            fig, ax = plt.subplots(figsize=(max(8, max_dims * 0.5 + 2), len(all_types) + 1))
+            im = ax.imshow(heat_signed, aspect='auto', cmap=cmap_signed)
+            ax.set_yticks(range(len(all_types)))
+            ax.set_yticklabels(all_types)
+            ax.set_xlabel("Feature dimension index")
+            ax.set_title(f"Feature attribution heatmap (mean signed {method})")
+            plt.colorbar(im, ax=ax, shrink=0.8)
+            if max_dims <= 20:  # keep cell-value annotations legible on narrow heatmaps only
+                for i in range(len(all_types)):
+                    for j in range(max_dims):
+                        val = heat_signed[i, j]
+                        if not np.isnan(val):
+                            ax.text(j, i, f"{val:.2f}", ha='center', va='center', fontsize=6)
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, f"ig_heatmap_signed_{suffix}.png"), dpi=150)
             plt.close()
 
             # CSV
@@ -3228,6 +3273,7 @@ class Explainer(Modelling):
         return {
             'order_id': order_id,
             'predicted_hours': baseline_value / 3600.0,
+            'n_events': n_q,
             'identified_keys': identified_keys,
             'node_importances': node_importances,
             'quality': quality,
