@@ -404,54 +404,14 @@ def render_regenerate(explainer, database, cant, mode,
         st.success("Done. Reload the page to see the updated figures.")
 
 
-def main():
-    st.title("Perturbation Analysis Explorer")
-    st.caption(
-        "Exploring the held-out **test set** of a trained HGT model -- static, already-completed "
-        "traces, not a live process feed."
-    )
-
-    with st.sidebar:
-        database = st.selectbox("Dataset", list(DATASETS.keys()))
-        cant = DATASETS[database]
-        mode = st.radio(
-            "Explanation mode", list(MODE_LABELS.keys()),
-            format_func=lambda m: MODE_LABELS[m],
-        )
-        min_gap_hours, direction = 0.0, 'lower'
-        top_k = 5
-        if mode == 'loo':
-            top_k = st.selectbox(
-                "Top K Explanations", [3, 5, 10, 15, 20], index=1, key="top_k_picker",
-                help="Number of nodes/edges shown in the importance tables (and, when comparing "
-                     "against GNNExplainer, the number it identifies and LOO measures).",
-            )
-        if mode == 'cf':
-            direction_label = st.radio(
-                "Search direction",
-                ["Below current prediction", "Above current prediction"],
-                key="cf_direction_picker",
-            )
-            direction = 'lower' if direction_label.startswith("Below") else 'higher'
-            min_gap_hours = st.number_input(
-                "Minimum predicted-hours gap (threshold)", min_value=0.0, value=0.0, step=1.0,
-                key="cf_min_gap_picker",
-                help="Minimum |query - candidate| predicted-hours gap a counterfactual "
-                     "must have to be eligible.",
-            )
-            st.caption("Retrieves the most similar test-set trace(s) with a contrasting "
-                      "predicted outcome -- not a perturbation method, complements the "
-                      "other mode.")
-        else:
-            st.caption("Exhaustive sweep over every node, edge, and feature -- the only source "
-                      "of edge importance. Can optionally be compared against GNNExplainer-"
-                      "primary below.")
-
-    explainer = get_explainer(database, cant)
-
-    # Global (aggregate) tab dropped for now -- Local is the only view. render_global()/
-    # render_regenerate() are left defined but unused, not deleted, since this is a
-    # temporary scoping choice, not a permanent removal.
+def render_local_flow(explainer, database, cant, mode, top_k, min_gap_hours=0.0, direction='lower'):
+    """Order picker through persisted render -- extracted from main() so it can be
+    called either inside a tab (loo, which also gets an Aggregate tab alongside this
+    one) or directly (cf, which stays a flat single view, no tabs)."""
+    # Global (aggregate) tab dropped for now for non-loo modes -- render_global()/
+    # render_regenerate() are left defined but unused there, not deleted, since this
+    # is a temporary scoping choice, not a permanent removal. loo gets its own
+    # Aggregate tab via render_loo_aggregate(), wired up in main().
     ids = order_ids_for(explainer)
     order_id = st.selectbox("Order ID", ids, key="order_picker")
 
@@ -534,6 +494,107 @@ def main():
         render_local(st.session_state['local_result'], st.session_state['local_cached'],
                     explainer, order_id, top_k=top_k,
                     gnn_result=st.session_state.get('local_gnn_result'))
+
+
+def render_loo_aggregate(explainer, database, cant, top_k):
+    """Dataset-wide "top K nodes by aggregate value" view for Exhaustive LOO -- the
+    per-decoded-identity companion to explain_aggregate()'s existing node-TYPE-level
+    output, same pattern as explain_gnn_primary_aggregate()'s own equivalent. The
+    underlying data is whatever was last computed via Regenerate (an expensive
+    n_traces=50 exhaustive LOO sweep) -- not recomputed live per Top-K change, since
+    that would mean re-running the sweep on every dropdown interaction. The DISPLAY
+    (chart + table), however, IS live: explain_aggregate() saves a generous top_n=20
+    rows precisely so this can cheaply slice/re-render down to the current top_k on
+    every rerun, matplotlib-only, no model inference -- same cost tier as the
+    single-trace tab's own live charts. Reuses plot_top_features_bar() (not
+    plot_aggregate_explanation_bars(), which also feeds explain_gnn_primary_aggregate()'s
+    thesis-citable output and is left on its own existing color convention) so this
+    chart automatically matches the single-trace tab's color scheme."""
+    base = os.path.join("files", "explainer_outputs", database, "aggregate")
+    csv_path = os.path.join(base, "aggregate_explanation_bars.csv")
+
+    if not os.path.exists(csv_path):
+        st.warning(f"No precomputed aggregate found at {csv_path}. Use Regenerate below to "
+                  "compute it (an exhaustive LOO sweep over 50 traces -- can take a while).")
+    else:
+        df = pd.read_csv(csv_path)
+        df_top = df.sort_values('mean_signed_shift', key=abs, ascending=False).head(top_k)
+
+        chart_png = os.path.join(base, "aggregate_explanation_bars_topk.png")
+        explainer.plot_top_features_bar(
+            df_top['label'].tolist(), df_top['mean_signed_shift'].tolist(), chart_png,
+            title=f"Top {top_k} nodes by aggregate value",
+            xlabel="Mean value shift if removed (hours)",
+        )
+
+        st.caption(f"From {csv_path} (top {len(df_top)} of {len(df)} saved nodes by mean "
+                  f"|signed shift| across traces)")
+        st.subheader("Top nodes by aggregate value")
+        if os.path.exists(chart_png):
+            st.image(chart_png)
+        st.dataframe(df_top, width='stretch')
+
+    with st.expander("Regenerate (advanced)"):
+        render_regenerate(explainer, database, cant, 'loo')
+
+
+def main():
+    st.title("Perturbation Analysis Explorer")
+    st.caption(
+        "Exploring the held-out **test set** of a trained HGT model -- static, already-completed "
+        "traces, not a live process feed."
+    )
+
+    with st.sidebar:
+        database = st.selectbox("Dataset", list(DATASETS.keys()))
+        cant = DATASETS[database]
+        mode = st.radio(
+            "Explanation mode", list(MODE_LABELS.keys()),
+            format_func=lambda m: MODE_LABELS[m],
+        )
+        min_gap_hours, direction = 0.0, 'lower'
+        top_k = 5
+        if mode == 'loo':
+            top_k = st.selectbox(
+                "Top K Explanations", [3, 5, 10, 15, 20], index=1, key="top_k_picker",
+                help="Number of nodes/edges shown in the importance tables (and, when comparing "
+                     "against GNNExplainer, the number it identifies and LOO measures).",
+            )
+        if mode == 'cf':
+            direction_label = st.radio(
+                "Search direction",
+                ["Below current prediction", "Above current prediction"],
+                key="cf_direction_picker",
+            )
+            direction = 'lower' if direction_label.startswith("Below") else 'higher'
+            min_gap_hours = st.number_input(
+                "Minimum predicted-hours gap (threshold)", min_value=0.0, value=0.0, step=1.0,
+                key="cf_min_gap_picker",
+                help="Minimum |query - candidate| predicted-hours gap a counterfactual "
+                     "must have to be eligible.",
+            )
+            st.caption("Retrieves the most similar test-set trace(s) with a contrasting "
+                      "predicted outcome -- not a perturbation method, complements the "
+                      "other mode.")
+        else:
+            st.caption("Exhaustive sweep over every node, edge, and feature -- the only source "
+                      "of edge importance. Can optionally be compared against GNNExplainer-"
+                      "primary below.")
+
+    explainer = get_explainer(database, cant)
+
+    # Aggregate tab scoped to loo only, per what was asked -- cf keeps today's flat,
+    # tab-free layout. render_local_flow() is shared between both branches so the
+    # (fairly stateful) order-picker-through-persisted-render logic isn't duplicated.
+    if mode == 'loo':
+        tab_local, tab_aggregate = st.tabs(["Local (single case)", "Aggregate"])
+        with tab_local:
+            render_local_flow(explainer, database, cant, mode, top_k)
+        with tab_aggregate:
+            render_loo_aggregate(explainer, database, cant, top_k)
+    else:
+        render_local_flow(explainer, database, cant, mode, top_k,
+                          min_gap_hours=min_gap_hours, direction=direction)
 
 
 if __name__ == '__main__':

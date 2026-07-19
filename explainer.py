@@ -901,25 +901,36 @@ class Explainer(Modelling):
         print(f"Running aggregate explanation on {len(sample)} traces…")
 
         import numpy as np
+        import pandas as pd
         from collections import defaultdict
         type_shifts = defaultdict(list)
         type_signed_shifts = defaultdict(list)
         feat_shifts = defaultdict(lambda: defaultdict(list))
+        # Per-decoded-identity signed shifts (e.g. "Events=PlaceOrder", "Items=i-880001"),
+        # for plot_aggregate_explanation_bars() -- same pattern as
+        # explain_gnn_primary_aggregate()'s own explanation_signed_shifts, a finer
+        # granularity than type_signed_shifts above (which only aggregates at the
+        # node-TYPE level, losing individual identity).
+        explanation_signed_shifts = defaultdict(list)
         all_metrics = []
 
         n_failed = 0
         for g in sample:
+            oid = int(g[self.kpi_viewpoint]['id'][0].item()) if self.kpi_viewpoint in g.node_types else None
             try:
                 (node_imp, edge_imp, seed_feats, _, _) = self.reg_explanation(g, 0, None, top_k)
             except Exception as ex:
                 n_failed += 1
-                oid = g[self.kpi_viewpoint]['id'][0].item() if self.kpi_viewpoint in g.node_types else '?'
                 print(f"  [trace failed] order={oid}: {type(ex).__name__}: {ex}")
                 continue
 
+            id_map = self._decode_all_identifiers(g, oid) if oid is not None else {}
             for nt, idx, shift, _, signed_shift in node_imp:
                 type_shifts[nt].append(shift / 3600)
                 type_signed_shifts[nt].append(signed_shift / 3600)
+                decoded = id_map.get((nt, idx))
+                label = f"{nt}={decoded}" if decoded else nt
+                explanation_signed_shifts[label].append(signed_shift / 3600.0)
 
             for f, shift, _, _ in seed_feats:
                 feat_shifts[self.kpi_viewpoint][f].append(shift / 3600)
@@ -941,6 +952,20 @@ class Explainer(Modelling):
             rows, os.path.join(save_dir, "aggregate_node_type_importance.png"),
             f"Aggregate node type importance (n={len(sample)} traces)",
             "Mean value shift if removed (hours)", show_error_bars=True,
+        )
+
+        # Global, ranked 'attr=value' explanation bars -- cf. Galanti et al. 2023b Fig. 1,
+        # same pattern as explain_gnn_primary_aggregate()'s own equivalent output. A
+        # finer-grained companion to the node-TYPE-level chart above: same underlying
+        # per-trace data, but bucketed by decoded identity (e.g. "Events=PlaceOrder")
+        # instead of just node type, in one combined cross-type ranking.
+        explanation_summary = self.plot_aggregate_explanation_bars(
+            explanation_signed_shifts, os.path.join(save_dir, "aggregate_explanation_bars.png"),
+            "Global explanations for remaining time prediction",
+            dataset_label=self.database, n_traces=len(sample), top_n=20,
+        )
+        pd.DataFrame(explanation_summary).to_csv(
+            os.path.join(save_dir, "aggregate_explanation_bars.csv"), index=False
         )
 
         names = self.feature_names
