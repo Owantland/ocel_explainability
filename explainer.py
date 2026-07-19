@@ -410,23 +410,38 @@ class Explainer(Modelling):
         plt.savefig(save_path, dpi=150)
         plt.close()
 
-    def plot_top_features_bar(self, labels, signed_values, save_path, title, method='InputXGradient'):
-        """Horizontal bar chart of pre-resolved (label, signed attribution value)
-        pairs, sorted by the caller. Generic, unlike plot_feature_importances() --
+    def plot_top_features_bar(self, labels, signed_values, save_path, title, method='InputXGradient',
+                              xlabel=None):
+        """Horizontal bar chart of pre-resolved (label, signed value) pairs,
+        sorted by the caller. Generic, unlike plot_feature_importances() --
         takes fully-resolved label strings directly rather than deriving them from
         one node type's feature_names, since labels here may mix multiple node
         types/instances from one trace (e.g. dashboard.py's trace-wide top-K
-        attribution view)."""
+        attribution view).
+
+        xlabel: overrides the default f"{method} attribution" x-axis label --
+        needed when signed_values aren't attribution at all (e.g. an
+        hours-denominated LOO value shift plotted with the same label set for
+        a side-by-side comparison).
+
+        Color convention deliberately inverted from plot_feature_importances()'s
+        (green=increases predicted time there): here, red = increases predicted
+        time (a worse outcome for a remaining-time KPI), green = decreases it
+        (a better outcome) -- an outcome-valence convention, not a raw-sign
+        convention. Intentional divergence, scoped to this function only (its
+        only callers are dashboard.py's feature-analysis charts, not any
+        thesis-citable saved PNG) -- flagged since it means this project now
+        has two different sign-color conventions across different charts."""
         if not labels:
             return
 
         fig, ax = plt.subplots(figsize=(7, max(3, len(labels) * 0.45)))
-        colors = ["#2ca02c" if v > 0 else ("#d62728" if v < 0 else "#888888") for v in signed_values]
+        colors = ["#d62728" if v > 0 else ("#2ca02c" if v < 0 else "#888888") for v in signed_values]
         ax.barh(range(len(labels)), signed_values, color=colors)
         ax.set_yticks(range(len(labels)))
         ax.set_yticklabels(labels, fontsize=9)
         ax.invert_yaxis()
-        ax.set_xlabel(f"{method} attribution")
+        ax.set_xlabel(xlabel if xlabel is not None else f"{method} attribution")
         ax.set_title(title)
         ax.grid(True, axis="x", alpha=0.3)
         plt.tight_layout()

@@ -23,11 +23,8 @@ DATASETS = {
 }
 MODE_LABELS = {
     'loo': 'Exhaustive LOO',
-    'gnn_primary': 'GNNExplainer-primary',
-    'ig': 'Feature Attribution (IG)',
     'cf': 'Counterfactual',
 }
-IG_METHODS = ('InputXGradient', 'IntegratedGradients')
 
 st.set_page_config(page_title="Perturbation Analysis Explorer", layout="wide")
 
@@ -58,7 +55,7 @@ def prefix_options_for(explainer, order_id):
     )
 
 
-def compute_local(explainer, database, cant, mode, order_id, ig_method=None,
+def compute_local(explainer, database, cant, mode, order_id,
                    min_gap_hours=0.0, direction='lower', n_events=None, top_k=5):
     # Ties a cached result to the exact model checkpoint that produced it -- found via
     # direct investigation that a retrain silently orphans old cached predictions (e.g.
@@ -85,7 +82,8 @@ def compute_local(explainer, database, cant, mode, order_id, ig_method=None,
         # the query, so a result cached only by order_id would silently go stale the
         # moment either control changes. find_counterfactuals() is a forward-pass sweep
         # over the candidate pool (no 200-epoch optimization like GNNExplainer), so
-        # it's in the same "fast enough live" tier as ig, not gnn_primary.
+        # it's in the same "fast enough live" tier as this section's own top-K
+        # attribution/LOO comparison, not gnn_primary.
         results = explainer.explain_counterfactual(order_id, min_gap_hours=min_gap_hours,
                                                     direction=direction, n_events=n_events)
         suffix = f"_ev{n_events}" if n_events is not None else ""
@@ -95,27 +93,6 @@ def compute_local(explainer, database, cant, mode, order_id, ig_method=None,
         return {'results': results, 'save_dir': save_dir,
                 'query_predicted_hours': query_predicted_hours,
                 'n_events': query_graph['Events'].x.size(0)}, False
-
-    # 'ig': deliberately NOT cached -- explain_trace_ig() is a single backward
-    # pass per method, already fast enough live (verified directly, no visible
-    # delay), so the cache's whole reason to exist (GNNExplainer's ~200-epoch
-    # cost) doesn't apply here. Its return value also isn't the same shape as
-    # the other two modes' (no save_dir/predicted_hours, raw numpy arrays
-    # instead of plain tuples -- not JSON-serializable as-is either), so it's
-    # reconstructed here rather than adapted into dashboard_cache's schema.
-    attribution = explainer.explain_trace_ig(order_id, methods=(ig_method,), n_events=n_events)
-    suffix = f"_ev{n_events}" if n_events is not None else ""
-    save_dir = os.path.join(explainer.path_dict['explainer_path'], f"order_{order_id}{suffix}")
-    graph = explainer._locate_test_graph(order_id, n_events)
-    predicted_hours = explainer._predict_value_for_graph(graph, 0) / 3600.0
-    result = {
-        'save_dir': save_dir,
-        'predicted_hours': predicted_hours,
-        'method': ig_method,
-        'attribution': attribution,
-        'n_events': graph['Events'].x.size(0),
-    }
-    return result, False
 
 
 _TEMPORAL_LABELS = {
@@ -166,10 +143,10 @@ def _characterization_color(score):
     return f"rgb({r}, {g}, {b})"
 
 
-def render_local(result, cached, mode, explainer, order_id, top_k=5):
+def render_local(result, cached, explainer, order_id, top_k=5, gnn_result=None):
     st.caption("served from cache" if cached else "computed just now (now cached for next time)")
 
-    quality = result['metrics'] if mode == 'loo' else result['quality']
+    quality = result['metrics']
     score = quality['characterization_score']
     metric_col, events_col, score_col = st.columns(3)
     with metric_col:
@@ -185,16 +162,22 @@ def render_local(result, cached, mode, explainer, order_id, top_k=5):
             unsafe_allow_html=True,
         )
 
-    save_dir = result['save_dir']
+    # Swapped to GNNExplainer-primary's own images when a comparison run is available --
+    # the tables/quality metrics below are unaffected, always LOO's own.
+    img_save_dir = gnn_result['save_dir'] if gnn_result else result['save_dir']
+    gnn_suffix = " (GNNExplainer-primary)" if gnn_result else ""
     col1, col2 = st.columns(2)
     with col1:
-        png = os.path.join(save_dir, "node_type_summary.png")
+        png = os.path.join(img_save_dir, "node_type_summary.png")
         if os.path.exists(png):
-            st.image(png, caption="Node-type importance")
+            st.image(png, caption=f"Node-type importance{gnn_suffix}")
     with col2:
-        png = os.path.join(save_dir, "explanation_subgraph.png")
+        png = os.path.join(img_save_dir, "explanation_subgraph.png")
         if os.path.exists(png):
-            st.image(png, caption="Explanation subgraph")
+            st.image(png, caption=f"Explanation subgraph{gnn_suffix}")
+    if gnn_result:
+        st.caption("Node analysis graphs above are GNNExplainer-primary's; tables and quality "
+                  "metrics below still reflect the exhaustive LOO sweep.")
 
     # Human-readable identifier (Events activity name, or a real identity for any
     # other encoding-listed type, real OCEL_ID from ocel.csv for everything
@@ -225,28 +208,21 @@ def render_local(result, cached, mode, explainer, order_id, top_k=5):
         df = df[['node_type', 'node_idx', 'identifier', 'signed_shift_hours', 'large_shift']]
         st.dataframe(df.head(top_k), width='stretch')
 
-    if mode == 'loo':
-        edge_rows = result.get('edge_importances') or []
-        if edge_rows:
-            st.subheader("Top edges")
-            edf = pd.DataFrame(
-                edge_rows,
-                columns=['edge_type', 'edge_idx', 'shift_seconds', 'large_shift', 'signed_shift_seconds'],
-            )
-            edf['signed_shift_hours'] = edf['signed_shift_seconds'] / 3600.0
-            st.dataframe(edf[['edge_type', 'signed_shift_hours', 'large_shift']].head(top_k),
-                        width='stretch')
+    edge_rows = result.get('edge_importances') or []
+    if edge_rows:
+        st.subheader("Top edges")
+        edf = pd.DataFrame(
+            edge_rows,
+            columns=['edge_type', 'edge_idx', 'shift_seconds', 'large_shift', 'signed_shift_seconds'],
+        )
+        edf['signed_shift_hours'] = edf['signed_shift_seconds'] / 3600.0
+        st.dataframe(edf[['edge_type', 'signed_shift_hours', 'large_shift']].head(top_k),
+                    width='stretch')
 
     render_top_features_by_attribution(explainer, graph, id_map, result, order_id, top_k)
 
-    if mode == 'loo':
-        st.subheader("Explanation quality (exhaustive sweep)")
-        st.json(result['metrics'])
-    else:
-        st.subheader("Joint impact of masking the identified nodes together")
-        st.json(result['quality'])
-        st.caption("Edge importance isn't available in this mode -- GNNExplainer has no edge "
-                  "signal on this architecture. Switch to Exhaustive LOO for edge importance.")
+    st.subheader("Explanation quality (exhaustive sweep)")
+    st.json(result['metrics'])
 
 
 def render_top_features_by_attribution(explainer, graph, id_map, result, order_id, top_k):
@@ -254,7 +230,10 @@ def render_top_features_by_attribution(explainer, graph, id_map, result, order_i
     -- not scoped to one selected node. Computed live (no caching), same cost
     tier as before: one Captum backward pass over the whole graph already
     returns every node instance's own attribution vector -- flattening and
-    ranking it is cheap by comparison."""
+    ranking it is cheap by comparison. Also shows exhaustive LOO's value shift
+    for these SAME features (not a separate re-ranking), so the two charts are
+    a direct, feature-for-feature comparison of what each method says about the
+    identical set."""
     masks = explainer._compute_attribution_for_graph(graph, method='InputXGradient')
     rows = []
     for node_type, arr in masks.items():
@@ -264,68 +243,69 @@ def render_top_features_by_attribution(explainer, graph, id_map, result, order_i
                 v = float(arr[node_idx, f])
                 fname = feat_names[f] if f < len(feat_names) else f"feat_{f}"
                 rows.append({
-                    'node_type': node_type,
+                    'node_type': node_type, 'node_idx': node_idx, 'feature_idx': f,
                     'node': id_map.get((node_type, node_idx), f"{node_type}[{node_idx}]"),
                     'feature': humanize_feature_name(fname),
                     'signed': v, 'abs': abs(v),
                 })
     df = pd.DataFrame(rows).sort_values('abs', ascending=False).head(top_k)
 
+    # Exhaustive LOO value-shift for the SAME (node, feature) pairs attribution picked --
+    # baseline computed fresh (not from a cached result, see earlier stale-baseline fix),
+    # and grouped by node instance so each node's LOO sweep runs once regardless of how
+    # many of its features made the top-K. top_k=n_feats (not the page's top_k) so the
+    # sweep covers every one of that node's features -- otherwise the specific feature
+    # index needed could be truncated out of a smaller top-k slice.
+    baseline_seconds = explainer._predict_value_for_graph(graph, 0)
+    loo_lookup = {}
+    for node_type, node_idx in df[['node_type', 'node_idx']].drop_duplicates().itertuples(index=False):
+        n_feats = graph[node_type].x.size(1)
+        feats = explainer.reg_feature_importance_for_node_in_graph(
+            graph, node_type, node_idx, baseline_seconds, target_object_idx=0, top_k=n_feats
+        )
+        loo_lookup[(node_type, node_idx)] = {f: signed / 3600.0 for f, shift, large, signed in feats}
+    # None only for a feature whose input value is exactly 0 (skipped by LOO's own
+    # zero-value guard) -- rare in practice, since InputXGradient's own attribution for a
+    # zero-valued input is itself 0 and wouldn't usually rank in the top-K to begin with.
+    df['loo_signed_shift_hours'] = df.apply(
+        lambda r: loo_lookup.get((r['node_type'], r['node_idx']), {}).get(r['feature_idx']),
+        axis=1,
+    )
+
     save_dir = result['save_dir']
-    png = os.path.join(save_dir, "top_features_attribution.png")
     labels = [f"{r['node']}: {r['feature']}" for _, r in df.iterrows()]
-    explainer.plot_top_features_bar(labels, df['signed'].tolist(), png,
+
+    attr_png = os.path.join(save_dir, "top_features_attribution.png")
+    explainer.plot_top_features_bar(labels, df['signed'].tolist(), attr_png,
                                     title=f"Top {top_k} features by attribution, order #{order_id}")
 
-    st.subheader(f"Top {top_k} features by attribution (InputXGradient)")
-    if os.path.exists(png):
-        st.image(png)
-    st.dataframe(df[['node_type', 'node', 'feature', 'signed', 'abs']], width='stretch')
+    loo_png = os.path.join(save_dir, "top_features_loo.png")
+    loo_values = df['loo_signed_shift_hours'].fillna(0.0).tolist()
+    explainer.plot_top_features_bar(labels, loo_values, loo_png,
+                                    title=f"Exhaustive LOO value shift, same features, order #{order_id}",
+                                    xlabel="Value shift if removed (hours)")
 
+    st.subheader(f"Top {top_k} features by attribution, compared against exhaustive LOO")
+    col1, col2 = st.columns(2)
+    with col1:
+        if os.path.exists(attr_png):
+            st.image(attr_png)
+        st.caption("Feature attribution (InputXGradient)")
+    with col2:
+        if os.path.exists(loo_png):
+            st.image(loo_png)
+        st.caption("Exhaustive LOO (value change, hours)")
+    st.dataframe(
+        df[['node_type', 'node', 'feature', 'signed', 'abs', 'loo_signed_shift_hours']],
+        width='stretch',
+    )
 
-def render_local_ig(result):
-    """Feature attribution's return/artifact shape is genuinely different from
-    the other two modes' (no save_dir/predicted_hours in the return value, a
-    bar chart PER node type PER method rather than one fixed-name summary chart)
-    -- a separate render path rather than a branch inside render_local()."""
-    st.caption(f"Method: {result['method']} -- not cached (fast enough to compute live)")
-    metric_col, events_col = st.columns(2)
-    with metric_col:
-        st.metric("Predicted remaining time", f"{result['predicted_hours']:.1f} h")
-    with events_col:
-        st.metric("Events completed", str(result['n_events']))
-
-    save_dir = result['save_dir']
-    suffix = result['method'].lower()
-
-    heatmap_png = os.path.join(save_dir, f"ig_heatmap_{suffix}.png")
-    if os.path.exists(heatmap_png):
-        st.image(heatmap_png, caption="Attribution heatmap (all node types x feature dims)")
-
-    csv_path = os.path.join(save_dir, f"ig_attribution_{suffix}.csv")
-    if os.path.exists(csv_path):
-        df = pd.read_csv(csv_path)
-        df['feature_name'] = df['feature_name'].apply(humanize_feature_name)
-        top_types = (df.groupby('node_type')['abs'].mean()
-                     .sort_values(ascending=False).head(2).index.tolist())
-
-        if top_types:
-            st.subheader(f"Top node types by mean |attribution|: {', '.join(top_types)}")
-            cols = st.columns(len(top_types))
-            for col, nt in zip(cols, top_types):
-                with col:
-                    png = os.path.join(save_dir, f"ig_attribution_{nt.lower()}_{suffix}.png")
-                    if os.path.exists(png):
-                        st.image(png)
-
-        st.subheader("Full attribution table")
-        st.dataframe(df.sort_values('abs', ascending=False).head(20), width='stretch')
 
 
 def render_local_cf(result, explainer):
     """Counterfactual's result shape (a ranked list of candidate matches, not a
     single prediction + node-importance table) doesn't fit render_local()'s
-    assumptions -- a separate render path, same reasoning as render_local_ig()."""
+    assumptions -- a separate render path."""
     st.caption("Not cached -- recomputed on every click (threshold/direction are part "
               "of the query, so a stale cache could silently answer the wrong question).")
     metric_col, events_col = st.columns(2)
@@ -376,12 +356,8 @@ def render_local_cf(result, explainer):
             st.image(png, caption=f"{vp} feature differences")
 
 
-def render_global(database, mode, ig_method=None):
+def render_global(database, mode):
     base = os.path.join("files", "explainer_outputs", database)
-    if mode == 'ig':
-        render_global_ig(base, ig_method)
-        return
-
     if mode == 'cf':
         csv_path = os.path.join(base, "aggregate", "aggregate_cf_dissimilarity.csv")
         png_path = os.path.join(base, "aggregate", "aggregate_cf_components.png")
@@ -405,52 +381,11 @@ def render_global(database, mode, ig_method=None):
         st.image(png_path)
 
 
-def render_global_ig(base, ig_method):
-    """Dataset-wide feature attribution -- reads files/explainer_outputs/{database}/
-    attribution/, the fixed output folder explain_feature_attribution() already
-    writes to (not per-order like the other two modes' aggregate folders).
-    Different CSV columns (mean_signed/mean_abs, not signed/abs) and PNG naming
-    (ig_{node_type}_importance_{suffix}.png, not ig_attribution_{node_type}_{suffix}.png)
-    than the single-trace path, so this reuses the same top-2 curation idea as
-    render_local_ig() but can't reuse its code directly."""
-    out_dir = os.path.join(base, "attribution")
-    suffix = ig_method.lower()
-    csv_path = os.path.join(out_dir, f"ig_attribution_{suffix}.csv")
-    heatmap_png = os.path.join(out_dir, f"ig_heatmap_{suffix}.png")
-
-    if not os.path.exists(csv_path):
-        st.warning(f"No precomputed attribution found at {csv_path}. Run it via Regenerate below, "
-                  f"or from the command line first.")
-        return
-
-    df = pd.read_csv(csv_path)
-    df['feature_name'] = df['feature_name'].apply(humanize_feature_name)
-    st.caption(f"From {csv_path}")
-    if os.path.exists(heatmap_png):
-        st.image(heatmap_png, caption="Attribution heatmap (all node types x feature dims)")
-
-    top_types = (df.groupby('node_type')['mean_abs'].mean()
-                 .sort_values(ascending=False).head(2).index.tolist())
-    if top_types:
-        st.subheader(f"Top node types by mean |attribution|: {', '.join(top_types)}")
-        cols = st.columns(len(top_types))
-        for col, nt in zip(cols, top_types):
-            with col:
-                png = os.path.join(out_dir, f"ig_{nt.lower()}_importance_{suffix}.png")
-                if os.path.exists(png):
-                    st.image(png)
-
-    st.subheader("Full attribution table")
-    st.dataframe(df.sort_values('mean_abs', ascending=False).head(20), width='stretch')
-
-
-def render_regenerate(explainer, database, cant, mode, ig_method=None,
+def render_regenerate(explainer, database, cant, mode,
                       min_gap_hours=0.0, direction='lower'):
     cost_notes = {
         'loo': "Exhaustive LOO is slow (O(n_traces x nodes+edges) forward passes).",
         'gnn_primary': "GNNExplainer-primary is much slower (n_traces x 200-epoch mask optimizations).",
-        'ig': "Feature attribution is the cheapest of the three -- a single backward pass per "
-              "trace, comparable to or faster than Exhaustive LOO's aggregate.",
         'cf': "Counterfactual retrieval evaluates predictions over the full candidate pool per "
               "trace -- moderate cost, no gradient-based optimization involved.",
     }
@@ -466,8 +401,6 @@ def render_regenerate(explainer, database, cant, mode, ig_method=None,
                 explainer.explain_aggregate_counterfactuals(
                     n_traces=50, min_gap_hours=min_gap_hours, direction=direction
                 )
-            else:
-                explainer.explain_feature_attribution(n_traces=50, methods=(ig_method,))
         st.success("Done. Reload the page to see the updated figures.")
 
 
@@ -485,24 +418,15 @@ def main():
             "Explanation mode", list(MODE_LABELS.keys()),
             format_func=lambda m: MODE_LABELS[m],
         )
-        ig_method = None
         min_gap_hours, direction = 0.0, 'lower'
         top_k = 5
-        if mode in ('loo', 'gnn_primary'):
+        if mode == 'loo':
             top_k = st.selectbox(
                 "Top K Explanations", [3, 5, 10, 15, 20], index=1, key="top_k_picker",
-                help="Number of nodes/edges shown in the importance tables (and, for "
-                     "GNNExplainer-primary, the number GNNExplainer identifies and LOO measures).",
+                help="Number of nodes/edges shown in the importance tables (and, when comparing "
+                     "against GNNExplainer, the number it identifies and LOO measures).",
             )
-        if mode == 'gnn_primary':
-            st.caption("GNNExplainer identifies important nodes; LOO estimates their impact. "
-                      "Node-only -- no edge importance.")
-        elif mode == 'ig':
-            ig_method = st.radio("IG method", IG_METHODS, key="ig_method_picker")
-            st.caption("Gradient-based feature sensitivity, not perturbation -- complements "
-                      "the other two modes rather than competing with them. Not cached; "
-                      "cheap enough to compute live every time.")
-        elif mode == 'cf':
+        if mode == 'cf':
             direction_label = st.radio(
                 "Search direction",
                 ["Below current prediction", "Above current prediction"],
@@ -517,16 +441,17 @@ def main():
             )
             st.caption("Retrieves the most similar test-set trace(s) with a contrasting "
                       "predicted outcome -- not a perturbation method, complements the "
-                      "other three modes.")
+                      "other mode.")
         else:
-            st.caption("Exhaustive sweep over every node, edge, and feature. Slower, but the "
-                      "only source of edge importance.")
+            st.caption("Exhaustive sweep over every node, edge, and feature -- the only source "
+                      "of edge importance. Can optionally be compared against GNNExplainer-"
+                      "primary below.")
 
     explainer = get_explainer(database, cant)
 
     # Global (aggregate) tab dropped for now -- Local is the only view. render_global()/
-    # render_global_ig()/render_regenerate() are left defined but unused, not deleted,
-    # since this is a temporary scoping choice, not a permanent removal.
+    # render_regenerate() are left defined but unused, not deleted, since this is a
+    # temporary scoping choice, not a permanent removal.
     ids = order_ids_for(explainer)
     order_id = st.selectbox("Order ID", ids, key="order_picker")
 
@@ -544,42 +469,71 @@ def main():
     # the default view instead of silently missing it on a different cache key.
     n_events = None if selected_prefix == last_prefix else selected_prefix
 
-    if st.button("Explain this order"):
-        spinner_msg = ("Computing (GNNExplainer-primary can take ~1 minute on a cold cache)..."
-                      if mode == 'gnn_primary' else "Computing...")
+    # GNNExplainer-primary is no longer a standalone mode -- offered here as an optional
+    # comparison on top of LOO instead. Validity depends on the specific order+prefix
+    # selected (not just the explanation method), and order_id/n_events aren't known yet
+    # inside the sidebar block above, so this can't live there the way other per-mode
+    # controls do -- placed here instead, right after the prefix is chosen.
+    compare_gnn = False
+    if mode == 'loo':
+        check_graph = explainer._locate_test_graph(order_id, n_events)
         try:
-            with st.spinner(spinner_msg):
+            explainer._check_gnn_explainer_edges(check_graph, order_id)
+            gnn_valid = True
+        except ValueError:
+            gnn_valid = False
+        compare_gnn = st.checkbox(
+            "Compare against GNNExplainer-primary", value=False, key="compare_gnn_picker",
+            disabled=not gnn_valid,
+            help="Also runs GNNExplainer-primary and shows its node analysis graphs in place "
+                 "of LOO's own, for visual comparison. Tables and quality metrics below still "
+                 "reflect the exhaustive LOO sweep.",
+        )
+        if not gnn_valid:
+            st.caption("Not available for this prefix -- GNNExplainer can't initialize masks "
+                      "when a relation type has zero edges yet. Try a later prefix.")
+
+    if st.button("Explain this order"):
+        try:
+            with st.spinner("Computing..."):
                 result, cached = compute_local(explainer, database, cant, mode, order_id,
-                                                ig_method=ig_method,
                                                 min_gap_hours=min_gap_hours, direction=direction,
                                                 n_events=n_events, top_k=top_k)
-            if mode == 'ig':
-                render_local_ig(result)
-            elif mode == 'cf':
+            if mode == 'cf':
                 render_local_cf(result, explainer)
             else:
-                # Stored rather than rendered inline -- render_local()'s node-type/instance
-                # drill-down selectors need to trigger their own reruns (e.g. picking a
-                # different node) without forcing the user to re-click "Explain this order"
-                # each time. See the persisted-render block below.
-                st.session_state['local_ctx'] = (database, cant, mode, order_id, n_events, top_k)
+                gnn_result = None
+                if mode == 'loo' and compare_gnn:
+                    try:
+                        with st.spinner("Computing GNNExplainer comparison "
+                                        "(can take ~1 minute on a cold cache)..."):
+                            gnn_result, _ = compute_local(explainer, database, cant, 'gnn_primary',
+                                                           order_id, n_events=n_events, top_k=top_k)
+                    except ValueError as ex:
+                        st.warning(f"GNNExplainer comparison unavailable: {ex}")
+                # Stored rather than rendered inline -- lets the render survive reruns
+                # triggered by other sidebar interactions (e.g. Top-K) without forcing a
+                # re-click of "Explain this order" each time. See the persisted-render
+                # block below.
+                st.session_state['local_ctx'] = (database, cant, mode, order_id, n_events, top_k,
+                                                 compare_gnn)
                 st.session_state['local_result'] = result
                 st.session_state['local_cached'] = cached
+                st.session_state['local_gnn_result'] = gnn_result
         except ValueError as ex:
-            # explain_gnn_primary()'s guard against a legitimately-empty edge
-            # type (a real PyG/GNNExplainer limitation, not every order/prefix
-            # supports this mode) -- show a clear message instead of a raw traceback.
+            # explain_trace()'s own guards (e.g. a legitimately-empty edge type on the
+            # LOO side) -- show a clear message instead of a raw traceback.
             st.error(f"This order isn't explainable in {MODE_LABELS[mode]} mode: {ex}")
 
-    # loo/gnn_primary render from persisted state, not inline in the button block above --
-    # this fires both on the same rerun right after a successful click (ctx matches
-    # immediately) and on later reruns triggered by the drill-down selectors inside
-    # render_local() itself. Any sidebar change (dataset/mode/order/prefix/top_k) changes
-    # ctx and naturally stops the stale render, with no extra invalidation logic needed.
-    ctx = (database, cant, mode, order_id, n_events, top_k)
-    if mode in ('loo', 'gnn_primary') and st.session_state.get('local_ctx') == ctx:
+    # loo renders from persisted state, not inline in the button block above -- this fires
+    # both on the same rerun right after a successful click (ctx matches immediately) and
+    # on later reruns triggered by other controls. Any sidebar/toggle change changes ctx
+    # and naturally stops the stale render, with no extra invalidation logic needed.
+    ctx = (database, cant, mode, order_id, n_events, top_k, compare_gnn)
+    if mode == 'loo' and st.session_state.get('local_ctx') == ctx:
         render_local(st.session_state['local_result'], st.session_state['local_cached'],
-                    mode, explainer, order_id, top_k=top_k)
+                    explainer, order_id, top_k=top_k,
+                    gnn_result=st.session_state.get('local_gnn_result'))
 
 
 if __name__ == '__main__':
