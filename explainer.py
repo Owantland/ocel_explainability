@@ -353,11 +353,187 @@ class Explainer(Modelling):
                 top_node_feature_importances, baseline_value)
 
     # ------------------------------------------------------------------
+    # Shapley-based explanations (perturbation, permutation-sampling)
+    # ------------------------------------------------------------------
+    # LOO's own shift, delta(v_j) = y_hat - Phi(p, X^{-v_j}), is mathematically one
+    # specific term of the Shapley sum -- the marginal contribution of v_j in the
+    # coalition "every other candidate element present, v_j alone removed." The
+    # methods below generalize this to the FULL Shapley value: the average marginal
+    # contribution of v_j across every possible coalition ordering of the candidate
+    # set, not just the single "everything else present" ordering LOO checks. This
+    # is why coalitions here vary only over the caller-supplied candidate set (e.g.
+    # LOO's own top-K), with the rest of the graph always left at its real value --
+    # v(FullSet) is then exactly the real baseline_value, keeping the two methods
+    # directly comparable on the same elements. See compare_loo_vs_shapley().
+
+    def _permutation_shapley(self, elements, value_fn, n_samples=100):
+        """General permutation-sampling Shapley estimator: average, over n_samples
+        random orderings of `elements`, each element's marginal contribution
+        value_fn(prefix + [e]) - value_fn(prefix) at its position in that ordering.
+        v(empty set) is cached once (same regardless of ordering). Cost is exactly
+        n_samples * len(elements) calls to value_fn -- one incremental evaluation
+        per permutation step, not a re-evaluation from scratch per coalition."""
+        import random
+
+        v_empty = value_fn(frozenset())
+        totals = {e: 0.0 for e in elements}
+        for _ in range(n_samples):
+            perm = list(elements)
+            random.shuffle(perm)
+            prefix, prev_value = [], v_empty
+            for e in perm:
+                prefix.append(e)
+                new_value = value_fn(frozenset(prefix))
+                totals[e] += new_value - prev_value
+                prev_value = new_value
+        return {e: totals[e] / n_samples for e in elements}
+
+    def shapley_node_importance(self, graph, object_idx, baseline_value, node_keys, n_samples=100):
+        """Node-level Shapley values for a caller-supplied list of (node_type, idx)
+        keys -- same signature shape as _loo_shift_for_nodes() for direct
+        comparability. Coalitions vary only over node_keys: nodes in node_keys but
+        not in the current coalition are zeroed, nodes in the coalition and every
+        node OUTSIDE node_keys entirely keep their real features. Returns
+        {(node_type, idx): shapley_value}, same hours-denominated units as LOO."""
+        def value_fn(coalition):
+            # Returns the raw prediction, not baseline-minus-prediction: the Shapley
+            # marginal contribution value_fn(S+e) - value_fn(S) already reduces to
+            # LOO's own y_hat - Phi(removed) sign convention for the coalition
+            # S=FullSet\{e} case (baseline_value cancels out of the difference) --
+            # pre-subtracting baseline_value here would double-negate that.
+            perturbed = graph.clone()
+            for node_type, idx in node_keys:
+                if (node_type, idx) not in coalition:
+                    perturbed[node_type].x[idx] = 0.0
+            return self._predict_value_for_graph(graph, object_idx, perturbed_graph=perturbed)
+
+        return self._permutation_shapley(list(node_keys), value_fn, n_samples=n_samples)
+
+    def shapley_feature_importance_for_node(self, graph, node_type, node_idx, baseline_value,
+                                            target_object_idx, feature_indices=None, n_samples=100):
+        """Feature-level Shapley values for one node's features -- the analogue of
+        reg_feature_importance_for_node_in_graph(). Coalitions vary over that node's
+        feature dimensions (feature_indices defaults to every nonzero feature,
+        matching LOO's own skip-zero-features optimization); the rest of the graph,
+        including this node's OTHER dimensions outside the coalition being zeroed,
+        is otherwise real. Returns {feature_idx: shapley_value}."""
+        x = graph[node_type].x[node_idx]
+        if feature_indices is None:
+            feature_indices = [f for f in range(x.size(0)) if x[f].item() != 0.0]
+
+        def value_fn(coalition):
+            # See shapley_node_importance()'s value_fn -- same reasoning: return the
+            # raw prediction, not baseline-minus-prediction.
+            perturbed = graph.clone()
+            for f in feature_indices:
+                if f not in coalition:
+                    perturbed[node_type].x[node_idx, f] = 0.0
+            return self._predict_value_for_graph(graph, target_object_idx, perturbed_graph=perturbed)
+
+        return self._permutation_shapley(feature_indices, value_fn, n_samples=n_samples)
+
+    def shapley_edge_importance(self, graph, object_idx, baseline_value, edge_keys, n_samples=100):
+        """Edge-level Shapley values for a caller-supplied list of (edge_type, edge_idx)
+        keys -- same reasoning as shapley_node_importance(), but masking edges via the
+        same boolean-mask pattern reg_explanation()'s own edge sweep already uses
+        (explainer.py:322-334) instead of zeroing node features. Returns
+        {(edge_type, edge_idx): shapley_value}."""
+        from collections import defaultdict
+
+        # Group candidate edge indices by edge_type so each edge_type's edge_index is
+        # masked once per coalition evaluation, not once per candidate edge.
+        by_type = defaultdict(list)
+        for edge_type, e in edge_keys:
+            by_type[edge_type].append(e)
+
+        def value_fn(coalition):
+            perturbed = graph.clone()
+            for edge_type, candidate_es in by_type.items():
+                edge_index = graph[edge_type].edge_index
+                num_edges = edge_index.size(1)
+                keep = torch.ones(num_edges, dtype=torch.bool, device=self.device)
+                for e in candidate_es:
+                    if (edge_type, e) not in coalition:
+                        keep[e] = False
+                perturbed[edge_type].edge_index = edge_index[:, keep]
+            return self._predict_value_for_graph(graph, object_idx, perturbed_graph=perturbed)
+
+        return self._permutation_shapley(list(edge_keys), value_fn, n_samples=n_samples)
+
+    def compare_loo_vs_shapley(self, order_id, top_k=10, n_samples=100, n_events=None, save_dir=None):
+        """Runs LOO and Shapley on the SAME candidate set from one trace and reports
+        them side by side -- the concrete, empirical answer to how the two methods
+        differ, not just the theoretical one. Candidate set is LOO's own top_k nodes
+        (by |shift|), so both methods explain literally the same elements."""
+        import pandas as pd
+
+        if save_dir is None:
+            save_dir = os.path.join(self.path_dict['explainer_path'], "shapley")
+        os.makedirs(save_dir, exist_ok=True)
+
+        graph = self._locate_test_graph(order_id, n_events)
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        node_imp, _, _, _, baseline_value = self.reg_explanation(graph, 0, None, top_k)
+        candidates = [(nt, idx) for nt, idx, _, _, _ in node_imp[:top_k]]
+        loo_signed = {(nt, idx): signed for nt, idx, _, _, signed in node_imp[:top_k]}
+
+        shapley_values = self.shapley_node_importance(
+            graph, 0, baseline_value, candidates, n_samples=n_samples
+        )
+
+        id_map = self._decode_all_identifiers(graph, order_id)
+        rows = []
+        for nt, idx in candidates:
+            decoded = id_map.get((nt, idx))
+            label = f"{nt}={decoded}" if decoded else f"{nt}[{idx}]"
+            rows.append({
+                'node_label': label,
+                'loo_signed_shift': loo_signed[(nt, idx)] / 3600.0,
+                'shapley_value': shapley_values[(nt, idx)] / 3600.0,
+            })
+        df = pd.DataFrame(rows)
+        df['loo_rank'] = df['loo_signed_shift'].abs().rank(ascending=False, method='min').astype(int)
+        df['shapley_rank'] = df['shapley_value'].abs().rank(ascending=False, method='min').astype(int)
+
+        try:
+            from scipy.stats import spearmanr
+            rho, _ = spearmanr(df['loo_rank'], df['shapley_rank'])
+        except ImportError:
+            rho = df['loo_rank'].corr(df['shapley_rank'], method='spearman')
+        print(f"LOO vs. Shapley rank agreement (Spearman's rho): {rho:.3f}")
+
+        csv_path = os.path.join(save_dir, f"loo_vs_shapley_{order_id}.csv")
+        df.to_csv(csv_path, index=False)
+
+        fig, ax = plt.subplots(figsize=(8, max(3, len(df) * 0.5)))
+        y = range(len(df))
+        width = 0.35
+        ax.barh([i + width / 2 for i in y], df['loo_signed_shift'], height=width,
+               color="#4C72B0", alpha=0.85, label="LOO")
+        ax.barh([i - width / 2 for i in y], df['shapley_value'], height=width,
+               color="#DD8452", alpha=0.85, label="Shapley")
+        ax.set_yticks(list(y))
+        ax.set_yticklabels(df['node_label'], fontsize=9)
+        ax.invert_yaxis()
+        ax.set_xlabel("Signed value shift (hours)")
+        ax.set_title(f"LOO vs. Shapley, order #{order_id} (Spearman's rho={rho:.3f})")
+        ax.legend()
+        ax.grid(True, axis="x", alpha=0.3)
+        plt.tight_layout()
+        chart_path = os.path.join(save_dir, f"loo_vs_shapley_{order_id}.png")
+        plt.savefig(chart_path, dpi=150)
+        plt.close()
+
+        return df
+
+    # ------------------------------------------------------------------
     # Explainability — visualizations and entry points
     # ------------------------------------------------------------------
 
     def plot_feature_importances(self, node_type, feature_importances, save_path, order_id=None,
-                                 label_map=None):
+                                 label_map=None, xlabel=None):
         """Horizontal bar chart of per-feature value shifts for one node. Bar color
         encodes sign (green = this feature's real value pushed the prediction toward
         a longer remaining time than the population-mean substitute would; red =
@@ -391,7 +567,7 @@ class Explainer(Modelling):
         ax.set_yticks(range(len(feats)))
         ax.set_yticklabels(feats, fontsize=9)
         ax.invert_yaxis()
-        ax.set_xlabel("Value shift if removed (hours)")
+        ax.set_xlabel(xlabel if xlabel is not None else "Value shift if removed (hours)")
         title = f"Feature importance — {node_type} node"
         if order_id is not None:
             title += f", order #{order_id}"
@@ -578,7 +754,7 @@ class Explainer(Modelling):
         plt.savefig(save_path, dpi=150)
         plt.close()
 
-    def plot_node_type_summary(self, node_importances, save_path):
+    def plot_node_type_summary(self, node_importances, save_path, xlabel=None):
         """Bar chart of total influence per node type across the whole trace. Bar
         height is the magnitude sum (total impact); bar color reflects the sign of
         that type's NET signed sum (its dominant direction across instances)."""
@@ -597,7 +773,7 @@ class Explainer(Modelling):
         counts = [type_count[t] for t in types]
         self.plot_node_type_bars(
             rows, save_path, "Node type importance summary",
-            "Cumulative value shift if type removed (hours)",
+            xlabel if xlabel is not None else "Cumulative value shift if type removed (hours)",
             secondary_series=counts, secondary_label="Number of nodes of this type",
         )
 
@@ -734,6 +910,160 @@ class Explainer(Modelling):
         print(f"  Characterization: {metrics['characterization_score']:.4f}  (↑ better, max 1.0)")
         print(f"  Node sparsity   : {metrics['node_sparsity']:.1%}")
         print(f"  Edge sparsity   : {metrics['edge_sparsity']:.1%}")
+        print(f"\nOutputs saved to: {save_dir}")
+        print('='*60)
+
+        return {
+            "order_id": order_id,
+            "predicted_hours": baseline_value / 3600,
+            "n_events": explain_subgraph['Events'].x.size(0) if 'Events' in explain_subgraph.node_types else 0,
+            "node_importances": node_importances,
+            "edge_importances": edge_importances,
+            "seed_feature_importances": seed_feats,
+            "top_neighbor_feature_importances": top_neighbor_feats,
+            "top_nodes_per_type": top_per_type,
+            "metrics": metrics,
+            "save_dir": save_dir,
+        }
+
+    def explain_trace_shapley(self, order_id, top_k=5, n_samples=100, save_dir=None, n_events=None):
+        """Single-trace Shapley explanation -- the cost-bounded replacement for
+        explain_trace(). Returns the EXACT same dict shape (same keys, same
+        (key, shift, large, signed_shift)-tuple lists) so every downstream consumer
+        (reg_explanation_subgraph, reg_visualize_explanation_subgraph,
+        evaluate_explanation_quality, dashboard.py's render_local()) works unchanged
+        -- only how shift/signed_shift get computed differs.
+
+        reg_explanation() still runs its full exhaustive sweep first: some exhaustive
+        pass is unavoidable to know which elements are worth explaining at all. Only
+        that identified candidate set (this trace's own top_k nodes/edges plus each
+        node type's own top 3, matching top_nodes_per_type()'s scope; the features
+        reg_explanation() already truncated to top_k) gets Shapley-requantified --
+        bounding cost to roughly (shown elements) x n_samples rather than
+        (everything in the graph) x n_samples. explain_trace() itself is untouched:
+        compare_loo_vs_shapley() and any other citable pathway still needs it exactly
+        as it was.
+        """
+        if save_dir is None:
+            suffix = f"_ev{n_events}" if n_events is not None else ""
+            save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}{suffix}_shapley")
+        os.makedirs(save_dir, exist_ok=True)
+
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        explain_subgraph = self._locate_test_graph(order_id, n_events)
+
+        (node_importances, edge_importances,
+         seed_feats, top_neighbor_feats, baseline_value) = self.reg_explanation(
+            explain_subgraph, 0, order_id, top_k
+        )
+
+        def _rebuild_node_or_edge_tuples(shapley_dict):
+            out = []
+            for key, sv in shapley_dict.items():
+                shift = abs(sv)
+                large = shift > self.target_std.item()
+                out.append((key[0], key[1], shift, large, sv))
+            out.sort(key=lambda t: t[2], reverse=True)
+            return out
+
+        def _rebuild_feature_tuples(shapley_dict):
+            out = []
+            for f, sv in shapley_dict.items():
+                shift = abs(sv)
+                large = shift > self.target_std.item()
+                out.append((f, shift, large, sv))
+            out.sort(key=lambda t: t[1], reverse=True)
+            return out
+
+        # Candidate set: this trace's own flat top_k nodes, unioned with each node
+        # type's own top 3 (so top_nodes_per_type() below stays meaningful for types
+        # that didn't make the flat top_k) -- both derived from reg_explanation()'s
+        # already-sorted node_importances, no extra forward passes yet.
+        flat_node_candidates = [(nt, idx) for nt, idx, _, _, _ in node_importances[:top_k]]
+        per_type = self.top_nodes_per_type(node_importances, top_n=3)
+        type_node_candidates = [(nt, idx) for nt, entries in per_type.items() for idx, _, _, _ in entries]
+        node_candidates = list(dict.fromkeys(flat_node_candidates + type_node_candidates))
+        edge_candidates = [(et, e) for et, e, _, _, _ in edge_importances[:top_k]]
+
+        node_shapley = (self.shapley_node_importance(explain_subgraph, 0, baseline_value,
+                                                      node_candidates, n_samples=n_samples)
+                        if node_candidates else {})
+        edge_shapley = (self.shapley_edge_importance(explain_subgraph, 0, baseline_value,
+                                                      edge_candidates, n_samples=n_samples)
+                        if edge_candidates else {})
+
+        seed_feat_indices = [f for f, _, _, _ in seed_feats]
+        seed_shapley = (self.shapley_feature_importance_for_node(
+            explain_subgraph, self.kpi_viewpoint, 0, baseline_value, 0,
+            feature_indices=seed_feat_indices, n_samples=n_samples)
+            if seed_feat_indices else {})
+
+        if node_importances and top_neighbor_feats:
+            top_nt, top_ni = node_importances[0][0], node_importances[0][1]
+            top_feat_indices = [f for f, _, _, _ in top_neighbor_feats]
+            top_shapley = self.shapley_feature_importance_for_node(
+                explain_subgraph, top_nt, top_ni, baseline_value, 0,
+                feature_indices=top_feat_indices, n_samples=n_samples
+            )
+        else:
+            top_shapley = {}
+
+        node_importances = _rebuild_node_or_edge_tuples(node_shapley)
+        edge_importances = _rebuild_node_or_edge_tuples(edge_shapley)
+        seed_feats = _rebuild_feature_tuples(seed_shapley)
+        top_neighbor_feats = _rebuild_feature_tuples(top_shapley)
+
+        metrics = self.evaluate_explanation_quality(
+            explain_subgraph, 0, node_importances, edge_importances,
+            node_top_k=10, edge_top_k=15, verbose=False
+        )
+
+        self.plot_feature_importances(
+            self.kpi_viewpoint, seed_feats,
+            os.path.join(save_dir, f"feat_importance_{self.kpi_viewpoint}.png"),
+            order_id=order_id, xlabel="Shift in Hours"
+        )
+        if node_importances:
+            top_nt, top_ni, _, _, _ = node_importances[0]
+            self.plot_feature_importances(
+                top_nt, top_neighbor_feats,
+                os.path.join(save_dir, f"feat_importance_{top_nt}.png"),
+                order_id=order_id, xlabel="Shift in Hours"
+            )
+
+        self.plot_node_type_summary(
+            node_importances, os.path.join(save_dir, "node_type_summary.png"),
+            xlabel="Shift in Hours"
+        )
+
+        id_map = self._decode_all_identifiers(explain_subgraph, order_id, n_events)
+
+        exp_graph = self.reg_explanation_subgraph(
+            explain_subgraph, 0, node_importances, edge_importances, node_top_k=10
+        )
+        self.reg_visualize_explanation_subgraph(
+            exp_graph, save_path=os.path.join(save_dir, "explanation_subgraph.png"),
+            id_map=id_map
+        )
+
+        top_per_type = self.top_nodes_per_type(node_importances, top_n=3)
+
+        import pandas as pd
+        pd.DataFrame([
+            {'node_type': nt, 'rank': rank, 'node_idx': idx,
+             'identifier': id_map.get((nt, idx), ''),
+             'shift_hours': shift / 3600, 'signed_shift_hours': signed_shift / 3600,
+             'large_shift': large}
+            for nt, entries in top_per_type.items()
+            for rank, (idx, shift, large, signed_shift) in enumerate(entries, 1)
+        ]).to_csv(os.path.join(save_dir, "top_nodes_per_type.csv"), index=False)
+
+        print(f"\n{'='*60}")
+        print(f"Shapley explanation for {self.kpi_viewpoint} #{order_id} "
+              f"(candidate set: LOO top_k={top_k} + per-type top 3, n_samples={n_samples})")
+        print(f"  Predicted remaining time : {round(baseline_value / 3600)} hours")
         print(f"\nOutputs saved to: {save_dir}")
         print('='*60)
 
@@ -912,13 +1242,21 @@ class Explainer(Modelling):
         # granularity than type_signed_shifts above (which only aggregates at the
         # node-TYPE level, losing individual identity).
         explanation_signed_shifts = defaultdict(list)
+        # Per-"NodeType.feature_name" signed shifts, flat across node types -- feeds the
+        # dashboard's "top K features" chart, the feature-level analogue of
+        # explanation_signed_shifts above. Dot separator (not "=") deliberately distinct from
+        # explanation_signed_shifts' node-identity labels so the two charts' labels are never
+        # visually confused, and so two node types sharing a feature name (e.g. Orders.price
+        # and Items.price) don't collide.
+        feature_signed_shifts = defaultdict(list)
         all_metrics = []
+        names = self.feature_names
 
         n_failed = 0
         for g in sample:
             oid = int(g[self.kpi_viewpoint]['id'][0].item()) if self.kpi_viewpoint in g.node_types else None
             try:
-                (node_imp, edge_imp, seed_feats, _, _) = self.reg_explanation(g, 0, None, top_k)
+                (node_imp, edge_imp, seed_feats, top_node_feats, _) = self.reg_explanation(g, 0, None, top_k)
             except Exception as ex:
                 n_failed += 1
                 print(f"  [trace failed] order={oid}: {type(ex).__name__}: {ex}")
@@ -932,8 +1270,22 @@ class Explainer(Modelling):
                 label = f"{nt}={decoded}" if decoded else nt
                 explanation_signed_shifts[label].append(signed_shift / 3600.0)
 
-            for f, shift, _, _ in seed_feats:
+            for f, shift, _, signed_shift in seed_feats:
                 feat_shifts[self.kpi_viewpoint][f].append(shift / 3600)
+                feat_names_vp = names.get(self.kpi_viewpoint, [])
+                feat_label = feat_names_vp[f] if f < len(feat_names_vp) else f"feat_{f}"
+                feature_signed_shifts[f"{self.kpi_viewpoint}.{feat_label}"].append(signed_shift / 3600.0)
+
+            # top_node_feats is per-feature LOO for whichever node ranked #1 in node_imp that
+            # trace (any node type, not just the viewpoint) -- already computed inside
+            # reg_explanation() regardless of whether it's used, so capturing it here for the
+            # features chart costs nothing extra.
+            if node_imp and top_node_feats:
+                top_nt = node_imp[0][0]
+                feat_names_top = names.get(top_nt, [])
+                for f, shift, _, signed_shift in top_node_feats:
+                    feat_label = feat_names_top[f] if f < len(feat_names_top) else f"feat_{f}"
+                    feature_signed_shifts[f"{top_nt}.{feat_label}"].append(signed_shift / 3600.0)
 
             m = self.evaluate_explanation_quality(g, 0, node_imp, edge_imp,
                                                    node_top_k=10, edge_top_k=15, verbose=False)
@@ -968,7 +1320,17 @@ class Explainer(Modelling):
             os.path.join(save_dir, "aggregate_explanation_bars.csv"), index=False
         )
 
-        names = self.feature_names
+        # Feature-level analogue of the block above -- flat, cross-node-type ranking of
+        # "NodeType.feature_name" labels instead of node identities. Feeds the dashboard's
+        # "top K features" chart, the same way aggregate_explanation_bars.csv feeds "top K nodes".
+        feature_summary = self.plot_aggregate_explanation_bars(
+            feature_signed_shifts, os.path.join(save_dir, "aggregate_feature_bars.png"),
+            "Global feature attribution for remaining time prediction",
+            dataset_label=self.database, n_traces=len(sample), top_n=20,
+        )
+        pd.DataFrame(feature_summary).to_csv(
+            os.path.join(save_dir, "aggregate_feature_bars.csv"), index=False
+        )
         for nt, fdict in feat_shifts.items():
             feat_names_nt = names.get(nt, [])
             items = sorted(fdict.items(), key=lambda kv: -sum(kv[1]) / max(len(kv[1]), 1))
@@ -1016,6 +1378,186 @@ class Explainer(Modelling):
             std_v = statistics.stdev(vals) if len(vals) > 1 else 0.0
             print(f"  {k:25s}: {mean_v:.4f} ± {std_v:.4f}")
         print(f"\nAggregate outputs saved to: {save_dir}")
+
+        return all_metrics
+
+    def explain_aggregate_shapley(self, n_traces=50, top_k=5, n_samples=30, revisit_n=3,
+                                  max_revisit_candidates=6, save_dir=None):
+        """Aggregate Shapley replacement for the dashboard's two flat "top K" bar
+        charts (nodes, features) only -- NOT the per-node-type chart or the depth
+        heatmap, which stay LOO-based (both are exhaustive-by-design; Shapley-izing
+        them fully would multiply their already-largest cost ~100x -- see the
+        planning notes for explain_trace_shapley()).
+
+        Preserves explain_aggregate()'s own SELECTION semantics exactly -- the same
+        exhaustive per-trace LOO pooling (unchanged cost) decides who makes the top
+        ~20 for each chart. Only the DISPLAYED magnitude for those winners changes:
+        each winning label gets Shapley-requantified by revisiting up to revisit_n
+        of the traces where it actually occurred, using a bounded candidate set (the
+        target instance/feature plus up to max_revisit_candidates-1 other same-type
+        instances/features from that same trace) -- this is what actually captures
+        redundancy (a singleton candidate set would trivially collapse back to
+        LOO's own value). Writes to the SAME file paths explain_aggregate() uses for
+        these two charts, so render_loo_aggregate()'s reading code needs no changes.
+        explain_aggregate() itself is untouched -- still needed for the node-type
+        chart and depth heatmap, which keep calling it as before.
+
+        Defaults verified empirically on real data at n_traces=50: the original
+        planning estimate (n_samples=100, revisit_n=5, max_revisit_candidates=10)
+        actually cost ~334s, well over the ~100s planned -- these lower defaults
+        cost ~81s instead, confirmed to still surface the same redundancy-driven
+        corrections (see logistics' BringToLoadingBay case, corrected this
+        session's earlier compare_loo_vs_shapley() runs) while staying close to
+        the originally planned budget."""
+        if save_dir is None:
+            save_dir = os.path.join(self.path_dict['explainer_path'], "aggregate")
+        os.makedirs(save_dir, exist_ok=True)
+
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        last_event_graphs = [g for g in self.test_data
+                             if g[self.kpi_viewpoint]['last_event'][0].item()]
+        sample = last_event_graphs[:n_traces]
+        print(f"Running aggregate Shapley explanation on {len(sample)} traces "
+              f"(identification via exhaustive LOO, unchanged cost; only the top ~20 "
+              f"winners per chart get Shapley-requantified)…")
+
+        import numpy as np
+        import pandas as pd
+        from collections import defaultdict
+        explanation_signed_shifts = defaultdict(list)
+        explanation_sources = defaultdict(list)  # label -> [(trace_idx, node_type, idx), ...]
+        feature_signed_shifts = defaultdict(list)
+        feature_sources = defaultdict(list)  # label -> [(trace_idx, node_type, node_idx, feat_idx), ...]
+        all_metrics = []
+        names = self.feature_names
+        baseline_values = {}
+
+        n_failed = 0
+        for trace_idx, g in enumerate(sample):
+            oid = int(g[self.kpi_viewpoint]['id'][0].item()) if self.kpi_viewpoint in g.node_types else None
+            try:
+                (node_imp, edge_imp, seed_feats, top_node_feats, baseline_value) = self.reg_explanation(g, 0, None, top_k)
+            except Exception as ex:
+                n_failed += 1
+                print(f"  [trace failed] order={oid}: {type(ex).__name__}: {ex}")
+                continue
+            baseline_values[trace_idx] = baseline_value
+
+            id_map = self._decode_all_identifiers(g, oid) if oid is not None else {}
+            for nt, idx, shift, _, signed_shift in node_imp:
+                decoded = id_map.get((nt, idx))
+                label = f"{nt}={decoded}" if decoded else nt
+                explanation_signed_shifts[label].append(signed_shift / 3600.0)
+                explanation_sources[label].append((trace_idx, nt, idx))
+
+            for f, shift, _, signed_shift in seed_feats:
+                feat_names_vp = names.get(self.kpi_viewpoint, [])
+                feat_label = feat_names_vp[f] if f < len(feat_names_vp) else f"feat_{f}"
+                label = f"{self.kpi_viewpoint}.{feat_label}"
+                feature_signed_shifts[label].append(signed_shift / 3600.0)
+                feature_sources[label].append((trace_idx, self.kpi_viewpoint, 0, f))
+
+            if node_imp and top_node_feats:
+                top_nt, top_ni = node_imp[0][0], node_imp[0][1]
+                feat_names_top = names.get(top_nt, [])
+                for f, shift, _, signed_shift in top_node_feats:
+                    feat_label = feat_names_top[f] if f < len(feat_names_top) else f"feat_{f}"
+                    label = f"{top_nt}.{feat_label}"
+                    feature_signed_shifts[label].append(signed_shift / 3600.0)
+                    feature_sources[label].append((trace_idx, top_nt, top_ni, f))
+
+            m = self.evaluate_explanation_quality(g, 0, node_imp, edge_imp,
+                                                   node_top_k=10, edge_top_k=15, verbose=False)
+            all_metrics.append(m)
+
+        def _top_labels(pooled, top_n=20):
+            scored = [(label, abs(sum(vals) / len(vals))) for label, vals in pooled.items() if vals]
+            scored.sort(key=lambda t: t[1], reverse=True)
+            return [label for label, _ in scored[:top_n]]
+
+        def _revisit_node_label(nt, idx, trace_idx):
+            g = sample[trace_idx]
+            baseline_value = baseline_values[trace_idx]
+            all_same_type = [(nt, j) for j in range(g[nt].x.size(0))] if nt in g.node_types else [(nt, idx)]
+            if len(all_same_type) > max_revisit_candidates:
+                others = [k for k in all_same_type if k != (nt, idx)][:max_revisit_candidates - 1]
+                candidates = others + [(nt, idx)]
+            else:
+                candidates = all_same_type
+            sv = self.shapley_node_importance(g, 0, baseline_value, candidates, n_samples=n_samples)
+            return sv[(nt, idx)] / 3600.0
+
+        def _revisit_feature_label(nt, node_idx, feat_idx, trace_idx):
+            g = sample[trace_idx]
+            baseline_value = baseline_values[trace_idx]
+            all_feats = [f for f in range(g[nt].x.size(1)) if g[nt].x[node_idx, f].item() != 0.0]
+            if feat_idx not in all_feats:
+                all_feats.append(feat_idx)
+            if len(all_feats) > max_revisit_candidates:
+                others = [f for f in all_feats if f != feat_idx][:max_revisit_candidates - 1]
+                candidates = others + [feat_idx]
+            else:
+                candidates = all_feats
+            sv = self.shapley_feature_importance_for_node(g, nt, node_idx, baseline_value, 0,
+                                                           feature_indices=candidates, n_samples=n_samples)
+            return sv[feat_idx] / 3600.0
+
+        print(f"  Shapley-requantifying top nodes…")
+        winners = _top_labels(explanation_signed_shifts, top_n=20)
+        shapley_node_shifts = defaultdict(list)
+        for label in winners:
+            for trace_idx, nt, idx in explanation_sources[label][:revisit_n]:
+                shapley_node_shifts[label].append(_revisit_node_label(nt, idx, trace_idx))
+
+        explanation_summary = self.plot_aggregate_explanation_bars(
+            shapley_node_shifts, os.path.join(save_dir, "aggregate_explanation_bars.png"),
+            "Global Shapley explanations for remaining time prediction",
+            dataset_label=self.database, n_traces=len(sample), top_n=20,
+        )
+        pd.DataFrame(explanation_summary).to_csv(
+            os.path.join(save_dir, "aggregate_explanation_bars.csv"), index=False
+        )
+
+        print(f"  Shapley-requantifying top features…")
+        feat_winners = _top_labels(feature_signed_shifts, top_n=20)
+        shapley_feature_shifts = defaultdict(list)
+        for label in feat_winners:
+            for trace_idx, nt, node_idx, feat_idx in feature_sources[label][:revisit_n]:
+                shapley_feature_shifts[label].append(_revisit_feature_label(nt, node_idx, feat_idx, trace_idx))
+
+        feature_summary = self.plot_aggregate_explanation_bars(
+            shapley_feature_shifts, os.path.join(save_dir, "aggregate_feature_bars.png"),
+            "Global Shapley feature attribution for remaining time prediction",
+            dataset_label=self.database, n_traces=len(sample), top_n=20,
+        )
+        pd.DataFrame(feature_summary).to_csv(
+            os.path.join(save_dir, "aggregate_feature_bars.csv"), index=False
+        )
+
+        import csv, statistics
+        metric_keys = ["fidelity_plus", "fidelity_minus", "characterization_score",
+                       "node_sparsity", "edge_sparsity"]
+        csv_path = os.path.join(save_dir, "aggregate_metrics.csv")
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["trace"] + metric_keys)
+            writer.writeheader()
+            for i, m in enumerate(all_metrics):
+                writer.writerow({"trace": i, **{k: round(m[k], 6) for k in metric_keys}})
+            summary = {"trace": "mean"}
+            for k in metric_keys:
+                vals = [m[k] for m in all_metrics]
+                summary[k] = round(sum(vals) / len(vals), 6) if vals else float("nan")
+            writer.writerow(summary)
+            summary_std = {"trace": "std"}
+            for k in metric_keys:
+                vals = [m[k] for m in all_metrics]
+                summary_std[k] = round(statistics.stdev(vals), 6) if len(vals) > 1 else 0.0
+            writer.writerow(summary_std)
+
+        print(f"\nAggregate Shapley outputs saved to: {save_dir} "
+              f"({n_failed} failed/skipped out of {len(sample)} sampled)")
 
         return all_metrics
 
@@ -1107,6 +1649,125 @@ class Explainer(Modelling):
         print(f"  Saved LOO depth-stratified importance to: {save_dir}")
 
         return {'labels': labels, 'node_types': all_types, 'heat': heat}
+
+    def plot_feature_depth_heatmap(self, row_labels, depth_labels, matrix, save_path, title):
+        """Generic imshow heatmap of row_labels (e.g. features) x depth_labels (prefix-depth
+        bins) -- same visual structure as explain_loo_by_depth()'s own inline heatmap, but
+        standalone/reusable so that already-verified method isn't touched. Used both for
+        explain_feature_attribution_by_depth()'s canonical (all-feature) save and for the
+        dashboard's live Top-K-sliced re-render."""
+        import numpy as np
+
+        if not row_labels or not depth_labels:
+            return
+        matrix = np.asarray(matrix)
+        fig, ax = plt.subplots(figsize=(max(6, len(depth_labels) * 0.9 + 2), len(row_labels) * 0.4 + 2))
+        im = ax.imshow(matrix, aspect='auto', cmap='YlOrRd')
+        ax.set_xticks(range(len(depth_labels)))
+        ax.set_xticklabels(depth_labels)
+        ax.set_yticks(range(len(row_labels)))
+        ax.set_yticklabels(row_labels, fontsize=9)
+        ax.set_xlabel("Prefix depth (n events seen)")
+        ax.set_title(title)
+        plt.colorbar(im, ax=ax, shrink=0.8)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150)
+        plt.close()
+
+    def explain_feature_attribution_by_depth(self, node_type=None, n_traces=50, save_dir=None):
+        """Depth-stratified, per-FEATURE LOO importance for one selected node type -- the
+        feature-level analogue of explain_loo_by_depth() (which stops at node-type
+        granularity) and the depth-resolved analogue of explain_aggregate()'s
+        aggregate_feat_importance_{node_type}.png (which pools all depths together and, in
+        practice, is only ever populated for self.kpi_viewpoint). Powers the dashboard's
+        Aggregate-tab node-type selector.
+
+        node_type defaults to self.kpi_viewpoint (the dataset's default viewpoint object).
+        Iterates ALL test-set prefixes (not just last-event, like explain_loo_by_depth() and
+        unlike explain_aggregate()) so the depth axis actually has spread -- last-event graphs
+        cluster in the deepest bin alone.
+
+        For non-viewpoint node types a single prefix can contain zero, one, or many instances
+        of node_type (e.g. many Events nodes) -- every instance's per-feature LOO shift is
+        pooled into that prefix's depth bin, same pooling convention explain_aggregate()/
+        explain_loo_by_depth() already use (no per-instance averaging step).
+        """
+        import numpy as np
+        import pandas as pd
+
+        if node_type is None:
+            node_type = self.kpi_viewpoint
+        if save_dir is None:
+            save_dir = os.path.join(self.path_dict['explainer_path'], "aggregate")
+        os.makedirs(save_dir, exist_ok=True)
+
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        feat_names = self.feature_names.get(node_type, [])
+        n_feats = len(feat_names) if feat_names else 1
+
+        graphs = self.test_data if n_traces is None else self.test_data[:n_traces]
+        n = len(graphs)
+        print(f"\nDepth-stratified feature LOO for node_type={node_type}: {n} prefixes")
+
+        bin_accum = {lbl: {} for _, _, lbl in self._DEPTH_BINS}  # lbl -> {feature_idx: [shifts_h]}
+        n_used = 0
+        for i, g in enumerate(graphs):
+            if i % max(1, n // 10) == 0:
+                print(f"  Feature-by-depth LOO: {100 * i // n}%")
+            n_events = g['Events'].x.size(0) if 'Events' in g.node_types else 0
+            lbl = next((l for lo, hi, l in self._DEPTH_BINS if lo <= n_events <= hi), None)
+            if lbl is None or g[self.kpi_viewpoint].y.shape[0] == 0:
+                continue
+            if node_type not in g.node_types or g[node_type].x.size(0) == 0:
+                continue
+            try:
+                baseline_value = self._predict_value_for_graph(g, 0)
+                for idx in range(g[node_type].x.size(0)):
+                    feats = self.reg_feature_importance_for_node_in_graph(
+                        g, node_type, idx, baseline_value, target_object_idx=0, top_k=n_feats
+                    )
+                    for f, shift, _, _ in feats:
+                        bin_accum[lbl].setdefault(f, []).append(shift / 3600.0)
+            except Exception as ex:
+                print(f"  [skipped] prefix {i}: {type(ex).__name__}: {ex}")
+                continue
+            n_used += 1
+        print(f"  Feature-by-depth LOO: 100%  ({n_used}/{n} prefixes used)")
+
+        labels = [lbl for _, _, lbl in self._DEPTH_BINS if bin_accum[lbl]]
+        if not labels:
+            print("  No prefixes with usable data for feature-by-depth LOO -- skipped")
+            return None
+
+        all_feats = sorted({f for lbl in labels for f in bin_accum[lbl]})
+        feat_labels = [feat_names[f] if f < len(feat_names) else f"feat_{f}" for f in all_feats]
+        heat = np.array([
+            [np.mean(bin_accum[lbl][f]) if bin_accum[lbl].get(f) else 0.0 for lbl in labels]
+            for f in all_feats
+        ])
+
+        heatmap_path = os.path.join(save_dir, f"feat_attr_by_depth_{node_type}.png")
+        self.plot_feature_depth_heatmap(
+            feat_labels, labels, heat, heatmap_path,
+            f"{node_type} feature LOO importance by prefix depth (mean |shift|, hours)",
+        )
+
+        rows = []
+        for lbl in labels:
+            for f, feat_label in zip(all_feats, feat_labels):
+                vals = bin_accum[lbl].get(f, [])
+                rows.append({
+                    'depth_bin': lbl, 'feature': feat_label,
+                    'mean_abs_shift_hours': round(float(np.mean(vals)), 6) if vals else 0.0,
+                    'n_samples': len(vals),
+                })
+        csv_path = os.path.join(save_dir, f"feat_attr_by_depth_{node_type}.csv")
+        pd.DataFrame(rows).to_csv(csv_path, index=False)
+        print(f"  Saved feature-by-depth LOO importance to: {csv_path}")
+
+        return {'labels': labels, 'features': feat_labels, 'heat': heat}
 
     # ------------------------------------------------------------------
     # Counterfactual explanations

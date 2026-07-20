@@ -63,7 +63,12 @@ def compute_local(explainer, database, cant, mode, order_id,
     # which checkpoint the cached values came from.
     checkpoint_fingerprint = int(os.path.getmtime(explainer.model_path))
     if mode == 'loo':
-        compute_fn = lambda: explainer.explain_trace(order_id, top_k=top_k, n_events=n_events)
+        # Shapley-based, not LOO, despite the mode name -- explain_trace_shapley()
+        # returns the same dict shape as explain_trace() (see its own docstring),
+        # so every downstream renderer/consumer here is unaffected. explain_trace()
+        # itself is untouched -- compare_loo_vs_shapley() and other citable
+        # pathways still call it directly.
+        compute_fn = lambda: explainer.explain_trace_shapley(order_id, top_k=top_k, n_events=n_events)
         return dc.get_or_compute(database, cant, mode, order_id, compute_fn,
                                  n_events=n_events, top_k=top_k,
                                  checkpoint_fingerprint=checkpoint_fingerprint)
@@ -230,10 +235,12 @@ def render_top_features_by_attribution(explainer, graph, id_map, result, order_i
     -- not scoped to one selected node. Computed live (no caching), same cost
     tier as before: one Captum backward pass over the whole graph already
     returns every node instance's own attribution vector -- flattening and
-    ranking it is cheap by comparison. Also shows exhaustive LOO's value shift
-    for these SAME features (not a separate re-ranking), so the two charts are
-    a direct, feature-for-feature comparison of what each method says about the
-    identical set."""
+    ranking it is cheap by comparison. Also shows the Shapley value for these
+    SAME features (not a separate re-ranking), so the two charts are a direct,
+    feature-for-feature comparison of what each method says about the identical
+    set. Was LOO before this was swapped to Shapley -- LOO's own
+    reg_feature_importance_for_node_in_graph() is untouched, still used
+    elsewhere (e.g. compare_loo_vs_shapley())."""
     masks = explainer._compute_attribution_for_graph(graph, method='InputXGradient')
     rows = []
     for node_type, arr in masks.items():
@@ -250,25 +257,25 @@ def render_top_features_by_attribution(explainer, graph, id_map, result, order_i
                 })
     df = pd.DataFrame(rows).sort_values('abs', ascending=False).head(top_k)
 
-    # Exhaustive LOO value-shift for the SAME (node, feature) pairs attribution picked --
+    # Shapley value for the SAME (node, feature) pairs attribution picked --
     # baseline computed fresh (not from a cached result, see earlier stale-baseline fix),
-    # and grouped by node instance so each node's LOO sweep runs once regardless of how
-    # many of its features made the top-K. top_k=n_feats (not the page's top_k) so the
-    # sweep covers every one of that node's features -- otherwise the specific feature
-    # index needed could be truncated out of a smaller top-k slice.
+    # and grouped by node instance so each node's Shapley sweep runs once regardless of
+    # how many of its features made the top-K. feature_indices=None (not the page's
+    # top_k) so the sweep covers every one of that node's nonzero features -- otherwise
+    # the specific feature index needed could be truncated out of a smaller top-k slice.
     baseline_seconds = explainer._predict_value_for_graph(graph, 0)
-    loo_lookup = {}
+    shapley_lookup = {}
     for node_type, node_idx in df[['node_type', 'node_idx']].drop_duplicates().itertuples(index=False):
-        n_feats = graph[node_type].x.size(1)
-        feats = explainer.reg_feature_importance_for_node_in_graph(
-            graph, node_type, node_idx, baseline_seconds, target_object_idx=0, top_k=n_feats
+        feats = explainer.shapley_feature_importance_for_node(
+            graph, node_type, node_idx, baseline_seconds, target_object_idx=0, n_samples=100
         )
-        loo_lookup[(node_type, node_idx)] = {f: signed / 3600.0 for f, shift, large, signed in feats}
-    # None only for a feature whose input value is exactly 0 (skipped by LOO's own
-    # zero-value guard) -- rare in practice, since InputXGradient's own attribution for a
-    # zero-valued input is itself 0 and wouldn't usually rank in the top-K to begin with.
-    df['loo_signed_shift_hours'] = df.apply(
-        lambda r: loo_lookup.get((r['node_type'], r['node_idx']), {}).get(r['feature_idx']),
+        shapley_lookup[(node_type, node_idx)] = {f: sv / 3600.0 for f, sv in feats.items()}
+    # None only for a feature whose input value is exactly 0 (skipped by the Shapley
+    # method's own zero-value guard, same as LOO's) -- rare in practice, since
+    # InputXGradient's own attribution for a zero-valued input is itself 0 and wouldn't
+    # usually rank in the top-K to begin with.
+    df['shapley_value_hours'] = df.apply(
+        lambda r: shapley_lookup.get((r['node_type'], r['node_idx']), {}).get(r['feature_idx']),
         axis=1,
     )
 
@@ -279,24 +286,24 @@ def render_top_features_by_attribution(explainer, graph, id_map, result, order_i
     explainer.plot_top_features_bar(labels, df['signed'].tolist(), attr_png,
                                     title=f"Top {top_k} features by attribution, order #{order_id}")
 
-    loo_png = os.path.join(save_dir, "top_features_loo.png")
-    loo_values = df['loo_signed_shift_hours'].fillna(0.0).tolist()
-    explainer.plot_top_features_bar(labels, loo_values, loo_png,
-                                    title=f"Exhaustive LOO value shift, same features, order #{order_id}",
-                                    xlabel="Value shift if removed (hours)")
+    shapley_png = os.path.join(save_dir, "top_features_shapley.png")
+    shapley_values = df['shapley_value_hours'].fillna(0.0).tolist()
+    explainer.plot_top_features_bar(labels, shapley_values, shapley_png,
+                                    title=f"Shapley value, same features, order #{order_id}",
+                                    xlabel="Shift in Hours")
 
-    st.subheader(f"Top {top_k} features by attribution, compared against exhaustive LOO")
+    st.subheader(f"Top {top_k} features by attribution, compared against Shapley value")
     col1, col2 = st.columns(2)
     with col1:
         if os.path.exists(attr_png):
             st.image(attr_png)
         st.caption("Feature attribution (InputXGradient)")
     with col2:
-        if os.path.exists(loo_png):
-            st.image(loo_png)
-        st.caption("Exhaustive LOO (value change, hours)")
+        if os.path.exists(shapley_png):
+            st.image(shapley_png)
+        st.caption("Shapley value (hours)")
     st.dataframe(
-        df[['node_type', 'node', 'feature', 'signed', 'abs', 'loo_signed_shift_hours']],
+        df[['node_type', 'node', 'feature', 'signed', 'abs', 'shapley_value_hours']],
         width='stretch',
     )
 
@@ -384,7 +391,11 @@ def render_global(database, mode):
 def render_regenerate(explainer, database, cant, mode,
                       min_gap_hours=0.0, direction='lower'):
     cost_notes = {
-        'loo': "Exhaustive LOO is slow (O(n_traces x nodes+edges) forward passes).",
+        'loo': "The two flat 'top K' charts use Shapley values (permutation-sampled on top "
+              "of an exhaustive LOO identification pass); the node-type chart and metrics "
+              "below stay LOO-based. Exhaustive LOO alone is already slow "
+              "(O(n_traces x nodes+edges) forward passes); Shapley requantification adds a "
+              "bounded amount on top of that.",
         'gnn_primary': "GNNExplainer-primary is much slower (n_traces x 200-epoch mask optimizations).",
         'cf': "Counterfactual retrieval evaluates predictions over the full candidate pool per "
               "trace -- moderate cost, no gradient-based optimization involved.",
@@ -394,7 +405,14 @@ def render_regenerate(explainer, database, cant, mode,
     if st.button(f"Regenerate {MODE_LABELS[mode]} aggregate (n_traces=50)", key=f"regen_{mode}"):
         with st.spinner("Running aggregate explanation -- this can take a while..."):
             if mode == 'loo':
+                # explain_aggregate() still runs (unchanged) -- it's what produces the
+                # node-type chart and metrics CSV, which stay LOO-based (see the
+                # feature-by-depth heatmap note below); explain_aggregate_shapley()
+                # additionally refreshes the two flat "top K" bar charts with Shapley
+                # values, writing to the same file paths so one button keeps every
+                # view on this tab current.
                 explainer.explain_aggregate(n_traces=50)
+                explainer.explain_aggregate_shapley(n_traces=50)
             elif mode == 'gnn_primary':
                 explainer.explain_gnn_primary_aggregate(n_traces=50)
             elif mode == 'cf':
@@ -497,25 +515,34 @@ def render_local_flow(explainer, database, cant, mode, top_k, min_gap_hours=0.0,
 
 
 def render_loo_aggregate(explainer, database, cant, top_k):
-    """Dataset-wide "top K nodes by aggregate value" view for Exhaustive LOO -- the
-    per-decoded-identity companion to explain_aggregate()'s existing node-TYPE-level
-    output, same pattern as explain_gnn_primary_aggregate()'s own equivalent. The
-    underlying data is whatever was last computed via Regenerate (an expensive
-    n_traces=50 exhaustive LOO sweep) -- not recomputed live per Top-K change, since
-    that would mean re-running the sweep on every dropdown interaction. The DISPLAY
-    (chart + table), however, IS live: explain_aggregate() saves a generous top_n=20
-    rows precisely so this can cheaply slice/re-render down to the current top_k on
-    every rerun, matplotlib-only, no model inference -- same cost tier as the
-    single-trace tab's own live charts. Reuses plot_top_features_bar() (not
-    plot_aggregate_explanation_bars(), which also feeds explain_gnn_primary_aggregate()'s
-    thesis-citable output and is left on its own existing color convention) so this
-    chart automatically matches the single-trace tab's color scheme."""
+    """Dataset-wide "top K nodes"/"top K features" bar charts -- Shapley-based, not
+    LOO, despite the function name (kept for the mode='loo' call site; the tab
+    itself is still labeled "Exhaustive LOO" since candidate identification still
+    is). The underlying data is whatever was last computed via Regenerate
+    (explain_aggregate_shapley(), n_traces=50: an exhaustive LOO sweep to identify
+    the top ~20 candidates per chart, then a bounded Shapley requantification of
+    just those) -- not recomputed live per Top-K change, since that would mean
+    re-running the sweep on every dropdown interaction. The DISPLAY (chart +
+    table), however, IS live: explain_aggregate_shapley() saves a generous
+    top_n=20 rows precisely so this can cheaply slice/re-render down to the
+    current top_k on every rerun, matplotlib-only, no model inference -- same
+    cost tier as the single-trace tab's own live charts. Reuses
+    plot_top_features_bar() (not plot_aggregate_explanation_bars(), which also
+    feeds explain_gnn_primary_aggregate()'s thesis-citable output and is left on
+    its own existing color convention) so this chart automatically matches the
+    single-trace tab's color scheme.
+
+    The node-type chart and the feature-attribution-by-depth heatmap below stay
+    LOO-based (see explain_aggregate_shapley()'s own docstring for why: both are
+    exhaustive-by-design, and Shapley-izing them fully would multiply their
+    already-largest cost ~100x)."""
     base = os.path.join("files", "explainer_outputs", database, "aggregate")
     csv_path = os.path.join(base, "aggregate_explanation_bars.csv")
 
     if not os.path.exists(csv_path):
         st.warning(f"No precomputed aggregate found at {csv_path}. Use Regenerate below to "
-                  "compute it (an exhaustive LOO sweep over 50 traces -- can take a while).")
+                  "compute it (an exhaustive LOO sweep over 50 traces to identify candidates, "
+                  "then Shapley requantification of the top ~20 -- can take a while).")
     else:
         df = pd.read_csv(csv_path)
         df_top = df.sort_values('mean_signed_shift', key=abs, ascending=False).head(top_k)
@@ -524,7 +551,7 @@ def render_loo_aggregate(explainer, database, cant, top_k):
         explainer.plot_top_features_bar(
             df_top['label'].tolist(), df_top['mean_signed_shift'].tolist(), chart_png,
             title=f"Top {top_k} nodes by aggregate value",
-            xlabel="Mean value shift if removed (hours)",
+            xlabel="Shift in Hours",
         )
 
         st.caption(f"From {csv_path} (top {len(df_top)} of {len(df)} saved nodes by mean "
@@ -533,6 +560,28 @@ def render_loo_aggregate(explainer, database, cant, top_k):
         if os.path.exists(chart_png):
             st.image(chart_png)
         st.dataframe(df_top, width='stretch')
+
+    feat_csv_path = os.path.join(base, "aggregate_feature_bars.csv")
+    if not os.path.exists(feat_csv_path):
+        st.warning(f"No precomputed feature aggregate found at {feat_csv_path}. Use Regenerate "
+                  "below to compute it.")
+    else:
+        fdf = pd.read_csv(feat_csv_path)
+        fdf_top = fdf.sort_values('mean_signed_shift', key=abs, ascending=False).head(top_k)
+
+        feat_chart_png = os.path.join(base, "aggregate_feature_bars_topk.png")
+        explainer.plot_top_features_bar(
+            fdf_top['label'].tolist(), fdf_top['mean_signed_shift'].tolist(), feat_chart_png,
+            title=f"Top {top_k} features by aggregate value",
+            xlabel="Shift in Hours",
+        )
+
+        st.caption(f"From {feat_csv_path} (top {len(fdf_top)} of {len(fdf)} saved features by "
+                  f"mean |signed shift| across traces)")
+        st.subheader("Top features by aggregate value")
+        if os.path.exists(feat_chart_png):
+            st.image(feat_chart_png)
+        st.dataframe(fdf_top, width='stretch')
 
     with st.expander("Regenerate (advanced)"):
         render_regenerate(explainer, database, cant, 'loo')
