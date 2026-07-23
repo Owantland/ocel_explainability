@@ -72,11 +72,6 @@ def compute_local(explainer, database, cant, mode, order_id,
         return dc.get_or_compute(database, cant, mode, order_id, compute_fn,
                                  n_events=n_events, top_k=top_k,
                                  checkpoint_fingerprint=checkpoint_fingerprint)
-    if mode == 'gnn_primary':
-        compute_fn = lambda: explainer.explain_gnn_primary(order_id, top_k=top_k, n_events=n_events)
-        return dc.get_or_compute(database, cant, mode, order_id, compute_fn,
-                                 n_events=n_events, top_k=top_k,
-                                 checkpoint_fingerprint=checkpoint_fingerprint)
 
     if mode == 'cf':
         # Deliberately NOT cached -- explain_counterfactual() returns a bare list of
@@ -148,7 +143,7 @@ def _characterization_color(score):
     return f"rgb({r}, {g}, {b})"
 
 
-def render_local(result, cached, explainer, order_id, top_k=5, gnn_result=None):
+def render_local(result, cached, explainer, order_id, top_k=5):
     st.caption("served from cache" if cached else "computed just now (now cached for next time)")
 
     quality = result['metrics']
@@ -167,22 +162,15 @@ def render_local(result, cached, explainer, order_id, top_k=5, gnn_result=None):
             unsafe_allow_html=True,
         )
 
-    # Swapped to GNNExplainer-primary's own images when a comparison run is available --
-    # the tables/quality metrics below are unaffected, always LOO's own.
-    img_save_dir = gnn_result['save_dir'] if gnn_result else result['save_dir']
-    gnn_suffix = " (GNNExplainer-primary)" if gnn_result else ""
     col1, col2 = st.columns(2)
     with col1:
-        png = os.path.join(img_save_dir, "node_type_summary.png")
+        png = os.path.join(result['save_dir'], "node_type_summary.png")
         if os.path.exists(png):
-            st.image(png, caption=f"Node-type importance{gnn_suffix}")
+            st.image(png, caption="Node-type importance")
     with col2:
-        png = os.path.join(img_save_dir, "explanation_subgraph.png")
+        png = os.path.join(result['save_dir'], "explanation_subgraph.png")
         if os.path.exists(png):
-            st.image(png, caption=f"Explanation subgraph{gnn_suffix}")
-    if gnn_result:
-        st.caption("Node analysis graphs above are GNNExplainer-primary's; tables and quality "
-                  "metrics below still reflect the exhaustive LOO sweep.")
+            st.image(png, caption="Explanation subgraph")
 
     # Human-readable identifier (Events activity name, or a real identity for any
     # other encoding-listed type, real OCEL_ID from ocel.csv for everything
@@ -396,7 +384,6 @@ def render_regenerate(explainer, database, cant, mode,
               "below stay LOO-based. Exhaustive LOO alone is already slow "
               "(O(n_traces x nodes+edges) forward passes); Shapley requantification adds a "
               "bounded amount on top of that.",
-        'gnn_primary': "GNNExplainer-primary is much slower (n_traces x 200-epoch mask optimizations).",
         'cf': "Counterfactual retrieval evaluates predictions over the full candidate pool per "
               "trace -- moderate cost, no gradient-based optimization involved.",
     }
@@ -406,15 +393,12 @@ def render_regenerate(explainer, database, cant, mode,
         with st.spinner("Running aggregate explanation -- this can take a while..."):
             if mode == 'loo':
                 # explain_aggregate() still runs (unchanged) -- it's what produces the
-                # node-type chart and metrics CSV, which stay LOO-based (see the
-                # feature-by-depth heatmap note below); explain_aggregate_shapley()
-                # additionally refreshes the two flat "top K" bar charts with Shapley
-                # values, writing to the same file paths so one button keeps every
-                # view on this tab current.
+                # node-type chart and metrics CSV, which stay LOO-based;
+                # explain_aggregate_shapley() additionally refreshes the two flat
+                # "top K" bar charts with Shapley values, writing to the same file
+                # paths so one button keeps every view on this tab current.
                 explainer.explain_aggregate(n_traces=50)
                 explainer.explain_aggregate_shapley(n_traces=50)
-            elif mode == 'gnn_primary':
-                explainer.explain_gnn_primary_aggregate(n_traces=50)
             elif mode == 'cf':
                 explainer.explain_aggregate_counterfactuals(
                     n_traces=50, min_gap_hours=min_gap_hours, direction=direction
@@ -447,30 +431,6 @@ def render_local_flow(explainer, database, cant, mode, top_k, min_gap_hours=0.0,
     # the default view instead of silently missing it on a different cache key.
     n_events = None if selected_prefix == last_prefix else selected_prefix
 
-    # GNNExplainer-primary is no longer a standalone mode -- offered here as an optional
-    # comparison on top of LOO instead. Validity depends on the specific order+prefix
-    # selected (not just the explanation method), and order_id/n_events aren't known yet
-    # inside the sidebar block above, so this can't live there the way other per-mode
-    # controls do -- placed here instead, right after the prefix is chosen.
-    compare_gnn = False
-    if mode == 'loo':
-        check_graph = explainer._locate_test_graph(order_id, n_events)
-        try:
-            explainer._check_gnn_explainer_edges(check_graph, order_id)
-            gnn_valid = True
-        except ValueError:
-            gnn_valid = False
-        compare_gnn = st.checkbox(
-            "Compare against GNNExplainer-primary", value=False, key="compare_gnn_picker",
-            disabled=not gnn_valid,
-            help="Also runs GNNExplainer-primary and shows its node analysis graphs in place "
-                 "of LOO's own, for visual comparison. Tables and quality metrics below still "
-                 "reflect the exhaustive LOO sweep.",
-        )
-        if not gnn_valid:
-            st.caption("Not available for this prefix -- GNNExplainer can't initialize masks "
-                      "when a relation type has zero edges yet. Try a later prefix.")
-
     if st.button("Explain this order"):
         try:
             with st.spinner("Computing..."):
@@ -480,24 +440,13 @@ def render_local_flow(explainer, database, cant, mode, top_k, min_gap_hours=0.0,
             if mode == 'cf':
                 render_local_cf(result, explainer)
             else:
-                gnn_result = None
-                if mode == 'loo' and compare_gnn:
-                    try:
-                        with st.spinner("Computing GNNExplainer comparison "
-                                        "(can take ~1 minute on a cold cache)..."):
-                            gnn_result, _ = compute_local(explainer, database, cant, 'gnn_primary',
-                                                           order_id, n_events=n_events, top_k=top_k)
-                    except ValueError as ex:
-                        st.warning(f"GNNExplainer comparison unavailable: {ex}")
                 # Stored rather than rendered inline -- lets the render survive reruns
                 # triggered by other sidebar interactions (e.g. Top-K) without forcing a
                 # re-click of "Explain this order" each time. See the persisted-render
                 # block below.
-                st.session_state['local_ctx'] = (database, cant, mode, order_id, n_events, top_k,
-                                                 compare_gnn)
+                st.session_state['local_ctx'] = (database, cant, mode, order_id, n_events, top_k)
                 st.session_state['local_result'] = result
                 st.session_state['local_cached'] = cached
-                st.session_state['local_gnn_result'] = gnn_result
         except ValueError as ex:
             # explain_trace()'s own guards (e.g. a legitimately-empty edge type on the
             # LOO side) -- show a clear message instead of a raw traceback.
@@ -507,11 +456,10 @@ def render_local_flow(explainer, database, cant, mode, top_k, min_gap_hours=0.0,
     # both on the same rerun right after a successful click (ctx matches immediately) and
     # on later reruns triggered by other controls. Any sidebar/toggle change changes ctx
     # and naturally stops the stale render, with no extra invalidation logic needed.
-    ctx = (database, cant, mode, order_id, n_events, top_k, compare_gnn)
+    ctx = (database, cant, mode, order_id, n_events, top_k)
     if mode == 'loo' and st.session_state.get('local_ctx') == ctx:
         render_local(st.session_state['local_result'], st.session_state['local_cached'],
-                    explainer, order_id, top_k=top_k,
-                    gnn_result=st.session_state.get('local_gnn_result'))
+                    explainer, order_id, top_k=top_k)
 
 
 def render_loo_aggregate(explainer, database, cant, top_k):
@@ -606,8 +554,7 @@ def main():
         if mode == 'loo':
             top_k = st.selectbox(
                 "Top K Explanations", [3, 5, 10, 15, 20], index=1, key="top_k_picker",
-                help="Number of nodes/edges shown in the importance tables (and, when comparing "
-                     "against GNNExplainer, the number it identifies and LOO measures).",
+                help="Number of nodes/edges shown in the importance tables.",
             )
         if mode == 'cf':
             direction_label = st.radio(
@@ -627,8 +574,7 @@ def main():
                       "other mode.")
         else:
             st.caption("Exhaustive sweep over every node, edge, and feature -- the only source "
-                      "of edge importance. Can optionally be compared against GNNExplainer-"
-                      "primary below.")
+                      "of edge importance.")
 
     explainer = get_explainer(database, cant)
 
