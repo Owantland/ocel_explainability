@@ -4029,6 +4029,142 @@ class Explainer(Modelling):
             'save_dir': save_dir,
         }
 
+    def explain_ig_primary(self, order_id, top_k=5, method='InputXGradient',
+                           n_events=None, save_dir=None):
+        """Explain a single trace with IG (or another Captum attribution method) as
+        the primary identifier of important structural elements, and LOO reduced to
+        a targeted impact estimate over exactly the node instances IG identifies --
+        the same restricted-LOO pattern explain_gnn_primary() uses for GNNExplainer,
+        but with a cheaper identification step: IG is one attribution pass per graph
+        vs. GNNExplainer's per-trace optimization loop (see EXPLAINABILITY.md section
+        6, "LOO and IG are disconnected" -- this closes that gap). Reuses
+        _gnn_node_instance_ranking() unchanged since _compute_attribution_for_graph()
+        returns the same {node_type: [n_nodes, n_feats]} shape GNNExplainer's
+        node_mask_dict does -- the ranking function is attribution-method-agnostic
+        despite its name.
+
+        Node-only scope: like GNNExplainer, this pathway has no edge signal on this
+        architecture -- use explain_trace() for edge importance.
+
+        n_events: None (default) explains the order's last recorded prefix; an
+                     int explains the prefix with exactly that many Events nodes
+                     (see _locate_test_graph), matching explain_trace()'s
+                     convention.
+        """
+        if save_dir is None:
+            suffix = f"_ev{n_events}" if n_events is not None else ""
+            save_dir = os.path.join(self.path_dict['explainer_path'],
+                                    f"order_{order_id}{suffix}_igprimary")
+        os.makedirs(save_dir, exist_ok=True)
+
+        self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
+        self.model.eval()
+
+        graph = self._locate_test_graph(order_id, n_events)
+        object_idx = 0
+        baseline_value = self._predict_value_for_graph(graph, object_idx)
+        n_q = graph['Events'].x.size(0) if 'Events' in graph.node_types else '?'
+
+        id_map = self._decode_all_identifiers(graph, order_id, n_events)
+
+        def _node_label(nt, idx):
+            if (nt, idx) in id_map:
+                return f"{nt}[{idx}]({id_map[(nt, idx)]})"
+            return f"{nt}[{idx}]"
+
+        # IG identifies the important node instances.
+        attribution = self._compute_attribution_for_graph(graph, method=method)
+        ig_ranking = self._gnn_node_instance_ranking(attribution)
+        ig_score_map = {(nt, idx): score for nt, idx, score in ig_ranking}
+        identified_keys = [(nt, idx) for nt, idx, _ in ig_ranking
+                           if not (nt == self.kpi_viewpoint and idx == object_idx)][:top_k]
+
+        # LOO estimates the impact of exactly these identified nodes -- not an
+        # exhaustive sweep over the whole graph.
+        node_importances = self._loo_shift_for_nodes(graph, object_idx, baseline_value, identified_keys)
+        node_importances.sort(key=lambda t: t[2], reverse=True)
+
+        included_keys = set(identified_keys) | {(self.kpi_viewpoint, object_idx)}
+        induced_edges = self._induced_edges(graph, included_keys)
+        quality = self.evaluate_explanation_quality(
+            graph, object_idx, node_importances, induced_edges,
+            node_top_k=top_k, edge_top_k=max(len(induced_edges), 1), verbose=False
+        )
+
+        seed_feature_importances = self.reg_feature_importance_for_node_in_graph(
+            graph, self.kpi_viewpoint, object_idx, baseline_value, object_idx, top_k=top_k
+        )
+        if identified_keys:
+            top_node_type, top_node_idx = identified_keys[0]
+            top_node_feature_importances = self.reg_feature_importance_for_node_in_graph(
+                graph, top_node_type, top_node_idx, baseline_value, object_idx, top_k=top_k
+            )
+        else:
+            top_node_type, top_node_idx, top_node_feature_importances = None, None, []
+
+        print(f"\n{'='*60}")
+        print(f"{method}-primary explanation for {self.kpi_viewpoint} #{order_id}")
+        print(f"  Predicted remaining time : {round(baseline_value / 3600)} hours "
+              f"| prefix length: {n_q} events")
+        print(f"  {len(identified_keys)} node(s) identified by {method}; shifts below "
+              f"are LOO's TARGETED impact estimate for exactly these nodes, not an "
+              f"exhaustive graph-wide ranking (see explain_trace() for that).")
+
+        print(f"\nIdentified nodes ({method} rank → LOO impact):")
+        for rank, (nt, idx, shift, large, signed_shift) in enumerate(node_importances, 1):
+            flag = "  [LARGE SHIFT]" if large else ""
+            print(f"  {rank}. {_node_label(nt, idx)}  ig_score={ig_score_map.get((nt, idx), float('nan')):.4f}  "
+                  f"shift={signed_shift/3600:+.2f}h{flag}")
+
+        print(f"\nEdge importance: not available in this pathway -- {method} has no edge "
+              f"signal in this configuration (node_mask_type='attributes' only, see "
+              f"_get_pyg_explainer). Use explain_trace() for edge importance.")
+
+        print(f"\nJoint impact of masking all {len(identified_keys)} identified node(s) together:")
+        print(f"  Fidelity+        : {quality['fidelity_plus']:.4f}h")
+        print(f"  Fidelity−        : {quality['fidelity_minus']:.4f}h")
+        print(f"  Characterization : {quality['characterization_score']:.4f}")
+        print(f"  Node sparsity    : {quality['node_sparsity']:.2%}")
+
+        self.plot_node_type_summary(node_importances, os.path.join(save_dir, "node_type_summary.png"))
+        if seed_feature_importances:
+            self.plot_feature_importances(
+                self.kpi_viewpoint, seed_feature_importances,
+                os.path.join(save_dir, f"feat_importance_{self.kpi_viewpoint}.png"), order_id=order_id
+            )
+        if top_node_feature_importances:
+            self.plot_feature_importances(
+                top_node_type, top_node_feature_importances,
+                os.path.join(save_dir, f"feat_importance_{top_node_type}.png"), order_id=order_id
+            )
+        G = self.reg_explanation_subgraph(graph, object_idx, node_importances, [], node_top_k=top_k)
+        self.reg_visualize_explanation_subgraph(
+            G, os.path.join(save_dir, "explanation_subgraph.png"), id_map=id_map
+        )
+
+        import pandas as pd
+        csv_path = os.path.join(save_dir, "igprimary_node_importance.csv")
+        pd.DataFrame([
+            {'rank': r, 'node_type': nt, 'node_idx': idx,
+             'identifier': id_map.get((nt, idx), ''),
+             'ig_score': ig_score_map.get((nt, idx)),
+             'loo_signed_shift_hours': signed_shift / 3600.0, 'large_shift': large}
+            for r, (nt, idx, shift, large, signed_shift) in enumerate(node_importances, 1)
+        ]).to_csv(csv_path, index=False)
+
+        print(f"\nOutputs saved to: {save_dir}")
+        print('='*60)
+
+        return {
+            'order_id': order_id,
+            'predicted_hours': baseline_value / 3600.0,
+            'n_events': n_q,
+            'identified_keys': identified_keys,
+            'node_importances': node_importances,
+            'quality': quality,
+            'save_dir': save_dir,
+        }
+
     def explain_gnn_primary_aggregate(self, n_traces=50, top_k=5, epochs=200,
                                       lr=0.01, save_dir=None):
         """Aggregate version of explain_gnn_primary(): for each of the first

@@ -310,8 +310,15 @@ class Modelling:
             scheduler.step(val_mae)
 
             current_lr = optimizer.param_groups[0]["lr"]
+            # Per-node-type lin_dict weight norms -- standing diagnostic so a dead-projection
+            # pathology (weight_decay collapsing a node type's input projection to ~0, as
+            # previously root-caused in EXPLAINABILITY_DEPTH.md) is visible from epoch 1 in the
+            # training log itself, without a separate post-hoc investigation. See
+            # OPEN_ISSUES_FEASIBILITY.md item 12a. HGT-specific (lin_dict has no HomoGNN analogue).
+            weight_norms = {f'norm_{nt}': model.lin_dict[nt].weight.norm().item()
+                             for nt in model.lin_dict}
             log.append({'epoch': epoch, 'train_loss': train_loss,
-                        'val_mae': val_mae, 'lr': current_lr})
+                        'val_mae': val_mae, 'lr': current_lr, **weight_norms})
             print(
                 f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | "
                 f"Val MAE: {val_mae:.4f} | LR: {current_lr:.2e}"

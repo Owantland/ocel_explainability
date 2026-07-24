@@ -13,7 +13,12 @@ Each existing script's behavior is reproducible as one specific --stages combina
                                                 --stages validate,explain
 
 Stages (always run in the fixed order below, regardless of the order given on the CLI):
-    regenerate  - ProcessGeneration: rebuild ev_log.csv/all_kpis.csv from the raw OCEL DB.
+    regenerate  - ProcessGeneration: rebuild ev_log.csv/all_kpis.csv from the raw OCEL DB, AND
+                  ocel_generator.Generator: rebuild ocel.csv/edges.csv from the same nodes object
+                  -- hetero_graphs.py needs all three files in sync (previously 'regenerate' only
+                  refreshed ev_log.csv, silently leaving ocel.csv/edges.csv stale and causing a
+                  'malformed node or string' crash in hetero_graphs.py's ast.literal_eval; see
+                  OPEN_ISSUES_FEASIBILITY.md item 6a).
                   WARNING: for logistics this overwrites the graph_structures/hetero_structures
                   cache in place (not viewpoint-qualified in its filename) -- back up first if
                   switching kpi_viewpoint, as done historically before the CustomerOrder switch.
@@ -49,6 +54,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 import process_generation as pg
+import ocel_generator as og
 import train_test_builder as tb
 import hetero_graphs as hg
 import training as t
@@ -116,6 +122,7 @@ def run(database, cant, stages):
         p = pg.ProcessGeneration(database, cant)
         nodes = p.related_nodes()
         p.get_ev_log(nodes)
+        og.Generator(database, cant).generate_ocel(nodes)
 
     train_ts = val_ts = test_ts = None
     if 'split' in stages:

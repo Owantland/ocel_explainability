@@ -15,6 +15,7 @@ warnings.filterwarnings("ignore")
 import os
 import json
 import time
+import argparse
 import torch
 import numpy as np
 import pandas as pd
@@ -27,9 +28,6 @@ import training as t
 # ── constants ─────────────────────────────────────────────────────────────
 DATABASE = 'order_management'
 CANT     = 2000
-OUT_DIR  = f"files/explainer_outputs/{DATABASE}/validation_2000"
-FEAT_COLS = ['n_events', 'elapsed_h', 'waiting_h',
-             'vp_feat_0', 'vp_feat_1', 'vp_feat_2', 'vp_feat_3']
 
 # temporal feature indices in Events.x (after 11 one-hot event-type dims)
 _ELAPSED_IDX = 11
@@ -260,19 +258,33 @@ def print_table(results: dict):
 
 # ── main ───────────────────────────────────────────────────────────────────
 
-if __name__ == '__main__':
+def run(database, cant):
+    """Runs the full baseline comparison (Mean/GBT/HGT/HomoGNN, incl. MAE-by-depth)
+    for one (database, cant) pair. Previously this logic only ever ran hardcoded
+    for order_management/2000 -- factored into a function, with the viewpoint and
+    feature columns derived dynamically from `m` instead of hardcoded, so it also
+    works for logistics/CustomerOrder (see OPEN_ISSUES_FEASIBILITY.md item 7)."""
+    out_dir = f"files/explainer_outputs/{database}/validation_{cant}"
+
     # ── 1. Load data ──────────────────────────────────────────────────────
     import sup_funcs as sf
-    path_dict = sf.SupportFunctions(DATABASE, CANT).get_paths()
+    path_dict = sf.SupportFunctions(database, cant).get_paths()
     pt_path   = path_dict['pytorch_path']
 
-    print("Loading raw graph splits...")
-    train_df = load_raw_split(f"{pt_path}/train_graphs_sg.pt")
-    test_df  = load_raw_split(f"{pt_path}/test_graphs_sg.pt")
+    m = t.Modelling(database, cant)  # built early -- need m.kpi_viewpoint for load_raw_split
+    vp = m.kpi_viewpoint
 
-    X_train = train_df[FEAT_COLS].values
+    print("Loading raw graph splits...")
+    train_df = load_raw_split(f"{pt_path}/train_graphs_sg.pt", viewpoint=vp)
+    test_df  = load_raw_split(f"{pt_path}/test_graphs_sg.pt", viewpoint=vp)
+
+    # feat_cols derived dynamically, not a fixed list -- viewpoints carry different
+    # numbers of raw features per database (e.g. Orders has 4, CustomerOrder has 1),
+    # same fix explainer.py's compare_to_baselines() already applies.
+    feat_cols = [c for c in train_df.columns if c not in ('y_h', 'order_id', 'last_event')]
+    X_train = train_df[feat_cols].values
     y_train = train_df['y_h'].values
-    X_test  = test_df[FEAT_COLS].values
+    X_test  = test_df[feat_cols].values
     y_test  = test_df['y_h'].values
     last_mask = test_df['last_event'].values
 
@@ -295,9 +307,8 @@ if __name__ == '__main__':
     gbt_preds = gbt.predict(X_test)
     gbt_pred_time_s = time.time() - _t0
 
-    # ── 3. HGT predictions ────────────────────────────────────────────────
+    # ── 3. HGT + HomoGNN predictions ────────────────────────────────────────
     print("Loading HGT model and running inference...")
-    m = t.Modelling(DATABASE, CANT)
     hgt_fit_time_s = read_hgt_fit_time(m)  # from training.py's recorded fit time — never retrained here
     hgt_df, hgt_pred_time_s = hgt_predictions(m)
     hgt_preds = hgt_df['hgt_pred_h'].values
@@ -307,6 +318,15 @@ if __name__ == '__main__':
         f"HGT ({len(hgt_df)}) and raw test ({len(test_df)}) have different lengths"
     )
 
+    print("Loading HomoGNN model and running inference...")
+    homo_df, homo_pred_time_s = homo_predictions(m)
+    homo_fit_time_s = read_homo_fit_time(m)
+    # homo_df is NOT row-aligned with test_df/hgt_df: _hetero_to_homo() filters out
+    # prefixes where the viewpoint object hasn't appeared yet, so HomoGNN's test set
+    # can be shorter (same reason compare_to_baselines() keeps it separate rather
+    # than merging). Depth-binning below uses homo_df's own self-consistent
+    # true_h/homo_pred_h/n_events, not test_df's.
+
     # ── Scalability table (fitting/prediction time, seconds) ────────────────
     def _fmt_time(v):
         return f"{v:.4f}" if v is not None else "n/a"
@@ -315,6 +335,7 @@ if __name__ == '__main__':
     print(f"{'Mean predictor':<18}  {_fmt_time(mean_fit_time_s):>18}  {mean_pred_time_s:>20.4f}")
     print(f"{'GBT':<18}  {_fmt_time(gbt_fit_time_s):>18}  {gbt_pred_time_s:>20.4f}")
     print(f"{'HGT (ours)':<18}  {_fmt_time(hgt_fit_time_s):>18}  {hgt_pred_time_s:>20.4f}")
+    print(f"{'HomoGNN (GCN)':<18}  {_fmt_time(homo_fit_time_s):>18}  {homo_pred_time_s:>20.4f}")
 
     # ── 4. Compute metrics ────────────────────────────────────────────────
     results = {}
@@ -324,11 +345,16 @@ if __name__ == '__main__':
         m_all  = metrics(y_test,             preds)
         m_last = metrics(y_test[last_mask],  preds[last_mask])
         results[name] = (m_all, m_last)
+    homo_last_mask = homo_df['last_event'].values
+    results['HomoGNN (GCN)'] = (
+        metrics(homo_df['true_h'].values, homo_df['homo_pred_h'].values),
+        metrics(homo_df['true_h'].values[homo_last_mask], homo_df['homo_pred_h'].values[homo_last_mask]),
+    )
 
     print_table(results)
 
     print("GBT feature importances:")
-    for feat, imp in sorted(zip(FEAT_COLS, gbt.feature_importances_),
+    for feat, imp in sorted(zip(feat_cols, gbt.feature_importances_),
                              key=lambda x: -x[1]):
         print(f"  {feat:<14}: {imp:.3f}")
 
@@ -336,18 +362,29 @@ if __name__ == '__main__':
     n_ev = test_df['n_events'].values
     BINS = ['1-3', '4-6', '7-9', '10+']
     depth_results = {
-        name: depth_mae(y_test, preds, n_ev)
-        for name, preds in [('Mean', mean_preds), ('GBT', gbt_preds), ('HGT', hgt_preds)]
+        'Mean':    depth_mae(y_test, mean_preds, n_ev),
+        'GBT':     depth_mae(y_test, gbt_preds, n_ev),
+        'HGT':     depth_mae(hgt_df['true_h'].values, hgt_df['hgt_pred_h'].values,
+                              hgt_df['n_events'].values),
+        'HomoGNN': depth_mae(homo_df['true_h'].values, homo_df['homo_pred_h'].values,
+                              homo_df['n_events'].values),
     }
 
     print("\nMAE by prefix depth (all prefixes):")
-    print(f"  {'Bin':<6}  {'Mean':>7}  {'GBT':>7}  {'HGT':>7}")
+    print(f"  {'Bin':<6}  {'Mean':>7}  {'GBT':>7}  {'HGT':>7}  {'HomoGNN':>7}")
     for b in BINS:
-        row = "  ".join(f"{depth_results[m][b]:7.1f}" for m in ['Mean', 'GBT', 'HGT'])
+        row = "  ".join(f"{depth_results[mdl][b]:7.1f}" for mdl in ['Mean', 'GBT', 'HGT', 'HomoGNN'])
         print(f"  {b:<6}  {row}")
 
+    depth_df = pd.DataFrame({'depth_bin': BINS})
+    for mdl in ['HGT', 'HomoGNN', 'Mean', 'GBT']:
+        depth_df[mdl] = [depth_results[mdl][b] for b in BINS]
+    depth_csv_path = f"{out_dir}/mae_by_depth_{m.task_id}.csv"
+    depth_df.to_csv(depth_csv_path, index=False)
+    print(f"Saved {depth_csv_path}")
+
     # ── 6. Visualization ──────────────────────────────────────────────────
-    os.makedirs(OUT_DIR, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
     # — Left: Predicted vs True scatter (last-event only) —
@@ -371,11 +408,11 @@ if __name__ == '__main__':
     # — Right: MAE by depth (grouped bar chart, all prefixes) —
     ax = axes[1]
     x     = np.arange(len(BINS))
-    width = 0.25
-    colors = {'Mean': 'silver', 'GBT': 'steelblue', 'HGT': 'tomato'}
+    width = 0.2
+    colors = {'Mean': 'silver', 'GBT': 'steelblue', 'HGT': 'tomato', 'HomoGNN': 'seagreen'}
     for i, (name, clr) in enumerate(colors.items()):
         vals = [depth_results[name][b] for b in BINS]
-        bars = ax.bar(x + (i - 1) * width, vals, width, label=name, color=clr,
+        bars = ax.bar(x + (i - 1.5) * width, vals, width, label=name, color=clr,
                       edgecolor='white', linewidth=0.5)
         for bar, v in zip(bars, vals):
             if not np.isnan(v):
@@ -389,9 +426,17 @@ if __name__ == '__main__':
     ax.set_title('MAE by prefix depth — all prefixes')
     ax.legend(fontsize=9)
 
-    plt.suptitle(f'Baseline Comparison — {DATABASE} (cant={CANT})', fontsize=12, y=1.01)
+    plt.suptitle(f'Baseline Comparison — {database} (cant={cant})', fontsize=12, y=1.01)
     plt.tight_layout()
-    out_path = f"{OUT_DIR}/baseline_comparison.png"
+    out_path = f"{out_dir}/baseline_comparison.png"
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"\nPlot saved to {out_path}")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--database', default=DATABASE)
+    parser.add_argument('--cant', type=int, default=CANT)
+    args = parser.parse_args()
+    run(args.database, args.cant)
