@@ -3022,6 +3022,23 @@ class Explainer(Modelling):
         else:
             print(f"No HomoGNN checkpoint found at {homo_model_path} -- omitting from table")
 
+        # ── k-dim GNN (HOEG's own architecture), if a checkpoint exists ───────
+        kdim_model_path = self.model_path.replace(".pth", "_kdim.pth")
+        if os.path.exists(kdim_model_path):
+            kdim_df, kdim_pred_time_s = bl.kdim_predictions(self)
+            kdim_fit_time_s = bl.read_kdim_fit_time(self)
+            last_mask_k = kdim_df['last_event'].values
+            m_all = bl.metrics(kdim_df['true_h'].values, kdim_df['kdim_pred_h'].values)
+            m_last = bl.metrics(kdim_df['true_h'].values[last_mask_k],
+                                 kdim_df['kdim_pred_h'].values[last_mask_k])
+            ci_all = bl.mae_bootstrap_ci(kdim_df['true_h'].values, kdim_df['kdim_pred_h'].values)
+            ci_last = bl.mae_bootstrap_ci(kdim_df['true_h'].values[last_mask_k],
+                                           kdim_df['kdim_pred_h'].values[last_mask_k])
+            rows.append({'Model': 'k-dim GNN (HOEG)', **_flatten(m_all, m_last, ci_all, ci_last),
+                         'fit_time_s': kdim_fit_time_s, 'pred_time_s': kdim_pred_time_s})
+        else:
+            print(f"No k-dim GNN checkpoint found at {kdim_model_path} -- omitting from table")
+
         # ── Mean / GBT (refit fresh, as baselines.py's script already does) ──
         pt_path = self.path_dict['pytorch_path']
         train_df = bl.load_raw_split(f"{pt_path}/train_graphs_sg.pt", self.kpi_viewpoint)
@@ -3093,6 +3110,9 @@ class Explainer(Modelling):
         if os.path.exists(homo_model_path):
             homo_last_df = homo_df[homo_df['last_event']][['order_id', 'homo_pred_h']].copy()
             baseline_frames['HomoGNN (GCN)'] = homo_last_df.rename(columns={'homo_pred_h': 'pred_h'})
+        if os.path.exists(kdim_model_path):
+            kdim_last_df = kdim_df[kdim_df['last_event']][['order_id', 'kdim_pred_h']].copy()
+            baseline_frames['k-dim GNN (HOEG)'] = kdim_last_df.rename(columns={'kdim_pred_h': 'pred_h'})
 
         test_df_preds = test_df.copy()
         test_df_preds['mean_pred_h'] = mean_preds

@@ -5,10 +5,11 @@ import json
 import random
 import numpy as np
 
+import torch_geometric.nn as pygnn
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
-from model_classes import REG_GNN, HGT
+from model_classes import REG_GNN, HGT, KDIM_GNN
 
 import sup_funcs as sf
 import pandas as pd
@@ -19,9 +20,10 @@ import matplotlib.pyplot as plt
 import copy
 
 class Modelling:
-    def __init__(self, database, cant):
+    def __init__(self, database, cant, seed=42):
         self.database = database
         self.cant = cant
+        self.init_seed = seed  # only affects model weight init below, not training-loop seeding
         self.funcs = sf.SupportFunctions(database, cant)
         self.path_dict = self.funcs.get_paths()
         self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
@@ -65,6 +67,24 @@ class Modelling:
         # Appropriately name the task
         self.task_id = f"TimeFrom_{self.kpi_viewpoint}_to_{self.path_dict['kpi_event']}"
         self.params = self._load_params() or _DEFAULTS # Ensure there are sweep hyperparemeters to load
+
+        # Seed BEFORE model construction, not just inside Het_Reg_Modelling/Homo_Reg_Modelling/
+        # KDim_Reg_Modelling's own torch.manual_seed(42) calls -- those only fix the training
+        # loop (data shuffling order), not weight initialization, since _build_model() below
+        # runs before any of them. Confirmed empirically (2026-08-03): a fresh, unseeded rerun
+        # of Het_Reg_Modelling for logistics/Depart landed in a far more severe
+        # dead-lin_dict collapse (6 of 8 node types at exactly-zero weight, vs. the production
+        # checkpoint's single already-documented dead Forklift) purely from a different random
+        # initial draw -- same Mechanism B pathology as project_hgt_dead_features_finding, just
+        # unluckier. Every existing checkpoint was trained before this fix and is unaffected
+        # retroactively; this only makes *future* retrains reproducible against a given seed
+        # instead of an arbitrary per-process draw. `seed` defaults to 42 (unchanged behavior
+        # for every existing caller); the constructor param exists so a robustness sweep across
+        # several different init seeds can be run without touching the training loop's own
+        # (deliberately still-hardcoded-42) seeding in Het_Reg_Modelling/Homo_Reg_Modelling/etc.
+        torch.manual_seed(self.init_seed)
+        random.seed(self.init_seed)
+        np.random.seed(self.init_seed)
         self.model = self._build_model(self.params)
 
         # Standardize the output values.
@@ -267,7 +287,73 @@ class Modelling:
             total_loss += float(loss) * batch_size
         return total_loss / total_examples
 
-    def Het_Reg_Modelling(self, training_data, val_data, test_data):
+    @torch.no_grad()
+    def het_loss_test_split(self, loader, model, criterion, device):
+        """Same as het_loss_test, but also breaks the loss out over last_event==True
+        samples only, in the same forward pass (no extra cost). Addresses
+        OPEN_ISSUES_FEASIBILITY.md item 11: pooled val MAE is dominated by the much more
+        numerous non-last-event prefixes, so a model can be 'selected' for improving on
+        the majority-class prefixes while quietly regressing on the minority last-event
+        case that's actually reported -- see project_capacity_vs_lastevent_mae_tradeoff
+        memory's 2026-07-25 TransportDocument resweep for a direct, confirmed instance of
+        this happening (early stopping on pooled MAE locked in an epoch-1, effectively
+        undertrained checkpoint).
+        Returns (pooled_mae, last_event_mae). last_event_mae is nan if the loader has no
+        last_event==True samples in this split (e.g. a very small validation set)."""
+        model.eval()
+
+        total_loss, total_examples = 0.0, 0
+        last_loss, last_examples = 0.0, 0
+        for batch in loader:
+            batch = batch.to(device)
+            out  = model(batch.x_dict, batch.edge_index_dict)
+            mask = batch[self.kpi_viewpoint].mask.view(-1)
+            y    = batch[self.kpi_viewpoint].y.view(-1, out.shape[-1])
+            loss = criterion(out[mask], y[mask])
+
+            batch_size = int(mask.sum())
+            total_examples += batch_size
+            total_loss += float(loss) * batch_size
+
+            last_event = batch[self.kpi_viewpoint].last_event.view(-1)
+            last_mask = mask & last_event
+            if last_mask.any():
+                last_batch_size = int(last_mask.sum())
+                last_loss_val = criterion(out[last_mask], y[last_mask])
+                last_examples += last_batch_size
+                last_loss += float(last_loss_val) * last_batch_size
+
+        pooled_mae = total_loss / total_examples
+        last_event_mae = last_loss / last_examples if last_examples > 0 else float('nan')
+        return pooled_mae, last_event_mae
+
+    def Het_Reg_Modelling(self, training_data, val_data, test_data, selection_metric='pooled',
+                          optimizer=None):
+        """
+        :param selection_metric: 'pooled' (default, unchanged behavior -- every currently-cited
+            checkpoint was trained this way) or 'last_event'. Controls which val MAE the LR
+            scheduler, early stopping, and best-checkpoint selection all use. Both are always
+            computed and logged regardless of this choice (see het_loss_test_split), so switching
+            to 'last_event' is opt-in per call, not a silent behavior change for existing callers.
+            See OPEN_ISSUES_FEASIBILITY.md item 11 and project_capacity_vs_lastevent_mae_tradeoff
+            memory's 2026-07-25 update for why this matters: pooled selection can lock in an
+            undertrained checkpoint that never specializes on the rare last-event case.
+        :param optimizer: 'adam' (default -- matches every checkpoint trained to date) or
+            'adamw'. Falls back to self.params.get('optimizer', 'adam') when not passed
+            explicitly, so a model_params.json entry can opt a specific task into AdamW
+            without every caller needing to pass this. AdamW uses DECOUPLED weight decay
+            (applied directly to the parameter, not mixed into the gradient Adam's adaptive
+            per-parameter normalization sees) -- see project_hgt_dead_features_finding
+            memory's 2026-08-04 root-cause finding: logistics/Depart's dead-lin_dict collapse
+            is exactly the L2-style-weight_decay-mixed-into-Adam's-normalization interaction
+            AdamW is designed to avoid, not present-but-untested until this parameter existed.
+        """
+        if selection_metric not in ('pooled', 'last_event'):
+            raise ValueError(f"selection_metric must be 'pooled' or 'last_event', got {selection_metric!r}")
+        optimizer_name = optimizer or self.params.get('optimizer', 'adam')
+        if optimizer_name not in ('adam', 'adamw'):
+            raise ValueError(f"optimizer must be 'adam' or 'adamw', got {optimizer_name!r}")
+
         # Estanlish seeds to ensure replicability
         torch.manual_seed(42)
         random.seed(42)
@@ -287,7 +373,8 @@ class Modelling:
             batch = next(iter(train_loader)).to(self.device)
             model(batch.x_dict, batch.edge_index_dict)
 
-        optimizer = torch.optim.Adam(
+        optimizer_cls = torch.optim.AdamW if optimizer_name == 'adamw' else torch.optim.Adam
+        optimizer = optimizer_cls(
             model.parameters(),
             lr=self.params['lr'],
             weight_decay=self.params['weight_decay'],
@@ -306,8 +393,9 @@ class Modelling:
 
         for epoch in pbar:
             train_loss = self.het_train(model, train_loader, optimizer, criterion, self.device)
-            val_mae    = self.het_loss_test(val_loader, model, criterion, self.device)
-            scheduler.step(val_mae)
+            val_mae, val_mae_last_event = self.het_loss_test_split(val_loader, model, criterion, self.device)
+            selection_val = val_mae_last_event if selection_metric == 'last_event' else val_mae
+            scheduler.step(selection_val)
 
             current_lr = optimizer.param_groups[0]["lr"]
             # Per-node-type lin_dict weight norms -- standing diagnostic so a dead-projection
@@ -318,15 +406,17 @@ class Modelling:
             weight_norms = {f'norm_{nt}': model.lin_dict[nt].weight.norm().item()
                              for nt in model.lin_dict}
             log.append({'epoch': epoch, 'train_loss': train_loss,
-                        'val_mae': val_mae, 'lr': current_lr, **weight_norms})
+                        'val_mae': val_mae, 'val_mae_last_event': val_mae_last_event,
+                        'lr': current_lr, **weight_norms})
             print(
                 f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | "
-                f"Val MAE: {val_mae:.4f} | LR: {current_lr:.2e}"
+                f"Val MAE (pooled): {val_mae:.4f} | Val MAE (last-event): {val_mae_last_event:.4f} | "
+                f"Selecting on: {selection_metric} | LR: {current_lr:.2e}"
             )
 
-            if val_mae < best_val_mae:
+            if selection_val < best_val_mae:
                 print("New Best!")
-                best_val_mae = val_mae
+                best_val_mae = selection_val
                 best_state = copy.deepcopy(model.state_dict())
                 epochs_without_improvement = 0
             else:
@@ -356,10 +446,18 @@ class Modelling:
         log_path = self.model_path.replace(".pth", "_training_log.csv")
         pd.DataFrame(log).to_csv(log_path, index=False)
 
-    def sweep(self, n_trials=None):
+    def sweep(self, n_trials=None, selection_metric='pooled'):
         """
         Performs a training sweep to find the optimal hidden_channels/lr (and, for logistics,
         num_layers) for this dataset.
+
+        :param selection_metric: 'pooled' (default, matches every sweep run to date) or
+            'last_event' -- which val MAE each trial is scored/pruned on. See
+            Het_Reg_Modelling's docstring and OPEN_ISSUES_FEASIBILITY.md item 11: a trial can
+            look best on pooled val MAE while its last-event MAE (the metric actually reported)
+            is worse. Both are always reported to Optuna as trial user_attrs regardless of this
+            choice, so a 'pooled' sweep's results can still be inspected for their last-event
+            values after the fact.
 
         num_layers and num_heads are fixed, not tuned, for order_management (see
         TRAINING_VS_HOEG.md recs 5a/5b): HOEG (Smit et al. 2024) fixes message-passing depth at 2
@@ -431,19 +529,27 @@ class Modelling:
             # the trial always ends first, so the scheduler was dead weight, not a real effect.
             optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
             best_val, patience_count = float('inf'), 0
+            best_val_pooled, best_val_last_event = float('inf'), float('inf')
 
             for epoch in range(1, 31):
                 self.het_train(model, train_loader, optimizer, criterion, self.device)
-                val_mae = self.het_loss_test(val_loader, model, criterion, self.device)
+                val_mae_pooled, val_mae_last_event = self.het_loss_test_split(
+                    val_loader, model, criterion, self.device)
+                val_mae = val_mae_last_event if selection_metric == 'last_event' else val_mae_pooled
                 trial.report(val_mae, epoch)
                 if trial.should_prune():
                     raise optuna.TrialPruned()
                 if val_mae < best_val:
                     best_val, patience_count = val_mae, 0
+                    best_val_pooled, best_val_last_event = val_mae_pooled, val_mae_last_event
                 else:
                     patience_count += 1
                     if patience_count >= 4:
                         break
+            # Both recorded regardless of selection_metric, so a 'pooled' sweep's results can
+            # still be inspected for their last-event values afterwards without rerunning.
+            trial.set_user_attr('val_mae_pooled', best_val_pooled)
+            trial.set_user_attr('val_mae_last_event', best_val_last_event)
             return best_val
 
         # GridSampler over the now fully-enumerable (hidden_channels x lr [x num_layers for
@@ -544,7 +650,8 @@ class Modelling:
         best_params = {'hidden_channels': best['hidden_channels'],
                        'num_layers': best['num_layers'] if is_logistics else FIXED_NUM_LAYERS,
                        'num_heads': FIXED_NUM_HEADS, 'lr': best['lr'], 'weight_decay': 1e-5}
-        print(f"Best params for {self.task_id}: {best_params}  (val MAE: {study.best_value:.4f})")
+        print(f"Best params for {self.task_id}: {best_params}  "
+              f"(val MAE [{selection_metric}]: {study.best_value:.4f})")
         self._save_params(best_params)
         self.params = best_params
         self.model = self._build_model(best_params).to(self.device)
@@ -687,6 +794,154 @@ class Modelling:
         with open(homo_model_path.replace(".pth", "_meta.json"), "w") as f:
             json.dump({"fit_time_s": fit_time_s}, f)
         print(f"HomoGNN checkpoint saved to {homo_model_path}")
+
+    def kdim_train_step(self, model, loader, optimizer, criterion, device):
+        """Same batching/mask/y convention as het_train, since the k-dim GNN operates on
+        the same full heterogeneous graph HGT does (unlike HomoGNN's stripped-down
+        Events-only graph) -- only difference is indexing the to_hetero()-wrapped
+        model's per-node-type output dict for the viewpoint type."""
+        model.train()
+        total_loss, total_examples = 0.0, 0
+        for batch in loader:
+            batch = batch.to(device)
+            optimizer.zero_grad()
+            out  = model(batch.x_dict, batch.edge_index_dict)[self.kpi_viewpoint]
+            mask = batch[self.kpi_viewpoint].mask.view(-1)
+            y    = batch[self.kpi_viewpoint].y.view(-1, out.shape[-1])
+            loss = criterion(out[mask], y[mask])
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            batch_size = int(mask.sum())
+            total_examples += batch_size
+            total_loss += float(loss) * batch_size
+        return total_loss / total_examples
+
+    @torch.no_grad()
+    def kdim_eval(self, loader, model, criterion, device):
+        model.eval()
+        total_loss, total_examples = 0.0, 0
+        for batch in loader:
+            batch = batch.to(device)
+            out  = model(batch.x_dict, batch.edge_index_dict)[self.kpi_viewpoint]
+            mask = batch[self.kpi_viewpoint].mask.view(-1)
+            y    = batch[self.kpi_viewpoint].y.view(-1, out.shape[-1])
+            loss = criterion(out[mask], y[mask])
+
+            batch_size = int(mask.sum())
+            total_examples += batch_size
+            total_loss += float(loss) * batch_size
+        return total_loss / total_examples
+
+    def KDim_Reg_Modelling(self):
+        """Train HOEG's (Smit et al. 2024) own k-dimensional GNN baseline (Morris et al.
+        2019), ported to model_classes/KDIM_GNN.py and wrapped with PyG's to_hetero() --
+        the same mechanism Smit et al.'s own code uses (see
+        OCPPM-master/utilities/hetero_experiment_utils.py:35-41). Unlike Homo_Reg_Modelling,
+        this operates on the FULL heterogeneous graph (self.train_data directly, no
+        _hetero_to_homo() stripping), so its train/eval loop mirrors Het_Reg_Modelling's
+        batching/mask convention almost exactly (see kdim_train_step/kdim_eval above) --
+        the only structural difference from HGT is indexing the wrapped model's
+        per-node-type output dict for the viewpoint type.
+
+        Reuses HGT's already-tuned per-KPI hyperparameters (hidden_channels, num_layers,
+        lr, weight_decay) and training budget (self.max_epochs/self.early_stop_patience),
+        exactly like Homo_Reg_Modelling already does -- no separate Optuna sweep, so the
+        comparison against HGT isolates architecture (native heterogeneous attention vs.
+        to_hetero()-duplicated homogeneous conv) rather than also varying hyperparameter
+        search budget.
+        """
+
+        # Ensure replicability of results
+        torch.manual_seed(42)
+        random.seed(42)
+        np.random.seed(42)
+
+        batch_size = self.path_dict.get('batch_size', 16)
+        train_loader = DataLoader(self.train_data, batch_size=batch_size, shuffle=True)
+        val_loader   = DataLoader(self.val_data,   batch_size=batch_size, shuffle=False)
+        test_loader  = DataLoader(self.test_data,  batch_size=batch_size, shuffle=False)
+
+        # Build the plain (pre-to_hetero) k-dim GNN, then wrap it -- meta_data taken
+        # directly from a real training-graph sample, not a hardcoded placeholder like
+        # OCPPM's own script uses (see hetero_experiment_utils.py -- it overwrites its
+        # own placeholder later for the same reason).
+        base_model = KDIM_GNN.KDimGNN(
+            hidden_channels=self.params.get('hidden_channels', 32),
+            out_channels=1,
+            num_layers=self.params.get('num_layers', 2),
+        )
+        kdim_model_path = self.model_path.replace(".pth", "_kdim.pth")
+        model = pygnn.to_hetero(base_model, self.train_data[0].metadata()).to(self.device)
+
+        # Explicit dummy forward pass to materialize to_hetero()'s lazily-initialized
+        # GraphConv/Linear dimensions BEFORE building the optimizer -- the safe pattern
+        # OCPPM's own test script uses (tests/cs/test_run_hoeg_cs.py:160-164), not the
+        # implicit behavior its main training script relies on (version-fragile given
+        # this repo's torch/PyG versions are several major releases ahead of OCPPM's
+        # pinned torch==2.0.1/torch-geometric==2.3.1). Mirrors the identical pattern
+        # Het_Reg_Modelling already uses for HGT's own lazy per-node-type projections.
+        with torch.no_grad():
+            batch = next(iter(train_loader)).to(self.device)
+            model(batch.x_dict, batch.edge_index_dict)
+
+        criterion = torch.nn.L1Loss()
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr           = self.params['lr'],
+            weight_decay = self.params['weight_decay'],
+        )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=10
+        )
+
+        max_epochs, early_stop_patience = self.max_epochs, self.early_stop_patience
+        best_val_mae, best_state        = float("inf"), None
+        epochs_without_improvement      = 0
+        log = []
+
+        pbar = tqdm(range(1, max_epochs + 1), desc="k-dim GNN")
+        fit_start = time.time()  # fitting time, HOEG Table 7-style: loop only, not data loading
+        for epoch in pbar:
+            train_loss = self.kdim_train_step(model, train_loader, optimizer, criterion, self.device)
+            val_mae    = self.kdim_eval(val_loader, model, criterion, self.device)
+            scheduler.step(val_mae)
+
+            current_lr = optimizer.param_groups[0]["lr"]
+            log.append({'epoch': epoch, 'train_loss': train_loss,
+                        'val_mae': val_mae, 'lr': current_lr})
+
+            print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | "
+                  f"Val MAE: {val_mae:.4f} | LR: {current_lr:.2e}")
+
+            if val_mae < best_val_mae:
+                print("New Best!")
+                best_val_mae = val_mae
+                best_state   = copy.deepcopy(model.state_dict())
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+
+            if epochs_without_improvement >= early_stop_patience:
+                print(f"\nEarly stopping at epoch {epoch}")
+                break
+        pbar.close()
+        fit_time_s = time.time() - fit_start
+        print(f"Fitting time: {fit_time_s:.4f}s")
+
+        if best_state is not None:
+            model.load_state_dict(best_state)
+        test_loss = self.kdim_eval(test_loader, model, criterion, self.device)
+        print(f"k-dim GNN Final MAE: {test_loss:.4f}")
+
+        torch.save(model.state_dict(), kdim_model_path)
+        pd.DataFrame(log).to_csv(
+            kdim_model_path.replace(".pth", "_training_log.csv"), index=False
+        )
+        with open(kdim_model_path.replace(".pth", "_meta.json"), "w") as f:
+            json.dump({"fit_time_s": fit_time_s}, f)
+        print(f"k-dim GNN checkpoint saved to {kdim_model_path}")
 
     """
         Baseline comparison and graph output
@@ -907,8 +1162,11 @@ class Modelling:
         plt.close()
         print(f"Training curves saved to {out_path}")
 
-    def Modelling(self):
+    def Modelling(self, selection_metric='pooled'):
         """
             Main function: trains the HGT regression model.
+            :param selection_metric: see Het_Reg_Modelling's docstring -- 'pooled' (default) or
+                'last_event'.
         """
-        self.Het_Reg_Modelling(self.train_data, self.val_data, self.test_data)
+        self.Het_Reg_Modelling(self.train_data, self.val_data, self.test_data,
+                               selection_metric=selection_metric)

@@ -17,6 +17,7 @@ import json
 import time
 import argparse
 import torch
+import torch_geometric.nn as pygnn
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -231,6 +232,74 @@ def read_homo_fit_time(m) -> float | None:
     _homo_meta.json sidecar, mirroring read_hgt_fit_time(m)."""
     homo_model_path = m.model_path.replace(".pth", "_homo.pth")
     meta_path = homo_model_path.replace(".pth", "_meta.json")
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            return json.load(f).get("fit_time_s")
+    return None
+
+
+# ── k-dim GNN inference ─────────────────────────────────────────────────────
+# HOEG's (Smit et al. 2024) own architecture (Morris et al. 2019 k-dim GNN), ported to
+# model_classes/KDIM_GNN.py and wrapped with the same to_hetero() transform Smit et
+# al.'s own code uses. Unlike homo_predictions() (which runs on _hetero_to_homo()'s
+# stripped-down Events-only graph), this operates on the SAME full heterogeneous graph
+# hgt_predictions() does -- to_hetero() duplicates message passing per node type rather
+# than collapsing the graph first -- so this mirrors hgt_predictions() almost exactly,
+# just reconstructing/wrapping the model first (mirroring homo_predictions()'s
+# reconstruct-then-load-state-dict pattern) and indexing the wrapped model's
+# per-node-type output dict for the viewpoint type.
+
+def kdim_predictions(m) -> "tuple[pd.DataFrame, float]":
+    """Run the persisted k-dim GNN (to_hetero()-wrapped KDimGNN) checkpoint on
+    m.test_data; return denormalised predictions plus the wall-clock prediction time
+    in seconds."""
+    from model_classes import KDIM_GNN
+
+    vp = m.kpi_viewpoint
+    kdim_model_path = m.model_path.replace(".pth", "_kdim.pth")
+
+    base_model = KDIM_GNN.KDimGNN(
+        hidden_channels=m.params.get('hidden_channels', 32),
+        out_channels=1,
+        num_layers=m.params.get('num_layers', 2),
+    )
+    kdim_model = pygnn.to_hetero(base_model, m.train_data[0].metadata()).to(m.device)
+
+    # Dummy forward pass to materialize to_hetero()'s lazily-initialized dimensions --
+    # required before load_state_dict() can match shapes, same reasoning as
+    # KDim_Reg_Modelling's own pre-optimizer dummy pass.
+    with torch.no_grad():
+        g0 = m.test_data[0].to(m.device)
+        kdim_model(g0.x_dict, g0.edge_index_dict)
+
+    kdim_model.load_state_dict(torch.load(kdim_model_path, weights_only=False))
+    kdim_model.eval()
+
+    denorm = lambda v: (v * m.target_std.item() + m.target_mean.item()) / 3600.0
+    records = []
+    pred_time_s = 0.0
+    with torch.no_grad():
+        for g in m.test_data:
+            g = g.to(m.device)
+            _t0 = time.time()
+            out = kdim_model(g.x_dict, g.edge_index_dict)[vp]
+            pred_h = denorm(out[0].item())
+            pred_time_s += time.time() - _t0
+            records.append({
+                'order_id':    int(g[vp].id[0].item()),
+                'true_h':      denorm(g[vp].y[0].item()),
+                'kdim_pred_h': pred_h,
+                'n_events':    g['Events'].num_nodes,
+                'last_event':  bool(g[vp].last_event[0].item()),
+            })
+    return pd.DataFrame(records), pred_time_s
+
+
+def read_kdim_fit_time(m) -> float | None:
+    """Read back the fitting time recorded by training.Modelling.KDim_Reg_Modelling's
+    _kdim_meta.json sidecar, mirroring read_homo_fit_time(m)."""
+    kdim_model_path = m.model_path.replace(".pth", "_kdim.pth")
+    meta_path = kdim_model_path.replace(".pth", "_meta.json")
     if os.path.exists(meta_path):
         with open(meta_path) as f:
             return json.load(f).get("fit_time_s")

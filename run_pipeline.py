@@ -32,6 +32,9 @@ Stages (always run in the fixed order below, regardless of the order given on th
                   model_params.json's just-swept best params, matching every original script's
                   own defensive reload-after-sweep convention.
     homo        - Modelling.Homo_Reg_Modelling(): train the HomoGNN baseline.
+    kdim        - Modelling.KDim_Reg_Modelling(): train HOEG's own k-dim GNN baseline
+                  (Morris et al. 2019, to_hetero()-wrapped). Reuses HGT's already-tuned
+                  hyperparameters, no separate sweep -- see KDim_Reg_Modelling's docstring.
     validate    - test-set metrics (ALL-prefix + last-event MAE/RMSE/R2), MAE-by-depth,
                   top-5 best/worst predictions, residual plot -> validation_{cant}/residuals.png.
     compare     - Explainer.compare_to_baselines(): HGT vs HomoGNN vs Mean vs GBT. Trains HomoGNN
@@ -60,7 +63,7 @@ import hetero_graphs as hg
 import training as t
 import explainer as exp
 
-STAGE_ORDER = ['regenerate', 'split', 'graphs', 'sweep', 'train', 'homo',
+STAGE_ORDER = ['regenerate', 'split', 'graphs', 'sweep', 'train', 'homo', 'kdim',
                'validate', 'compare', 'explain']
 
 
@@ -107,10 +110,14 @@ def _predict_all(model_holder):
     return pd.DataFrame(records)
 
 
-def run(database, cant, stages):
+def run(database, cant, stages, selection_metric='pooled'):
     """Run the requested stages (a set/iterable of stage names) for (database, cant),
     always in STAGE_ORDER regardless of the input order. Unknown stage names are ignored
-    here (main() validates and errors on them for CLI use)."""
+    here (main() validates and errors on them for CLI use).
+
+    selection_metric: 'pooled' (default, matches every checkpoint trained to date) or
+    'last_event' -- passed through to sweep()/Modelling() for the 'sweep'/'train' stages only.
+    See training.py's Het_Reg_Modelling docstring and OPEN_ISSUES_FEASIBILITY.md item 11."""
     stages = set(stages)
     ordered = [s for s in STAGE_ORDER if s in stages]
     print(f"Running stages {ordered} for database={database}, cant={cant}")
@@ -150,7 +157,7 @@ def run(database, cant, stages):
         print("=" * 60)
         m = t.Modelling(database, cant)
         print(f"Task ID: {m.task_id}")
-        m.sweep()
+        m.sweep(selection_metric=selection_metric)
 
     if 'train' in stages:
         print("\n" + "=" * 60)
@@ -161,7 +168,7 @@ def run(database, cant, stages):
         # own defensive reload-after-sweep convention.
         m = t.Modelling(database, cant)
         print(f"  Loaded params: {m.params}")
-        m.Modelling()
+        m.Modelling(selection_metric=selection_metric)
 
     if 'homo' in stages:
         print("\n" + "=" * 60)
@@ -170,6 +177,14 @@ def run(database, cant, stages):
         if m is None:
             m = t.Modelling(database, cant)
         m.Homo_Reg_Modelling()
+
+    if 'kdim' in stages:
+        print("\n" + "=" * 60)
+        print("KDIM — k-dim GNN baseline (HOEG's own architecture)")
+        print("=" * 60)
+        if m is None:
+            m = t.Modelling(database, cant)
+        m.KDim_Reg_Modelling()
 
     # ── Tail: validate / compare / explain, all operate on the trained checkpoint.
     # Built via a single Explainer instance (Explainer IS a Modelling) rather than the
@@ -283,6 +298,11 @@ def main():
     parser.add_argument('--cant', required=True, type=int)
     parser.add_argument('--stages', required=True,
                          help=f"Comma-separated subset of: {','.join(STAGE_ORDER)}")
+    parser.add_argument('--selection-metric', choices=['pooled', 'last_event'], default='pooled',
+                         help="Val MAE used for early stopping / best-checkpoint selection in "
+                              "the 'sweep' and 'train' stages. Default 'pooled' matches every "
+                              "checkpoint trained to date; 'last_event' selects on the rare "
+                              "last-event subset instead (see OPEN_ISSUES_FEASIBILITY.md item 11).")
     args = parser.parse_args()
 
     stages = {s.strip() for s in args.stages.split(',') if s.strip()}
@@ -290,7 +310,7 @@ def main():
     if unknown:
         parser.error(f"Unknown stage(s): {sorted(unknown)}. Valid stages: {STAGE_ORDER}")
 
-    run(args.database, args.cant, stages)
+    run(args.database, args.cant, stages, selection_metric=args.selection_metric)
 
 
 if __name__ == '__main__':
