@@ -678,7 +678,7 @@ class Explainer(Modelling):
         # text right up against the y-axis/tick-label area; a fixed axis-fraction
         # margin (added to xlim below) keeps it legible regardless of scale.
         max_abs = max((abs(m) for m in means), default=1.0) or 1.0
-        offset = 0.03 * max_abs
+        offset = 0.06 * max_abs
         for bar, val in zip(bars, means):
             ha = "left" if val >= 0 else "right"
             ax.text(bar.get_width() + (offset if val >= 0 else -offset),
@@ -686,7 +686,12 @@ class Explainer(Modelling):
                     f"{val:+.2f}h", va="center", ha=ha, fontsize=8)
         xmin = min((m for m in means if m < 0), default=0.0)
         xmax = max((m for m in means if m > 0), default=0.0)
-        ax.set_xlim(xmin - offset * 4, xmax + offset * 4)
+        # Extra-wide margin on the negative side specifically: negative-bar value
+        # labels are right-aligned back toward the y-axis (ha="right"), so they're
+        # the ones at risk of crowding into the tick-label column for the single
+        # longest bar in the chart -- confirmed reproducing at the old 4x/0.03
+        # margin (e.g. "Events=ConfirmOrder" colliding with "-11.07h").
+        ax.set_xlim(xmin - offset * 6, xmax + offset * 4)
         from matplotlib.patches import Patch
         # Placed outside the axes (below the x-label) rather than inside a corner --
         # bars are sorted by magnitude, so the smallest (near-zero) bars always end
