@@ -1,0 +1,362 @@
+{
+  "Order Management / Orders -> PayOrder": {
+    "kpi_label": "Order Management / Orders -> PayOrder",
+    "n_traces": 50,
+    "methods": {
+      "InputXGradient": [
+        {
+          "label": "Orders: n_packages",
+          "mean_signed": -0.037968,
+          "mean_abs": 0.037968
+        },
+        {
+          "label": "Orders: price",
+          "mean_signed": -0.008676,
+          "mean_abs": 0.027211
+        },
+        {
+          "label": "Orders: n_items",
+          "mean_signed": -0.015661,
+          "mean_abs": 0.025034
+        },
+        {
+          "label": "Orders: n_products",
+          "mean_signed": -0.010633,
+          "mean_abs": 0.019884
+        },
+        {
+          "label": "Orders: total_weight",
+          "mean_signed": -0.006745,
+          "mean_abs": 0.018457
+        },
+        {
+          "label": "Events: PackageDelivered",
+          "mean_signed": -0.006246,
+          "mean_abs": 0.006281
+        },
+        {
+          "label": "Events: waiting_h",
+          "mean_signed": -0.005346,
+          "mean_abs": 0.005377
+        },
+        {
+          "label": "Events: FailedDelivery",
+          "mean_signed": -0.004708,
+          "mean_abs": 0.00531
+        }
+      ],
+      "IntegratedGradients": [
+        {
+          "label": "Orders: n_packages",
+          "mean_signed": -0.036725,
+          "mean_abs": 0.036725
+        },
+        {
+          "label": "Orders: n_items",
+          "mean_signed": -0.013284,
+          "mean_abs": 0.023629
+        },
+        {
+          "label": "Orders: price",
+          "mean_signed": -0.007021,
+          "mean_abs": 0.022985
+        },
+        {
+          "label": "Orders: n_products",
+          "mean_signed": -0.010868,
+          "mean_abs": 0.021104
+        },
+        {
+          "label": "Orders: total_weight",
+          "mean_signed": -0.006265,
+          "mean_abs": 0.01371
+        },
+        {
+          "label": "Events: ReorderItem",
+          "mean_signed": -0.003046,
+          "mean_abs": 0.008457
+        },
+        {
+          "label": "Events: FailedDelivery",
+          "mean_signed": -0.007394,
+          "mean_abs": 0.008259
+        },
+        {
+          "label": "Customers: Mediterranea Luxury Cruises S.p.A.",
+          "mean_signed": 0.007581,
+          "mean_abs": 0.007581
+        }
+      ]
+    }
+  },
+  "Logistics / CustomerOrder -> LoadToVehicle": {
+    "kpi_label": "Logistics / CustomerOrder -> LoadToVehicle",
+    "n_traces": 50,
+    "methods": {
+      "InputXGradient": [
+        {
+          "label": "CustomerOrder: AmountofGoods",
+          "mean_signed": 0.035991,
+          "mean_abs": 0.063143
+        },
+        {
+          "label": "TransportDocument: AmountofContainers",
+          "mean_signed": -0.011648,
+          "mean_abs": 0.060824
+        },
+        {
+          "label": "Vehicle: Vehicle_present",
+          "mean_signed": -0.004975,
+          "mean_abs": 0.00812
+        },
+        {
+          "label": "Events: BringToLoadingBay",
+          "mean_signed": -0.003808,
+          "mean_abs": 0.004047
+        },
+        {
+          "label": "Container: AmountofHandlingUnits",
+          "mean_signed": 0.000378,
+          "mean_abs": 0.00294
+        },
+        {
+          "label": "Events: waiting_h",
+          "mean_signed": -0.002566,
+          "mean_abs": 0.002939
+        },
+        {
+          "label": "Events: Depart",
+          "mean_signed": 0.002353,
+          "mean_abs": 0.002439
+        },
+        {
+          "label": "Container: Weight",
+          "mean_signed": -1.8e-05,
+          "mean_abs": 0.002007
+        }
+      ],
+      "IntegratedGradients": [
+        {
+          "label": "CustomerOrder: AmountofGoods",
+          "mean_signed": 0.053902,
+          "mean_abs": 0.084934
+        },
+        {
+          "label": "TransportDocument: AmountofContainers",
+          "mean_signed": -0.016927,
+          "mean_abs": 0.076657
+        },
+        {
+          "label": "Vehicle: Vehicle_present",
+          "mean_signed": -0.026518,
+          "mean_abs": 0.029489
+        },
+        {
+          "label": "Events: waiting_h",
+          "mean_signed": -0.014137,
+          "mean_abs": 0.014217
+        },
+        {
+          "label": "Events: BringToLoadingBay",
+          "mean_signed": -0.013708,
+          "mean_abs": 0.013708
+        },
+        {
+          "label": "Events: elapsed_h",
+          "mean_signed": -0.006548,
+          "mean_abs": 0.006612
+        },
+        {
+          "label": "Events: Depart",
+          "mean_signed": 0.005874,
+          "mean_abs": 0.005981
+        },
+        {
+          "label": "Container: AmountofHandlingUnits",
+          "mean_signed": 0.003527,
+          "mean_abs": 0.005539
+        }
+      ]
+    }
+  },
+  "Order Management / Orders -> PackageDelivered": {
+    "kpi_label": "Order Management / Orders -> PackageDelivered",
+    "n_traces": 50,
+    "methods": {
+      "InputXGradient": [
+        {
+          "label": "Orders: n_items",
+          "mean_signed": 7.3e-05,
+          "mean_abs": 0.009184
+        },
+        {
+          "label": "Orders: price",
+          "mean_signed": -0.006861,
+          "mean_abs": 0.008629
+        },
+        {
+          "label": "Orders: n_products",
+          "mean_signed": -0.004218,
+          "mean_abs": 0.008417
+        },
+        {
+          "label": "Orders: total_weight",
+          "mean_signed": -0.005587,
+          "mean_abs": 0.007595
+        },
+        {
+          "label": "Events: ConfirmOrder",
+          "mean_signed": -0.006103,
+          "mean_abs": 0.006103
+        },
+        {
+          "label": "Orders: n_packages",
+          "mean_signed": -0.003666,
+          "mean_abs": 0.004778
+        },
+        {
+          "label": "Events: PlaceOrder",
+          "mean_signed": -0.002701,
+          "mean_abs": 0.002701
+        },
+        {
+          "label": "Customers: Iberian Sun Solaridades SA",
+          "mean_signed": -0.002514,
+          "mean_abs": 0.002514
+        }
+      ],
+      "IntegratedGradients": [
+        {
+          "label": "Orders: total_weight",
+          "mean_signed": -0.009891,
+          "mean_abs": 0.01294
+        },
+        {
+          "label": "Orders: n_packages",
+          "mean_signed": -0.012928,
+          "mean_abs": 0.012928
+        },
+        {
+          "label": "Orders: n_products",
+          "mean_signed": -0.006012,
+          "mean_abs": 0.01207
+        },
+        {
+          "label": "Events: ConfirmOrder",
+          "mean_signed": -0.011694,
+          "mean_abs": 0.011694
+        },
+        {
+          "label": "Orders: price",
+          "mean_signed": -0.006227,
+          "mean_abs": 0.01154
+        },
+        {
+          "label": "Orders: n_items",
+          "mean_signed": -0.002381,
+          "mean_abs": 0.006368
+        },
+        {
+          "label": "Events: o1_Items",
+          "mean_signed": -0.004494,
+          "mean_abs": 0.004651
+        },
+        {
+          "label": "Events: PlaceOrder",
+          "mean_signed": -0.003545,
+          "mean_abs": 0.003545
+        }
+      ]
+    }
+  },
+  "Logistics / CustomerOrder -> Depart": {
+    "kpi_label": "Logistics / CustomerOrder -> Depart",
+    "n_traces": 50,
+    "methods": {
+      "InputXGradient": [
+        {
+          "label": "TransportDocument: AmountofContainers",
+          "mean_signed": -0.002613,
+          "mean_abs": 0.003157
+        },
+        {
+          "label": "Events: BringToLoadingBay",
+          "mean_signed": 0.001072,
+          "mean_abs": 0.001544
+        },
+        {
+          "label": "Events: waiting_h",
+          "mean_signed": 0.000543,
+          "mean_abs": 0.00102
+        },
+        {
+          "label": "Events: elapsed_h",
+          "mean_signed": 0.000141,
+          "mean_abs": 0.000334
+        },
+        {
+          "label": "Container: Weight",
+          "mean_signed": 5.9e-05,
+          "mean_abs": 0.000173
+        },
+        {
+          "label": "Events: o1_Vehicle",
+          "mean_signed": 6e-06,
+          "mean_abs": 0.000171
+        },
+        {
+          "label": "Events: PlaceInStock",
+          "mean_signed": 9.8e-05,
+          "mean_abs": 0.000155
+        },
+        {
+          "label": "Container: AmountofHandlingUnits",
+          "mean_signed": 3.8e-05,
+          "mean_abs": 0.000151
+        }
+      ],
+      "IntegratedGradients": [
+        {
+          "label": "TransportDocument: AmountofContainers",
+          "mean_signed": -0.000942,
+          "mean_abs": 0.057877
+        },
+        {
+          "label": "Events: BringToLoadingBay",
+          "mean_signed": -0.021787,
+          "mean_abs": 0.021787
+        },
+        {
+          "label": "Events: waiting_h",
+          "mean_signed": -0.012293,
+          "mean_abs": 0.01231
+        },
+        {
+          "label": "Events: elapsed_h",
+          "mean_signed": -0.004119,
+          "mean_abs": 0.004119
+        },
+        {
+          "label": "Events: o1_Vehicle",
+          "mean_signed": 0.000324,
+          "mean_abs": 0.001972
+        },
+        {
+          "label": "Container: AmountofHandlingUnits",
+          "mean_signed": -0.000306,
+          "mean_abs": 0.001559
+        },
+        {
+          "label": "Events: PlaceInStock",
+          "mean_signed": -0.001559,
+          "mean_abs": 0.001559
+        },
+        {
+          "label": "Container: Weight",
+          "mean_signed": -0.000365,
+          "mean_abs": 0.001494
+        }
+      ]
+    }
+  }
+}

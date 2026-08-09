@@ -1,0 +1,162 @@
+{
+  "Order Management / Orders -> PayOrder": {
+    "kpi_label": "Order Management / Orders -> PayOrder",
+    "order_id": 1801,
+    "true_hours": 274.6208340893792,
+    "predicted_hours": 125.77710069444444,
+    "rows": [
+      {
+        "label": "i-886996 -[rev_to]-> o-991801",
+        "signed_shift_hours": -67.43853810763889
+      },
+      {
+        "label": "i-886995 -[rev_to]-> o-991801",
+        "signed_shift_hours": 29.17026857638889
+      },
+      {
+        "label": "PlaceOrder -[rev_to]-> o-991801",
+        "signed_shift_hours": 21.694172482638887
+      },
+      {
+        "label": "o-991801 -[to]-> PlaceOrder",
+        "signed_shift_hours": -19.245113194444446
+      },
+      {
+        "label": "PlaceOrder -[rev_to]-> Eastern Oak Insurance Zrt.",
+        "signed_shift_hours": 5.465681076388889
+      },
+      {
+        "label": "o-991801 -[rev_to]-> Eastern Oak Insurance Zrt.",
+        "signed_shift_hours": -4.967389236111111
+      },
+      {
+        "label": "Eastern Oak Insurance Zrt. -[to]-> o-991801",
+        "signed_shift_hours": 4.95033828125
+      },
+      {
+        "label": "FailedDelivery -[rev_to]-> i-886996",
+        "signed_shift_hours": 2.0099030381944445
+      }
+    ]
+  },
+  "Logistics / CustomerOrder -> LoadToVehicle": {
+    "kpi_label": "Logistics / CustomerOrder -> LoadToVehicle",
+    "order_id": 911,
+    "true_hours": 3.555561126638204,
+    "predicted_hours": -13.543923611111111,
+    "rows": [
+      {
+        "label": "td911 -[rev_to]-> co911",
+        "signed_shift_hours": -315.4262368055555
+      },
+      {
+        "label": "CreateTransportDocument -[rev_to]-> co911",
+        "signed_shift_hours": -6.114449305555556
+      },
+      {
+        "label": "td911 -[to]-> CreateTransportDocument",
+        "signed_shift_hours": -3.8099774305555556
+      },
+      {
+        "label": "cr3101 -[to]-> td911",
+        "signed_shift_hours": -1.5722416666666665
+      },
+      {
+        "label": "BringToLoadingBay -[rev_to]-> cr3101",
+        "signed_shift_hours": -1.3103798611111113
+      },
+      {
+        "label": "BringToLoadingBay -[rev_to]-> cr3100",
+        "signed_shift_hours": -0.8725597222222222
+      },
+      {
+        "label": "cr3100 -[to]-> td911",
+        "signed_shift_hours": -0.5323503472222222
+      },
+      {
+        "label": "BookVehicles -[rev_to]-> td911",
+        "signed_shift_hours": 0.4873618055555556
+      }
+    ]
+  },
+  "Order Management / Orders -> PackageDelivered": {
+    "kpi_label": "Order Management / Orders -> PackageDelivered",
+    "order_id": 1935,
+    "true_hours": 41.66666691288352,
+    "predicted_hours": 28.783402777777777,
+    "rows": [
+      {
+        "label": "i-887450 -[rev_to]-> o-991935",
+        "signed_shift_hours": 76.08908602430556
+      },
+      {
+        "label": "p-661075 -[to]-> i-887450",
+        "signed_shift_hours": -68.8344640625
+      },
+      {
+        "label": "p-661044 -[to]-> i-887451",
+        "signed_shift_hours": -22.407922222222222
+      },
+      {
+        "label": "i-887451 -[rev_to]-> o-991935",
+        "signed_shift_hours": 20.36110972222222
+      },
+      {
+        "label": "PayOrder -[rev_to]-> o-991935",
+        "signed_shift_hours": -5.228508159722223
+      },
+      {
+        "label": "o-991935 -[to]-> ConfirmOrder",
+        "signed_shift_hours": -2.191373958333333
+      },
+      {
+        "label": "PlaceOrder -[rev_to]-> o-991935",
+        "signed_shift_hours": -1.7401561631944444
+      },
+      {
+        "label": "o-991935 -[to]-> PlaceOrder",
+        "signed_shift_hours": 0.19559687499999998
+      }
+    ]
+  },
+  "Logistics / CustomerOrder -> Depart": {
+    "kpi_label": "Logistics / CustomerOrder -> Depart",
+    "order_id": 959,
+    "true_hours": 32.71528212677688,
+    "predicted_hours": 29.731180555555557,
+    "rows": [
+      {
+        "label": "td959 -[rev_to]-> co959",
+        "signed_shift_hours": -288.67457777777776
+      },
+      {
+        "label": "CreateTransportDocument -[rev_to]-> co959",
+        "signed_shift_hours": 41.05587361111111
+      },
+      {
+        "label": "RegisterCustomerOrder -[rev_to]-> co959",
+        "signed_shift_hours": 38.076795833333335
+      },
+      {
+        "label": "CreateTransportDocument -[to]-> RegisterCustomerOrder",
+        "signed_shift_hours": 1.0065465277777779
+      },
+      {
+        "label": "co959 -[to]-> RegisterCustomerOrder",
+        "signed_shift_hours": -0.29309756944444443
+      },
+      {
+        "label": "vh214 -[rev_to]-> td959",
+        "signed_shift_hours": 0.11153576388888889
+      },
+      {
+        "label": "cr3281 -[to]-> td959",
+        "signed_shift_hours": 0.09594756944444445
+      },
+      {
+        "label": "BringToLoadingBay -[rev_to]-> cr3281",
+        "signed_shift_hours": 0.06753854166666666
+      }
+    ]
+  }
+}

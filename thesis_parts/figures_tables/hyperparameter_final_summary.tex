@@ -1,0 +1,23 @@
+% Requires \usepackage{booktabs} in the preamble.
+\begin{table}[htbp]
+\centering
+\caption{Final chosen hyperparameters for this thesis's two datasets, styled after de Leoni \& Volpato's Table 4.}
+\label{tab:final_hyperparameters}
+\begin{tabular}{lrr}
+\toprule
+Hyperparameter & Order Management & Logistics \\
+\midrule
+Number of epochs & 30 & 100 \\
+Patience & 4 & 10 \\
+Number of message-passing layers & 2 & 4 \\
+Activation function & PReLU & PReLU \\
+Number of heads & 2 & 2 \\
+Optimizer & Adam & Adam \\
+Number of hidden dimensions & 64 & 48 \\
+Learning rate & 0.001 & 0.001 \\
+Weight decay & 0.0 & 1e-05 \\
+\bottomrule
+\end{tabular}
+\vspace{2pt}
+\footnotesize{Order Management's weight decay (0.0) does not match \texttt{sweep()}'s current default (1e-5) -- confirm intentional before citing.}
+\end{table}

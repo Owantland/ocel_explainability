@@ -1,0 +1,16 @@
+% Requires \usepackage{booktabs} and \usepackage{multirow} in the preamble.
+\begin{table}[htbp]
+\centering
+\caption{Summary of the datasets used in this thesis, styled after Smit et al.'s (2024) Table 6, extended with this thesis's own graph-encoding characteristics.}
+\label{tab:dataset_summary}
+\begin{tabular}{lrrrrrrrrrrl}
+\toprule
+\multirow{2}{*}{OCEL} & \multicolumn{2}{c}{Events} & \multicolumn{3}{c}{Objects} & \multirow{2}{*}{Cases} & \multirow{2}{*}{\shortstack{Mean Object\\Interactions per Event}} & \multicolumn{4}{c}{This Thesis's Graph Encoding} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-6} \cmidrule(lr){9-12}
+ &  & Attributes &  & Types & Attributes &  &  & Activities & \shortstack{Node\\Types} & \shortstack{Edge\\Types} & Time Span \\
+\midrule
+Order Management & 20801 & 0 & 10815 & 6 & 7 & 2000 & 7.37 & 11 & 7 & 13 & 2023-04-03 to 2024-06-09 \\
+Logistics & 121913 & 0 & 47591 & 7 & 7 & 2000 & 2.1 & 14 & 8 & 13 & 2023-05-22 to 2027-08-13 \\
+\bottomrule
+\end{tabular}
+\end{table}
