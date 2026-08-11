@@ -1,3 +1,0 @@
-Dataset,Viewpoint (object type),Target KPI,Target mean (h),Target std (h),Processed subsample (cant),Train prefixes,Val prefixes,Test prefixes
-Order Management,Orders,remaining time to PayOrder,254,220,2000 (100% of OCEL),15931,1488,2541
-Logistics,CustomerOrder,remaining time to LoadToVehicle,306,164,1000 (50% of OCEL),42531,6502,8673
