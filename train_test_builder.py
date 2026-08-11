@@ -59,16 +59,6 @@ class TrainTestBuilder:
         pd_active_orders.sort_values(by=2, inplace=True)
         return pd_active_orders
 
-    def sample_equally(self, input_list, num_samples):
-        # Handle edge cases
-        if num_samples - 1 <= 0:
-            return []
-        if num_samples >= len(input_list):
-            return input_list
-        step = int((len(input_list) - 1) / (num_samples - 1))
-        sampled_list = [input_list[i * step] for i in range(num_samples)]
-        return sampled_list
-
     def timestamps_generator(self):
         # Finds the timestamp related to the chosen train/test split
         split_timestamp = self.pd_active_orders.iloc[self.index_train, 2]

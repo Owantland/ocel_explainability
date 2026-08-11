@@ -108,6 +108,13 @@ def depth_mae(y_true: np.ndarray, y_pred: np.ndarray,
     return result
 
 
+def fmt_time(v) -> str:
+    """Format a fit-time value (seconds) for the scalability table, or 'n/a' if
+    unavailable. Shared by this module's own run() and training.py's
+    compare_models(), which used to carry an identical local copy."""
+    return f"{v:.4f}" if v is not None else "n/a"
+
+
 # ── baseline models ────────────────────────────────────────────────────────
 
 class MeanPredictor:
@@ -397,8 +404,7 @@ def run(database, cant):
     # true_h/homo_pred_h/n_events, not test_df's.
 
     # ── Scalability table (fitting/prediction time, seconds) ────────────────
-    def _fmt_time(v):
-        return f"{v:.4f}" if v is not None else "n/a"
+    _fmt_time = fmt_time
 
     print(f"\n{'Model':<18}  {'Fitting Time (s)':>18}  {'Prediction Time (s)':>20}")
     print(f"{'Mean predictor':<18}  {_fmt_time(mean_fit_time_s):>18}  {mean_pred_time_s:>20.4f}")

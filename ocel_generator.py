@@ -288,50 +288,11 @@ class Generator:
             }
         return role_enc
 
-    def get_ev_encoding(self, ev_type):
-        """Return the one-hot encoding for ev_type (now delegates to cached dict)."""
-        return self.ev_encodings[ev_type]
-
     def col_names(self, table_name):
         self.cursor.execute(f"PRAGMA table_info({table_name});")
         columns_info = self.cursor.fetchall()
         column_names = [column[1] for column in columns_info]
         return column_names
-
-    def generate_adjacency_list_with_k(self, ev_ob_df, par):
-        """
-        Generate an adjacency list from events_by_objects, linking events up to the K-th event.
-        Kept for backwards compatibility; generate_ocel uses the incremental approach instead.
-        """
-        def generate_consecutive_pairs(events):
-            pairs = []
-            n = len(events)
-            for i in range(n - 1):
-                pairs.append((events[i], events[i + 1]))
-            return pairs
-
-        events_by_objects = {}
-        for i, row in ev_ob_df.iterrows():
-            v = row['events']
-            k = row['ob_id']
-            events_by_objects[k] = [a for a in v if a <= par]
-
-        subsequences_by_object = {}
-        for obj, events in events_by_objects.items():
-            subsequences_by_object[obj] = generate_consecutive_pairs(events)
-
-        event_links = defaultdict(set)
-        for subseq in subsequences_by_object.values():
-            for e1, e2 in subseq:
-                event_links[e1].add(e2)
-
-        source_nodes = []
-        target_nodes = []
-        for source, targets in event_links.items():
-            for target in targets:
-                source_nodes.append(source)
-                target_nodes.append(target)
-        return [source_nodes, target_nodes]
 
     def generate_ocel(self, nodes):
         all_timestamps = []
@@ -555,8 +516,3 @@ class Generator:
         with open(f"files/graph_structures/{self.database}/{self.cant}/tensor_dict.json", "w") as f:
             json.dump(self.tensor_dict, f)
         print('Done')
-
-    def encode_events(self):
-        ocel = pd.read_csv(f"files/graph_structures/{self.database}/{self.cant}/ocel.csv")
-        ocel['ev_type'] = ocel['ev_type'].apply(lambda x: self.ev_encodings[x])
-        ocel.to_csv(f"files/graph_structures/{self.database}/{self.cant}/ocel.csv", index=False)

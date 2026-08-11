@@ -948,6 +948,11 @@ class Modelling:
     """
     def compare_models(self):
         """Evaluate HGT and HomoGNN side-by-side on the test split and save a comparison plot."""
+        # Local import (not module-level) since baselines.py itself imports training.py --
+        # a top-level import here would be circular. Reuses baselines.py's metrics()/
+        # depth_mae()/fmt_time() instead of the near-identical local copies this method
+        # used to carry (same formulas, previously duplicated rather than shared).
+        import baselines as bl
 
         vp = self.kpi_viewpoint
         # _hetero_to_homo() skips prefixes where the kpi_viewpoint object hasn't appeared yet;
@@ -1013,8 +1018,7 @@ class Modelling:
         hgt_fit_time_s  = _read_fit_time(self.model_path.replace(".pth", "_norm.json"))
         homo_fit_time_s = _read_fit_time(homo_model_path.replace(".pth", "_meta.json"))
 
-        def _fmt_time(v):
-            return f"{v:.4f}" if v is not None else "n/a"
+        _fmt_time = bl.fmt_time
 
         print(f"\n{'Model':<18}  {'Fitting Time (s)':>18}  {'Prediction Time (s)':>20}")
         print(f"{'HomoGNN (GCN)':<18}  {_fmt_time(homo_fit_time_s):>18}  {homo_pred_time_s:>20.4f}")
@@ -1025,19 +1029,14 @@ class Modelling:
         y_true    = df['true_h'].values
 
         # ── Metrics helper ────────────────────────────────────────────────────
+        # _metrics keeps its old 3-tuple contract (mae, rmse, r2) for the call sites
+        # below, translated from baselines.metrics()'s dict return.
         def _metrics(y_t, y_p):
-            ae   = np.abs(y_t - y_p)
-            mae  = ae.mean()
-            rmse = np.sqrt((ae**2).mean())
-            ss_r = ((y_t - y_p)**2).sum()
-            ss_t = ((y_t - y_t.mean())**2).sum()
-            r2   = 1 - ss_r / ss_t if ss_t > 0 else float('nan')
-            return mae, rmse, r2
+            d = bl.metrics(y_t, y_p)
+            return d['mae'], d['rmse'], d['r2']
 
         def _depth_mae(y_t, y_p, n_ev):
-            bins   = [(1,3,'1-3'), (4,6,'4-6'), (7,9,'7-9'), (10,9999,'10+')]
-            return {lbl: np.abs(y_t[(n_ev>=lo)&(n_ev<=hi)] - y_p[(n_ev>=lo)&(n_ev<=hi)]).mean()
-                    for lo, hi, lbl in bins}
+            return bl.depth_mae(y_t, y_p, n_ev)
 
         n_ev = df['n_events'].values
         models_preds = [('HomoGNN (GCN)', df['homo_pred_h'].values),
