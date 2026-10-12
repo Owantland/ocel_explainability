@@ -354,6 +354,7 @@ Presentation plan
 5) Limitations / future work (short closing note)
 	- Employees zero-attribution mechanism (order_management/PayOrder) - identified, not yet
 	  root-caused
-	- logistics: Forklift/HandlingUnit/Truck node types unreachable under the old sweep
-	  (num_layers=1) - fixed in sweep() going forward, existing checkpoint not yet re-swept
+	- logistics: Forklift/HandlingUnit/Truck node types were unreachable under the old sweep
+	  (num_layers=1) - fixed in sweep() going forward; the Depart/LoadToVehicle checkpoints
+	  have both since been re-swept (num_layers=3, AdamW) and promoted
 	- Binary classification path intentionally left half-migrated / out of scope for this thesis
