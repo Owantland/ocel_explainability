@@ -20,7 +20,18 @@ import matplotlib.pyplot as plt
 import copy
 
 class Modelling:
-    def __init__(self, database, cant, seed=42):
+    def __init__(self, database, cant, seed=42, target_transform='zscore'):
+        """
+        :param target_transform: 'zscore' (default, unchanged behavior -- every currently-cited
+            checkpoint was trained this way) or 'log1p'. 'log1p' applies log1p() to the raw
+            remaining-time target (seconds) before fitting/applying the usual z-score, to test
+            whether de-emphasizing the heavy right tail of the remaining-time distribution
+            reduces MAE_all -- see MAE_IMPROVEMENT_OPTIONS.md option 3. Purely opt-in: omitting
+            it reproduces the exact existing pipeline.
+        """
+        if target_transform not in ('zscore', 'log1p'):
+            raise ValueError(f"target_transform must be 'zscore' or 'log1p', got {target_transform!r}")
+        self.target_transform = target_transform
         self.database = database
         self.cant = cant
         self.init_seed = seed  # only affects model weight init below, not training-loop seeding
@@ -89,10 +100,16 @@ class Modelling:
 
         # Standardize the output values.
         # Checks if there is a saved file containing the standardized values to import
+        # (skipped for target_transform='log1p' -- a cached _norm.json on disk was fit on the
+        # raw/untransformed target by a prior 'zscore' run, so reusing it here would silently
+        # apply the wrong stats; log1p always recomputes its own mean/std fresh below).
         train_y_all = torch.cat([g[self.kpi_viewpoint].y for g in self.train_data])
         _model_dir = f"{self.path_dict['model_path']}/Hetero"
         _norm_path = f"{_model_dir}/{self.task_id}_norm.json"
-        if os.path.exists(_norm_path):
+        if self.target_transform == 'log1p':
+            train_y_all = torch.log1p(train_y_all)
+            target_mean, target_std = train_y_all.mean(), train_y_all.std()
+        elif os.path.exists(_norm_path):
             with open(_norm_path) as _f:
                 _saved = json.load(_f)
             target_mean = torch.tensor(_saved["target_mean"])
@@ -101,7 +118,8 @@ class Modelling:
             target_mean, target_std = train_y_all.mean(), train_y_all.std()
         for m in [self.train_data, self.val_data, self.test_data]:
             for g in m:
-                g[self.kpi_viewpoint].y = (g[self.kpi_viewpoint].y - target_mean) / target_std
+                y = torch.log1p(g[self.kpi_viewpoint].y) if self.target_transform == 'log1p' else g[self.kpi_viewpoint].y
+                g[self.kpi_viewpoint].y = (y - target_mean) / target_std
 
         # Print out the Mean and STD of the chosen regression database
         print(f"Training-set target normalization stats -- Mean (hours): "
@@ -441,7 +459,8 @@ class Modelling:
         with open(norm_path, "w") as f:
             json.dump({"target_mean": self.target_mean.item(),
                        "target_std":  self.target_std.item(),
-                       "fit_time_s":  fit_time_s}, f)
+                       "fit_time_s":  fit_time_s,
+                       "target_transform": self.target_transform}, f)
 
         log_path = self.model_path.replace(".pth", "_training_log.csv")
         pd.DataFrame(log).to_csv(log_path, index=False)
