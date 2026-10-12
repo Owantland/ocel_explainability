@@ -17,7 +17,7 @@ PayOrder, logistics/CustomerOrder->Depart) via baselines.py's run(database, cant
 -- previously baselines.py only ever ran hardcoded for order_management/2000 and
 Logistics' only depth-binned file on disk was keyed to the superseded
 TransportDocument viewpoint; both gaps are closed (see baselines.py and
-OPEN_ISSUES_FEASIBILITY.md item 7). Source CSVs are now named by task_id rather
+docs/archive/OPEN_ISSUES_FEASIBILITY.md item 7). Source CSVs are now named by task_id rather
 than by event/viewpoint name, so they can't silently go stale the same way again
 if the viewpoint or KPI event changes.
 

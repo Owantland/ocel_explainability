@@ -18,7 +18,7 @@ Stages (always run in the fixed order below, regardless of the order given on th
                   -- hetero_graphs.py needs all three files in sync (previously 'regenerate' only
                   refreshed ev_log.csv, silently leaving ocel.csv/edges.csv stale and causing a
                   'malformed node or string' crash in hetero_graphs.py's ast.literal_eval; see
-                  OPEN_ISSUES_FEASIBILITY.md item 6a).
+                  docs/archive/OPEN_ISSUES_FEASIBILITY.md item 6a).
                   WARNING: for logistics this overwrites the graph_structures/hetero_structures
                   cache in place (not viewpoint-qualified in its filename) -- back up first if
                   switching kpi_viewpoint, as done historically before the CustomerOrder switch.
@@ -117,7 +117,7 @@ def run(database, cant, stages, selection_metric='pooled'):
 
     selection_metric: 'pooled' (default, matches every checkpoint trained to date) or
     'last_event' -- passed through to sweep()/Modelling() for the 'sweep'/'train' stages only.
-    See training.py's Het_Reg_Modelling docstring and OPEN_ISSUES_FEASIBILITY.md item 11."""
+    See training.py's Het_Reg_Modelling docstring and docs/archive/OPEN_ISSUES_FEASIBILITY.md item 11."""
     stages = set(stages)
     ordered = [s for s in STAGE_ORDER if s in stages]
     print(f"Running stages {ordered} for database={database}, cant={cant}")
@@ -302,7 +302,7 @@ def main():
                          help="Val MAE used for early stopping / best-checkpoint selection in "
                               "the 'sweep' and 'train' stages. Default 'pooled' matches every "
                               "checkpoint trained to date; 'last_event' selects on the rare "
-                              "last-event subset instead (see OPEN_ISSUES_FEASIBILITY.md item 11).")
+                              "last-event subset instead (see docs/archive/OPEN_ISSUES_FEASIBILITY.md item 11).")
     args = parser.parse_args()
 
     stages = {s.strip() for s in args.stages.split(',') if s.strip()}

@@ -1,6 +1,6 @@
 """
 Retrain logistics/TransportDocument->Depart with the new selection_metric='last_event' option
-(training.py, added 2026-07-25 for OPEN_ISSUES_FEASIBILITY.md item 11), holding the ARCHITECTURE
+(training.py, added 2026-07-25 for docs/archive/OPEN_ISSUES_FEASIBILITY.md item 11), holding the ARCHITECTURE
 identical to the currently-deployed checkpoint (hidden_channels=64, num_layers=3, num_heads=2,
 lr=0.001, weight_decay=1e-5 -- from model_params.json's TimeFrom_TransportDocument_to_Depart
 entry) so this is a clean ablation of the selection criterion alone, isolated from the (already

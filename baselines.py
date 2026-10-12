@@ -339,7 +339,7 @@ def run(database, cant):
     for one (database, cant) pair. Previously this logic only ever ran hardcoded
     for order_management/2000 -- factored into a function, with the viewpoint and
     feature columns derived dynamically from `m` instead of hardcoded, so it also
-    works for logistics/CustomerOrder (see OPEN_ISSUES_FEASIBILITY.md item 7)."""
+    works for logistics/CustomerOrder (see docs/archive/OPEN_ISSUES_FEASIBILITY.md item 7)."""
     out_dir = f"files/explainer_outputs/{database}/validation_{cant}"
 
     # ── 1. Load data ──────────────────────────────────────────────────────

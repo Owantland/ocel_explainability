@@ -2781,7 +2781,7 @@ class Explainer(Modelling):
         # ── Depth-stratified attribution (OCEL analogue of Zhai et al.'s time-of-day
         #    heatmap), computed across ALL test prefixes, not just last-event graphs.
         #    Covers both the viewpoint type and Events -- the only two node types that
-        #    carry non-zero attribution (see EXPLAINABILITY_DEPTH.md) ───
+        #    carry non-zero attribution (see docs/archive/EXPLAINABILITY_DEPTH.md) ───
         if depth_stratify:
             self._explain_attribution_by_depth(methods=methods, n_traces=n_traces,
                                                 node_type=self.kpi_viewpoint)
@@ -2976,8 +2976,8 @@ class Explainer(Modelling):
         # order_id is only a safe unique join key there -- the full test set has
         # multiple prefix-rows per order_id, which last_event filters down to at
         # most one -- and last-event is already this project's established primary
-        # evaluation slice (MAE_last/R2_last, cited throughout TRAINING_VS_HOEG.md,
-        # EXPLAINABILITY_DEPTH.md, and the combined baseline table). No new model
+        # evaluation slice (MAE_last/R2_last, cited throughout docs/archive/TRAINING_VS_HOEG.md,
+        # docs/archive/EXPLAINABILITY_DEPTH.md, and the combined baseline table). No new model
         # inference needed -- reuses the predictions already computed above.
         import numpy as np
         from scipy import stats
@@ -3116,7 +3116,7 @@ class Explainer(Modelling):
         this per-relation-submodule mechanism. Getting real edge importance out of
         GNNExplainer here would need a custom monkeypatch of HGTConv.message()
         (this project already did exactly that once, to inspect attention weights
-        directly -- see EXPLAINABILITY_DEPTH.md) rather than PyG's built-in hook."""
+        directly -- see docs/archive/EXPLAINABILITY_DEPTH.md) rather than PyG's built-in hook."""
         if not hasattr(self, '_gnn_explainer_cache'):
             self._gnn_explainer_cache = {}
         key = (epochs, lr)

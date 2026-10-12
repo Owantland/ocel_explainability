@@ -18,7 +18,7 @@ the raw candidate-set size returned varies slightly by depth).
 
 This is a validation pass only -- results stage to thesis_parts/figures_tables/ but are
 NOT promoted to thesis_parts/latex_template/figures/. Whether/how to cite this in the
-thesis is a separate, later decision (see DELEONI_SHAPLEY_MAGNITUDE_DEPTH_HYPOTHESIS.md).
+thesis is a separate, later decision (see docs/archive/DELEONI_SHAPLEY_MAGNITUDE_DEPTH_HYPOTHESIS.md).
 
 Usage: PYTHONPATH=. python3 thesis_scripts/shapley_depth_validation.py
 """
