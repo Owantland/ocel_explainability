@@ -90,11 +90,55 @@ most, individual traces decrease monotonically).
 - **No thesis text changes made in this pass** — this was a validation-only task. Whether/how to
   report this finding (e.g., as a "tested and not confirmed" note, likely relevant context for
   the existing `prefix_evolution.png`/Section 5.2 discussion) is a separate, later decision.
-- The Logistics last-event anomalous prediction (-13.5h) is worth a dedicated look if pursued
-  further — not investigated here, flagged only as a plausible explanation for that one data
-  point's spike.
 - n=5 points per trace is enough to see these traces don't show a *clean* decrease, but too few
   for a confident correlation estimate either way — if this hypothesis needs a firmer statistical
   answer (rather than "not confirmed on 2 traces"), a larger multi-trace version of this same
   script (more traces, same method) would be the natural next step, distinct from
   `explain_loo_by_depth()`'s existing population-pooled (not per-trace, not Shapley) approach.
+
+## Addendum: order 911's negative last-event prediction investigated — not an anomaly
+
+Follow-up investigation into the -13.5h prediction flagged above. **Correction to the framing
+above**: this is not an isolated, order-911-specific anomaly — it's one instance of a systematic,
+dataset-wide miscalibration affecting nearly every LoadToVehicle last-event prediction.
+
+**Ground truth at last-event is small but not zero.** `last_event=True` marks the deepest
+recorded prefix of a trace (`hetero_graphs.py:168`); `process_generation.py`'s KPI construction
+truncates each trace's event log at the KPI event's own timestamp, so remaining time is always
+small there, but not exactly 0 (ties/other events can share the final slot). Measured directly
+across all 140 LoadToVehicle last-event test cases (denormalizing correctly via
+`y_raw * target_std + target_mean`, not dividing the already-z-normalized `.y` by 3600 — an
+easy mistake, caught and fixed mid-investigation): true remaining time ranges 0.37h–11.0h,
+mean 2.26h, std 1.76h — matching the scale already named in the (now-removed, see the last-event
+table-removal commit) results.tex text.
+
+**The model's predictions, by contrast, are not just noisy but systematically biased low**:
+mean predicted = -4.98h, std = 6.54h, range -19.8h to +41.8h. Error (pred - true): mean = -7.24h,
+std = 6.82h. **132 of 140 (94.3%) last-event predictions are negative**, despite the true value
+never being negative. Order 911's error (-17.1h) is worse than average but not an outlier — about
+1.45 std from the mean error, ranked 4th-most-negative prediction of 140 cases, not a unique
+glitch.
+
+**Root cause**: the model's z-normalization is fit on *all* prefixes of *all* depths
+(`target_mean≈306h, target_std≈164h`, dominated by early/mid-trace prefixes with large remaining
+times), while last-event's true scale (mean 2.26h) sits deep in that distribution's left tail
+(z ≈ -1.85) and is a small minority of training examples (one last-event prefix per trace, vs.
+many non-last-event prefixes per trace). A small, unremarkable error in the model's *normalized*
+output near that tail region (order 911's own error is only ≈ -0.10 normalized std) gets
+multiplied by the large global `target_std` on denormalization, turning a modest normalized-space
+miss into tens of absolute hours — enough to frequently cross zero, since the true value's own
+local scale (std 1.76h) is two orders of magnitude smaller than the global one it's denormalized
+against. This is the same scale-mismatch mechanism the (removed) results.tex text already
+identified as the cause of LoadToVehicle's catastrophic last-event R² (mean predictor
+R²=-29796, HGT R²=-30.8) — this addendum extends it with the *systematic negative bias*
+(not just high variance) and confirms via Depart's much milder R²_last (-0.17, vs.
+LoadToVehicle's -30.8) that this is specific to KPIs whose last-event target sits unusually close
+to zero, not a universal last-event artifact. Not investigated further: why the bias specifically
+skews negative rather than symmetric (a plausible mechanism is the model extrapolating its
+learned "more events seen → less time remaining" trend past the true near-zero floor, with
+nothing constraining output to stay non-negative, but this wasn't directly tested).
+
+**Conclusion**: order 911's -13.5h prediction is explained, and is representative rather than
+anomalous. No code or data bug found. This also means the Shapley-magnitude spike at that trace's
+last event (main finding above) is better attributed to this already-partially-known, KPI-wide
+last-event calibration issue than to anything unique about order 911 or about "depth" causally.
