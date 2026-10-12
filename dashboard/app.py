@@ -6,15 +6,15 @@ trace, not an in-progress case (unlike Galanti et al. 2023b's IBM Process Mining
 dashboard, which this loosely follows for presentation style: a case picker plus
 Global/Local explanation views).
 
-Run with: streamlit run dashboard.py
+Run with (from repo root): PYTHONPATH=. streamlit run dashboard/app.py
 """
 import os
 
 import pandas as pd
 import streamlit as st
 
-import dashboard_cache as dc
-import dashboard_precompute as dpc
+from dashboard import cache as dc
+from dashboard import precompute as dpc
 import explainer as exp
 
 DATASETS = {
