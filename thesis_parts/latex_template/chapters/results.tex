@@ -67,6 +67,7 @@ This chapter shows the thesis's results, going from the initial dataset processi
         Overall, neither graph reflects overfitting once the pattern behind it is more closely analyzed. Order Management's apparent gap is a property of its temporal validation split rather than a generalization failure, and Logistics' apparent divergence occurs only in training epochs beyond the one actually deployed. Nevertheless, both datasets share a training process that plateaus early, with the best available hyperparameters still leaving both model architectures at a relatively high absolute MAE floor for their respective KPIs.
 
         \subsection{Model comparison against baselines}
+        \label{sec:results_baselines}
         \begin{figure}[t!]
             \centering
             \includegraphics[width=1\textwidth]{figures/combined_baseline_comparison_table.png}
@@ -93,6 +94,11 @@ This chapter shows the thesis's results, going from the initial dataset processi
         Fig. \ref{fig:depth_summary} shows this change in predictive quality over prefix depth. The graphs show that in only two of the four KPIs the model's performance works as expected, with the MAE value decreasing as more information is added to the process execution. The HGT model for the "Time from CustomerOrder to LoadToVehicle" KPI is especially problematic as it's the only model that increases across the prefix depth.
         These graphs also highlight an important result. The HGT model performs worse for three of the four KPIs, with its MAE always higher than the homogeneous model's across multiple prefix depths.
         This result reverses for two of the four KPIs when comparing the models exclusively on last-event prefixes, as shown in the statistical breakdown above, indicating that aggregate metrics, which are dominated by non-last-event prefixes, and last-event-specific metrics can move independently, sometimes in opposite directions. However, it is worth noting that the aforementioned breakdown also shows this reversal is itself KPI-dependent rather than universal.
+
+        \subsection{Scope of the predictive results}
+            The previous sections presented a full accuracy comparison between the heterogeneous predictive model and several baselines, and it is important to state plainly what should be concluded from those results. As shown in Section~\ref{sec:results_baselines}, the heterogeneous model is not shown to be qualitatively better than the other techniques it was compared against, and on several KPIs performs comparably to, or on the full prefix set no better than, considerably simpler baselines.
+
+            This is an accepted outcome rather than a shortcoming specific to this thesis's approach: the thesis's central contribution is the explainability framework built on top of these predictive models, not an improvement to predictive accuracy itself. For that framework's evaluation to be meaningful it is sufficient that the underlying predictive model produces working, non-trivial predictions; outperforming the state of the art was never a goal of this work. The predictive results reported above should therefore be read as context for interpreting the explanations that follow, rather than as a limitation of the explainability framework itself.
 
     \section{Explainability framework}
         Having described the predictive model's results the output of the proposed explainability framework on the created models is now shown. Each of the four distinct components of the framework is presented as well as a short explanation of how the provided explanations can be interpreted by a stakeholder.
