@@ -294,7 +294,7 @@ def run(database, cant, stages, selection_metric='pooled'):
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--database', required=True, choices=['order_management', 'logistics'])
+    parser.add_argument('--database', required=True, choices=['order_management', 'logistics', 'cargo_pickup_iot'])
     parser.add_argument('--cant', required=True, type=int)
     parser.add_argument('--stages', required=True,
                          help=f"Comma-separated subset of: {','.join(STAGE_ORDER)}")
