@@ -1,5 +1,11 @@
 # CargoPickup_IoT validation — does the current `process_generation`/`ocel_generator` configuration work?
 
+**Update, 2026-10-13 (same day, branch `cargo-pickup-iot-fixes`): RESOLVED.** Findings 1–4 below
+are fixed; Finding 5 is confirmed real (not fixed, by design) and now precisely quantified instead
+of just suspected. See "Resolution" at the bottom for what changed, the final numbers, and three
+additional bugs that only surfaced while actually making the fix work (none were anticipated by
+the original plan).
+
 **Date**: 2026-10-13
 **Scope**: validate whether `process_generation.py` and `ocel_generator.py`, as they stand today,
 work correctly against the `CargoPickup_IoT.sqlite` database (viewpoint: `Pickup Plan`). No
@@ -153,5 +159,70 @@ real quality concern, independent of Findings 1–4, and worth re-picking given 
 
 ## Where the generated artifacts are
 
-`files/graph_structures/cargo_pickup_iot/2000/` (gitignored, ~7.6 GB total — left in place for
-further inspection; delete if disk space is needed, it's fully regenerable via the command above).
+`files/graph_structures/cargo_pickup_iot/2000/` (gitignored, ~7.6 GB total at the time of this
+original pass — see Resolution below for the post-fix size).
+
+## Resolution (branch `cargo-pickup-iot-fixes`, same day)
+
+**Root cause, confirmed precisely** (the original "most likely mechanism" above was on the right
+track but incomplete): `Truck` is a many-to-many shared resource (300 trucks serve ~13,779
+plan-assignments across 2,000 plans). Putting it in `unique_ids` let `related_nodes()` pull in
+every event that truck ever took part in, across every other plan — correct for a strictly-owned
+hierarchy member (an Item belongs to one Order), wrong for a shared one. A second, independently
+confirmed issue: **`Cargo` is *also* shared** — each cargo serves exactly 2 different Pickup
+Plans, not 1:1 as the aggregate row count (2,000 `Pickupplan→Cargo` rows) misleadingly suggested.
+Both were acting as contamination pivots.
+
+**What changed** (`process_generation.py`, `ocel_generator.py`, `sup_funcs.py`, `files/config.yml`
+— full detail in the `cargo-pickup-iot-fixes` branch's commit):
+1. Fixed `related_nodes()`'s asymmetric initial neighbor pass (now checks both edge directions,
+   gated by `unique_ids` membership so it's a no-op for `order_management`/`logistics`).
+2. Added an opt-in `episode_scoped_ids` config mechanism: a shared type's event/traversal
+   inclusion is scoped to a `[start, end]` window read from `object_object`'s own
+   qualifier/timestamp columns (`"Assigned truck for pickup plan"` → `"Dropped truck from pickup
+   plan"`), instead of its entire cross-case history. `added_depth` corrected from `1` to `2`
+   (confirmed via precise loop-iteration tracing that `1` was simply insufficient to reach `Silo`).
+3. **A general invariant that turned out to matter more than the episode-scoping mechanism
+   itself**: a trace must never admit a *different* instance of the viewpoint's own type. This is
+   what actually closes the `Cargo` leak (`Cargo` was never going to get its own
+   `episode_scoped_ids` entry — it has no clean assign/drop qualifier pair) and is a strictly
+   stronger, dataset-agnostic safety net than enumerating every shared type in config.
+4. Two robustness fixes, found only by running the fix to completion rather than by review:
+   `get_ev_log()` now skips (logs + continues) a trace whose assigned truck(s) never reached
+   `kpi_event` at all anywhere, instead of crashing with an `IndexError` — a real possibility once
+   contamination no longer artificially guaranteed every trace *some* match via cross-contamination.
+   `ocel_generator.py` now pre-seeds every event row's object-type columns from the database's
+   full configured type set, opt-in behind `episode_scoped_ids`, so a trace legitimately lacking a
+   type (e.g. no `Silo` visit) doesn't build a different-shaped row than one that has it.
+5. A boundary-inclusivity bug in the episode-window clamp (for "open," never-dropped episodes):
+   the clamped end was the *next* assignment's own timestamp, and since the window check is
+   inclusive on both ends, that next-assignment edge itself (to a different plan) slipped through
+   as if still inside this episode. Fixed by nudging the clamp 1 second earlier.
+
+**Regression discipline**: every one of the 5 changes above was diffed against a byte-identical
+snapshot of `order_management`/`logistics` output, re-established from a *freshly regenerated*
+baseline after discovering the first on-disk snapshot was itself stale (predated an unrelated
+earlier code change, briefly causing a false "regression" signal). All 5 changes are confirmed
+byte-for-byte inert for both existing databases.
+
+**Final numbers for CargoPickup_IoT** (same command as the original run):
+- `ocel.csv`/`edges.csv`: **3.4 MB / 3.3 MB** (was 2.5 GB / 5.1 GB — contamination fully resolved,
+  now comparable to or smaller than `order_management`/`logistics`).
+- `tensor_dict.json` now includes `"Silo": 2, "Truck": 2` — Finding 2 fixed.
+- Average events/trace: **5.4** (median 4) — and event-type counts now match the raw database
+  *exactly* where directly comparable: `EvaluateTruckExit` = 3,322 rows (the database's total
+  count of that event, with zero duplication and zero omission); `ArriveatSilo`/
+  `DetermineContinuanceofPickup` = 100 each, `LoadTruck`/`WeighLoadedTruck`/`InputTallySheet`/
+  `PrintWeighingTicket` = 300 each — all exact matches to the DB-wide totals.
+- `--stages split`: **Train 70.0% / Val 6.8% / Test 7.1% / Gap 16.1%** — Finding 4 fixed (was
+  0.0% / 0.5%).
+- **320 of 2,000 traces (16%) are genuinely, correctly dropped** — not a bug, but Finding 5's real
+  consequence now precisely measured: these plans' assigned truck(s) never reached
+  `EvaluateTruckExit` at all (only ~24% of truck-assignments ever do; a plan needs at least one
+  success among however many reassignments it got). This supersedes the original Finding 3 (2
+  dropped traces) — that number was itself an artifact of the contamination masking the real
+  drop rate, not a separate issue.
+- Finding 5 itself (the `kpi_event`/`kpi_viewpoint` granularity mismatch) remains **not fixed, by
+  design** — this pass fixed the plumbing bugs that were making it worse than it needed to be and
+  precisely measured its real cost (16% of traces); re-picking `kpi_event` is still a separate,
+  deliberately deferred decision.

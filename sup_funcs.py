@@ -46,6 +46,11 @@ class SupportFunctions:
         path_dict['depth'] = path_dict.pop('added_depth')
         path_dict['results_path'] = "files/results.csv"
         path_dict['role_encoding'] = db_cfg.get('role_encoding') or {}
+        # Optional: shared-resource unique_ids types (e.g. a Truck serving many Pickup Plans)
+        # whose own event/traversal inclusion must be scoped to a bounded object_object episode
+        # rather than the object's entire cross-case history. Empty/absent -> no behavior change
+        # (see process_generation.py:related_nodes()).
+        path_dict['episode_scoped_ids'] = db_cfg.get('episode_scoped_ids') or {}
 
         # Generate the appropriate path for saving the process execution log
         path_dict['graph_output_path'] = f"{path_dict['graph_output_path']}{self.cant}/"
