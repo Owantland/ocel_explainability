@@ -29,11 +29,20 @@ if the viewpoint or KPI event changes.
 Usage: python3 mae_by_depth_summary.py
 """
 import os
+import shutil
 
 import matplotlib.pyplot as plt
 import pandas as pd
 
 OUT_DIR = "thesis_parts/figures_tables"
+
+# Self-promotion target, added 2026-10-13 to match combined_baseline_comparison.py's
+# STAGING_DIR/BUILD_DIR pattern -- previously this script only wrote to OUT_DIR above,
+# so the actual LaTeX build figure (results.tex's \includegraphics{figures/
+# mae_by_depth_summary.png}) silently went stale every time this script was re-run,
+# since nothing ever copied the regenerated PNG into the build directory. Caught when
+# CargoPickup_IoT's 5th-KPI row was added here but never showed up in the built PDF.
+BUILD_DIR = "thesis_parts/latex_template/figures"
 
 # (dataset label, path) -- label style matches hyperparameter_sweep_summary.png /
 # combined_baseline_comparison_table.png: "[Dataset] / [Object] -> [KPI Event]"
@@ -95,6 +104,11 @@ def render(df):
     plt.savefig(png_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"Saved {png_path}")
+
+    os.makedirs(BUILD_DIR, exist_ok=True)
+    build_path = os.path.join(BUILD_DIR, "mae_by_depth_summary.png")
+    shutil.copy(png_path, build_path)
+    print(f"Promoted to {build_path}")
 
 
 def main():
