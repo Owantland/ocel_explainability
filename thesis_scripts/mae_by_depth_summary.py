@@ -1,6 +1,11 @@
-"""MAE vs. prefix-depth, all baselines, all 4 currently-relevant KPIs -- addresses
+"""MAE vs. prefix-depth, all baselines, all 5 currently-relevant KPIs -- addresses
 thesis_structure.txt's explicit ask to "report MAE against prefix depth, not just
 an aggregate figure."
+
+Extended 2026-10-13 to add the 5th KPI, CargoPickup_IoT's Pickupplan->EvaluateTruckExit --
+the depth-binned CSV was generated via baselines.py --database cargo_pickup_iot --cant 2000
+(no config.yml switching needed, unlike the 2026-07-27 extension below -- this database
+only has one KPI configured so far).
 
 Extended 2026-07-27 to cover all 4 KPIs featured in hyperparameter_sweep_summary.png /
 combined_baseline_comparison_table.png (previously only PayOrder/Depart). The two new
@@ -41,6 +46,8 @@ SOURCES = [
      "files/explainer_outputs/logistics/validation_1000/mae_by_depth_TimeFrom_CustomerOrder_to_Depart.csv"),
     ("Logistics / CustomerOrder → LoadToVehicle",
      "files/explainer_outputs/logistics/validation_1000/mae_by_depth_TimeFrom_CustomerOrder_to_LoadToVehicle.csv"),
+    ("CargoPickup_IoT / Pickup Plan → EvaluateTruckExit",
+     "files/explainer_outputs/cargo_pickup_iot/validation_2000/mae_by_depth_TimeFrom_Pickupplan_to_EvaluateTruckExit.csv"),
 ]
 
 DEPTH_ORDER = ["1-3", "4-6", "7-9", "10+"]
@@ -81,7 +88,7 @@ def render(df):
     for ax in axes[len(SOURCES):]:
         ax.axis('off')
 
-    fig.suptitle("MAE vs. prefix depth, all 4 currently-relevant KPIs",
+    fig.suptitle("MAE vs. prefix depth, all 5 currently-relevant KPIs",
                  fontsize=11)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     png_path = os.path.join(OUT_DIR, "mae_by_depth_summary.png")

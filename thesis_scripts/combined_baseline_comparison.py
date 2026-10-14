@@ -21,6 +21,10 @@ the plan this script implements for the full reasoning):
                                  permanent -- see below for why this is no longer the generic file)
 - logistics/CustomerOrder->LoadToVehicle : validation_1000/model_comparison_LoadToVehicle.csv
                                  (KPI-suffixed, permanent -- new second logistics KPI, 2026-07-26)
+- cargo_pickup_iot/Pickupplan->EvaluateTruckExit : validation_2000/model_comparison.csv (generic
+                                 filename -- only one KPI configured for this database so far, no
+                                 collision risk like logistics' two-KPI situation above; added
+                                 2026-10-13, first training run for this third database)
 
 logistics/TransportDocument->Depart was dropped from this table (2026-07-26) -- it's the
 pre-fix/superseded logistics viewpoint, superseded by CustomerOrder->Depart, and multiple
@@ -66,6 +70,8 @@ SOURCES = [
      "files/explainer_outputs/logistics/validation_1000/model_comparison_Depart.csv", ""),
     ("Logistics / CustomerOrder → LoadToVehicle",
      "files/explainer_outputs/logistics/validation_1000/model_comparison_LoadToVehicle.csv", ""),
+    ("CargoPickup_IoT / Pickup Plan → EvaluateTruckExit",
+     "files/explainer_outputs/cargo_pickup_iot/validation_2000/model_comparison.csv", ""),
 ]
 
 OUT_DIR = "files/explainer_outputs"
