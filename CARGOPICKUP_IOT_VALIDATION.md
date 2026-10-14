@@ -226,3 +226,78 @@ byte-for-byte inert for both existing databases.
   design** — this pass fixed the plumbing bugs that were making it worse than it needed to be and
   precisely measured its real cost (16% of traces); re-picking `kpi_event` is still a separate,
   deliberately deferred decision.
+
+## Training results (branch `cargo-pickup-iot-training`, same database, same day)
+
+With the fixes above in place, a full HGT model was trained on `cargo_pickup_iot` and compared
+against `order_management`'s PayOrder result and `logistics`'s Depart/LoadToVehicle results, using
+this repo's existing pipeline stages and comparison tooling unchanged (`graphs` → `sweep` → `train`
+→ `homo` → `kdim` → `validate` → `compare`, `cant=2000`, `selection_metric='pooled'` — all
+established defaults, no deviation needed).
+
+**Two more previously-unexercised bugs surfaced and were fixed along the way** (both committed on
+`cargo-pickup-iot-training`, both confirmed byte-for-byte/numerically inert for
+`order_management`/`logistics` via the same clean-baseline regression methodology used throughout
+this project):
+- `hetero_graphs.py`'s `preprocessing_steps()` assumed every `vwpnt_id` 1..cant has at least one
+  `ev_log.csv` row — crashed on the 320 traces this database legitimately drops (`order_management`/
+  `logistics`'s kpi_event is reached by virtually every trace, so this was never exercised before).
+  Fixed by skipping empty traces, mirroring `TrainTestBuilder`'s own existing pattern.
+- `ocel_generator.py`'s `_lookup_time_attrs()` already coalesced a null "fixed" attribute reading
+  from any non-null row, but had no equivalent fallback for the time-sensitive attribute — a `None`
+  there crashed `hetero_graphs.py`'s `torch.tensor()` call. Confirmed real for `Silo`/`Humidity` (not
+  every changelog snapshot records every sensor reading). Added the same coalesce, preferring the
+  closest-in-time non-null row.
+
+**Also added**: an opt-in MPS (Apple GPU) device branch in `training.py` (unreachable on any CUDA
+machine), plus two small fixes to device-mismatch bugs it exposed in inference code
+(`run_pipeline.py`'s `_predict_all()` and `baselines.py`'s `hgt_predictions()` never moved graphs to
+the model's device — invisible when everything was CPU-only, a real crash once MPS was in play).
+
+### Results
+
+Final HGT checkpoint: `hidden_channels=24, num_layers=2, num_heads=2, lr=0.001` (16-trial grid
+sweep, same default non-logistics search space `order_management` uses — no need for logistics'
+extended layer search; no sign of a capacity collapse in the results below). Training converged in
+23 epochs (~6.5 min on MPS).
+
+| Dataset / KPI | Model | MAE (all) [h] | R² (all) | MAE (last) [h] | R² (last) |
+|---|---|---|---|---|---|
+| Order Management / PayOrder | **HGT** | 167.2 | -0.317 | 98.0 | 0.051 |
+| Logistics / Depart | **HGT** | 112.0 | 0.304 | 6.1 | -0.170 |
+| Logistics / LoadToVehicle | **HGT** | 115.0 | 0.281 | 8.4 | -30.8 |
+| **CargoPickup_IoT / EvaluateTruckExit** | **HGT** | **13.3** | **0.085** | **7.1** | **-0.668** |
+
+(Full 5-model breakdown — HGT/HomoGNN/k-dim GNN/Mean/GBT, all 5 KPIs — in
+`files/explainer_outputs/combined_baseline_comparison.csv`/`_table.png`, regenerated to include this
+database alongside the other two.)
+
+**R² (the primary cross-database axis, since raw MAE/RMSE scale with each dataset's own target
+variance — PayOrder's mean true remaining time is ~341h vs. CargoPickup_IoT's ~25h on the
+all-prefix test subset, so the much smaller MAE here is not directly comparable to the others'
+without R² for context):** CargoPickup_IoT's all-prefix R²=0.085 is **positive** — worse than
+Logistics' two KPIs (0.304, 0.281) but clearly better than PayOrder's (-0.317). Last-event R²
+(-0.668) sits in the same rough range as Logistics/Depart (-0.170) and is far better than
+Logistics/LoadToVehicle's (-30.8) — none of the four last-event R² values are strongly positive,
+consistent with the small last-event test-set sizes (n=142 here) making this metric noisy across
+every KPI in this project, not a CargoPickup_IoT-specific weakness.
+
+**Statistical significance** (`baseline_significance.csv`): HGT beats HomoGNN, k-dim GNN, and the
+Mean predictor decisively (p < 1e-20 on all three, Wilcoxon and t-test agree) on the last-event
+subset. Against GBT specifically, HGT (7.1h) and GBT (8.4h) are **not** statistically distinguishable
+on last-event MAE (p=0.40/0.43) — GBT's feature importances show it essentially collapsed to
+predicting from `n_events` alone (importance 1.000, every other feature ~0), so this is "HGT ties a
+simple event-count heuristic at the very end of a trace," the same pattern order_management's
+k-dim-GNN-beats-HGT-on-last-event result reflects: simple baselines can be competitive in the
+low-data, high-variance last-event regime even when HGT wins clearly everywhere else (all-prefix
+MAE: HGT 13.3h vs. GBT 24.1h, HGT vs. every other baseline in both MAE_all and MAE_last).
+
+**No sign of the dead-`lin_dict`/reachability pathology** ([[project_hgt_dead_features_finding]]):
+MAE-by-depth decreases monotonically and substantially (36.7h → 12.4h → 8.1h → 5.0h across the four
+depth bins), exactly the expected "closer to completion ⇒ less remaining-time variance ⇒ lower MAE"
+shape, with HGT below every baseline at every depth (see `mae_by_depth_summary.png`'s 5th panel).
+
+**Bottom line**: CargoPickup_IoT's HGT model is a genuinely competitive, well-behaved result —
+not the best R² of the three databases, but positive and mid-pack, with no architectural red flags,
+confirming the contamination/Silo/split fixes earlier in this document produced a database that's
+now fully usable for the same comparative analysis as the other two.
