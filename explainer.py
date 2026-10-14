@@ -32,6 +32,13 @@ class Explainer(Modelling):
     def _predict_value_for_graph(self, graph, object_idx, perturbed_graph=None):
         """Run the model on one small graph and return the de-normalized prediction."""
         g = perturbed_graph if perturbed_graph is not None else graph
+        # test_data's graphs (and any perturbed clone of one) are loaded/built on CPU
+        # and never moved to the training device -- a real cpu-vs-mps mismatch once an
+        # MPS device is in play (see training.py's device selection), the same bug class
+        # already fixed in run_pipeline.py's _predict_all() and baselines.py's
+        # hgt_predictions(); this is the third, previously-unpatched call site, inert on
+        # any CUDA/CPU-only machine but blocking every explainer.py prediction path here.
+        g = g.to(self.device)
         out = self.model(g.x_dict, g.edge_index_dict)
         denorm = out * self.target_std + self.target_mean
         return denorm[object_idx].item()
