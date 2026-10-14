@@ -329,6 +329,10 @@ def render_local_cf(result, explainer):
     if os.path.exists(png):
         st.image(png, caption="Graph structure comparison (query vs. best CF)")
 
+    png = os.path.join(save_dir, "cf_diff_graph.png")
+    if os.path.exists(png):
+        st.image(png, caption="Highlighted differences (query vs. best CF)")
+
     col1, col2 = st.columns(2)
     with col1:
         png = os.path.join(save_dir, "cf_node_type_comparison.png")

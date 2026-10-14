@@ -1984,6 +1984,10 @@ class Explainer(Modelling):
                                        results[0]['order_id'], query_pred / 3600.0,
                                        results[0]['predicted_hours'], save_dir,
                                        id_map_q=id_map_q, id_map_cf=id_map_cf)
+        self._plot_cf_diff_graph(query_graph, results[0]['graph'], order_id,
+                                 results[0]['order_id'], query_pred / 3600.0,
+                                 results[0]['predicted_hours'], save_dir,
+                                 id_map_q=id_map_q, id_map_cf=id_map_cf)
         self._plot_cf_event_type_diff(query_graph, results[0]['graph'], order_id,
                                       results[0]['order_id'], save_dir)
         self._plot_cf_viewpoint_feature_diff(query_graph, results[0]['graph'], order_id,
@@ -2236,6 +2240,207 @@ class Explainer(Modelling):
                     dpi=150, bbox_inches='tight')
         plt.close()
         print(f"Saved CF graph structure comparison to {save_dir}")
+
+    def _plot_cf_diff_graph(self, query_graph, cf_graph, query_id, cf_id,
+                            query_hours, cf_hours, save_dir, id_map_q=None, id_map_cf=None):
+        """Shared-layout node-link diagram highlighting what differs between the query
+        and its best counterfactual -- complements _plot_cf_graph_structures (which draws
+        the two graphs independently, with no highlighting). Query is treated as the
+        "base": a node/edge unique to it is marked in the query panel (nothing exists
+        there to show on the CF side); a node/edge new to the CF is marked in the CF
+        panel; a node present in both (see canon() below) whose own feature values
+        differ gets a third marker in both panels.
+
+        Node identity across the two graphs isn't free -- HeteroData carries no OCEL id,
+        only a (node_type, idx) tensor row -- so query_graph's (Items, 2) and cf_graph's
+        (Items, 2) are two unrelated real objects by default. id_map_q/id_map_cf (the
+        same {(node_type, idx): name} maps _plot_cf_graph_structures already uses for
+        labels, from _decode_all_identifiers()) are reused here to recognize when two
+        nodes are actually the SAME real-world entity (an OCEL id or an encoding-decoded
+        master-data name) recurring across both orders -- everything else stays
+        graph-local, namespaced by role so an unrelated query node and CF node never
+        collide just for sharing a type+index. 'Events' is excluded from this matching on
+        purpose: its decoded "name" is the activity TYPE, not an instance id, so two
+        different Events nodes in the SAME graph already share it -- matching on it would
+        wrongly collapse several real events into one node instead of recognizing genuine
+        cross-trace recurrence (which Events, being trace-local, never has anyway). Any
+        type listed in config's role_encoding (e.g. order_management's Employees, decoded
+        to a ROLE like "Warehousing" rather than a per-employee id -- see training.py's
+        Modelling.__init__, ~line 177) is excluded for the identical reason, confirmed
+        empirically: order #1801 alone decodes 3 separate Employees nodes to the same
+        "Warehousing" string. Matching on a role/category label would both silently merge
+        distinct real entities within ONE graph via nx.relabel_nodes's collision-merge
+        behavior (undercounting nodes) and manufacture false "shared with CF" matches
+        based on nothing but sharing a job category.
+
+        Reuses the shared-layout + Counter-based edge-diff technique from
+        thesis_scripts/archive/example_dissimilarity_showcase.py's draw_with_fixed_layout
+        -- that script's node keys only worked because every scenario was a .clone() of
+        the same base graph at identical indices; the canon() mapping below is what makes
+        the same technique valid for two independent real traces instead.
+        """
+        import networkx as nx
+        from collections import Counter
+
+        id_map_q = id_map_q or {}
+        id_map_cf = id_map_cf or {}
+        role_encoded_types = set(self.path_dict.get('role_encoding') or {})
+        no_identity_match = {'Events'} | role_encoded_types
+
+        def canon(node_type, idx, id_map, role):
+            if node_type not in no_identity_match and (node_type, idx) in id_map:
+                return (node_type, id_map[(node_type, idx)])
+            return (node_type, role, idx)
+
+        G_q = self._hetero_to_nx(query_graph)
+        G_cf = self._hetero_to_nx(cf_graph)
+        map_q = {n: canon(n[0], n[1], id_map_q, 'q') for n in G_q.nodes}
+        map_cf = {n: canon(n[0], n[1], id_map_cf, 'cf') for n in G_cf.nodes}
+        G_q_c = nx.relabel_nodes(G_q, map_q)
+        G_cf_c = nx.relabel_nodes(G_cf, map_cf)
+
+        q_nodes, cf_nodes = set(G_q_c.nodes), set(G_cf_c.nodes)
+        query_only = q_nodes - cf_nodes
+        cf_only = cf_nodes - q_nodes
+        shared = q_nodes & cf_nodes
+
+        # Pull back one original (node_type, idx) per shared canonical key in each
+        # graph, to compare its actual feature vector -- the SAME real-world entity can
+        # still have different attribute values recorded in each order's snapshot.
+        orig_q = {v: k for k, v in map_q.items()}
+        orig_cf = {v: k for k, v in map_cf.items()}
+        feat_changed = set()
+        for key in shared:
+            if key[0] == 'Events':
+                continue
+            nt_q, idx_q = orig_q[key]
+            nt_cf, idx_cf = orig_cf[key]
+            x_q = query_graph[nt_q].x[idx_q]
+            x_cf = cf_graph[nt_cf].x[idx_cf]
+            if x_q.shape == x_cf.shape and not torch.allclose(x_q, x_cf, atol=1e-2):
+                feat_changed.add(key)
+
+        def edge_counts(G):
+            return Counter((u, v, d['edge_type']) for u, v, d in G.edges(data=True))
+
+        q_edges, cf_edges = edge_counts(G_q_c), edge_counts(G_cf_c)
+        added_edges = cf_edges - q_edges      # present in CF, not in query
+        removed_edges = q_edges - cf_edges    # present in query, not in CF
+
+        def label_for(orig_key, id_map, canon_key):
+            if len(canon_key) == 2:  # identity-matched: (node_type, name)
+                return f"{canon_key[0]}: {canon_key[1]}"
+            node_type, idx = orig_key
+            name = id_map.get((node_type, idx))
+            return f"{node_type}: {name}" if name else f"{node_type}[{idx}]"
+
+        labels_q = {ck: label_for(ok, id_map_q, ck) for ok, ck in map_q.items()}
+        labels_cf = {ck: label_for(ok, id_map_cf, ck) for ok, ck in map_cf.items()}
+
+        palette = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2",
+                   "#937860", "#DA8BC3", "#8C8C8C", "#CCB974", "#64B5CD"]
+        all_types = sorted({key[0] for key in shared | query_only | cf_only})
+        type_colors = {nt: palette[i % len(palette)] for i, nt in enumerate(all_types)}
+        RED, GREEN, ORANGE = '#e34948', '#1baf7a', '#eda100'
+
+        G_union = nx.compose(G_q_c, G_cf_c)
+        try:
+            pos = nx.kamada_kawai_layout(G_union)
+        except Exception as exc:
+            print(f"  [layout] kamada_kawai_layout failed ({type(exc).__name__}: {exc}), "
+                  f"falling back to spring_layout")
+            pos = nx.spring_layout(G_union, seed=42, k=0.9)
+
+        # nx.draw_networkx_nodes autoscales each Axes to only the points IT draws, so
+        # two panels showing disjoint node subsets would otherwise end up on different
+        # pixel scales even though they share the same underlying `pos` coordinates --
+        # silently defeating the entire point of a shared layout (a truly shared node
+        # would not visibly land in the same spot). Locking both panels to one explicit
+        # bounding box, computed over every node in BOTH graphs, is what actually makes
+        # "same position = same entity" visible rather than just true in data space.
+        xs = [x for x, y in pos.values()]
+        ys = [y for x, y in pos.values()]
+        pad_x = (max(xs) - min(xs)) * 0.08 or 0.1
+        pad_y = (max(ys) - min(ys)) * 0.08 or 0.1
+        xlim = (min(xs) - pad_x, max(xs) + pad_x)
+        ylim = (min(ys) - pad_y, max(ys) + pad_y)
+
+        def draw_panel(ax, G, title, seed_key, unique_nodes, unique_color,
+                       highlight_edges, edge_color, edge_style, labels):
+            sub_pos = {n: pos[n] for n in G.nodes}
+            node_colors = [type_colors.get(n[0], 'gray') for n in G.nodes]
+            node_sizes = [420 if n == seed_key else
+                          (280 if (n in unique_nodes or n in feat_changed) else 180)
+                          for n in G.nodes]
+            edgecolors = ['black' if n == seed_key else
+                          (unique_color if n in unique_nodes else
+                           (ORANGE if n in feat_changed else 'none')) for n in G.nodes]
+            linewidths = [1.8 if n == seed_key else
+                          (2.5 if (n in unique_nodes or n in feat_changed) else 0)
+                          for n in G.nodes]
+            nx.draw_networkx_nodes(G, sub_pos, ax=ax, node_color=node_colors,
+                                    node_size=node_sizes, edgecolors=edgecolors,
+                                    linewidths=linewidths, alpha=0.9)
+
+            normal_edges, flagged_edges = [], []
+            remaining = Counter(highlight_edges)
+            for u, v, d in G.edges(data=True):
+                key = (u, v, d['edge_type'])
+                if remaining.get(key, 0) > 0:
+                    flagged_edges.append((u, v))
+                    remaining[key] -= 1
+                else:
+                    normal_edges.append((u, v))
+            nx.draw_networkx_edges(G, sub_pos, ax=ax, edgelist=normal_edges, edge_color="gray",
+                                    width=1.0, alpha=0.4, arrows=True, connectionstyle="arc3,rad=0.1")
+            if flagged_edges:
+                nx.draw_networkx_edges(G, sub_pos, ax=ax, edgelist=flagged_edges,
+                                        edge_color=edge_color, width=2.4, alpha=0.95,
+                                        style=edge_style, arrows=True,
+                                        connectionstyle="arc3,rad=0.1")
+
+            if G.number_of_nodes() <= 20:  # keep dense graphs readable, same guard as _draw_hetero_nx
+                nx.draw_networkx_labels(G, sub_pos, ax=ax,
+                                        labels={n: labels[n] for n in G.nodes}, font_size=6)
+
+            ax.set_xlim(xlim)
+            ax.set_ylim(ylim)
+            ax.set_title(title, fontsize=10)
+            ax.axis("off")
+
+        n_q = query_graph['Events'].x.size(0) if 'Events' in query_graph.node_types else 0
+        n_cf = cf_graph['Events'].x.size(0) if 'Events' in cf_graph.node_types else 0
+        seed_key_q = map_q[(self.kpi_viewpoint, 0)]
+        seed_key_cf = map_cf[(self.kpi_viewpoint, 0)]
+
+        fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+        draw_panel(axes[0], G_q_c, f"Query #{query_id}\n{n_q} events, {query_hours:.1f}h predicted",
+                   seed_key_q, query_only, RED, removed_edges, RED, 'dashed', labels_q)
+        draw_panel(axes[1], G_cf_c, f"CF #{cf_id}\n{n_cf} events, {cf_hours:.1f}h predicted",
+                   seed_key_cf, cf_only, GREEN, added_edges, GREEN, 'solid', labels_cf)
+
+        type_handles = [plt.Line2D([0], [0], marker="o", color="w", label=nt,
+                                    markerfacecolor=c, markersize=10)
+                        for nt, c in type_colors.items()]
+        diff_handles = [
+            plt.Line2D([0], [0], marker="o", color="w", label="unique to query",
+                       markerfacecolor="w", markeredgecolor=RED, markeredgewidth=2.2, markersize=10),
+            plt.Line2D([0], [0], marker="o", color="w", label="unique to CF",
+                       markerfacecolor="w", markeredgecolor=GREEN, markeredgewidth=2.2, markersize=10),
+            plt.Line2D([0], [0], marker="o", color="w", label="shared, features changed",
+                       markerfacecolor="w", markeredgecolor=ORANGE, markeredgewidth=2.2, markersize=10),
+            plt.Line2D([0], [0], color=GREEN, lw=2.4, label="edge added (CF only)"),
+            plt.Line2D([0], [0], color=RED, lw=2.4, linestyle='dashed', label="edge removed (query only)"),
+        ]
+        fig.legend(handles=type_handles + diff_handles, loc="lower center",
+                  ncol=min(len(type_handles) + len(diff_handles), 9), fontsize=8.5,
+                  bbox_to_anchor=(0.5, -0.02))
+        fig.suptitle(f"Highlighted differences: Query #{query_id} vs. CF #{cf_id} "
+                    f"(shared node layout -- differences are directly visible)", fontsize=12)
+        plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+        plt.savefig(os.path.join(save_dir, "cf_diff_graph.png"), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Saved CF diff graph to {save_dir}")
 
     def _decode_event_types(self, graph):
         """Decode each Events node's activity type from the one-hot block of its
