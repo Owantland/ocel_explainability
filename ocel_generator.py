@@ -183,6 +183,20 @@ class Generator:
             fallback = sub.loc[sub[entry['fixed_attr']].notna(), entry['fixed_attr']]
             if not fallback.empty:
                 row[entry['fixed_attr']] = fallback.iloc[0]
+        # Same coalesce for the time-sensitive attr, but preferring the closest-in-time row
+        # that actually has a value (rather than an arbitrary one), to stay faithful to its
+        # time-sensitivity. A real gap, not a code bug: confirmed for CargoPickup_IoT's
+        # Silo/Humidity, where not every changelog snapshot records every sensor reading.
+        # Without this, a None here crashes hetero_graphs.py's torch.tensor() call downstream.
+        if pd.isna(row[entry['time_attr']]):
+            non_null = sub[sub[entry['time_attr']].notna()]
+            if not non_null.empty:
+                row[entry['time_attr']] = non_null.loc[non_null['_delta'].idxmin(), entry['time_attr']]
+        # Final backstop for either attr: if genuinely never recorded for this object at all
+        # (both coalesce attempts exhausted), default to 0.0 rather than propagate None.
+        for attr in (entry['fixed_attr'], entry['time_attr']):
+            if pd.isna(row[attr]):
+                row[attr] = 0.0
         def _py(x):
             """Convert numpy scalar → plain Python float/None so ast.literal_eval works."""
             if pd.isna(x):

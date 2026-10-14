@@ -39,7 +39,14 @@ class Modelling:
         self.path_dict = self.funcs.get_paths()
         self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
         self.kpi_viewpoint = self.path_dict['kpi_viewpoint']
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # Opt-in Apple-GPU (MPS) fallback for machines with no CUDA -- unreachable on any CUDA
+        # machine (every existing order_management/logistics checkpoint), so this is a pure
+        # addition for CPU-only-by-default environments like this one.
+        self.device = torch.device(
+            'cuda' if torch.cuda.is_available()
+            else 'mps' if torch.backends.mps.is_available()
+            else 'cpu'
+        )
 
         # Load relevant datasets
         self.train_data = torch.load(f"{self.path_dict['pytorch_path']}/train_graphs_sg.pt", weights_only=False)
