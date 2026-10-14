@@ -158,6 +158,10 @@ def hgt_predictions(m) -> tuple[pd.DataFrame, float]:
     pred_time_s = 0.0
     with torch.no_grad():
         for g in m.test_data:
+            # test_data's graphs are loaded straight from the .pt cache (CPU), never moved
+            # to the training device -- a cpu-vs-mps mismatch once an MPS device is in play
+            # (see training.py's device selection); a no-op when m.device is 'cpu'.
+            g = g.to(m.device)
             _t0 = time.time()
             out = m.model(g.x_dict, g.edge_index_dict)
             pred_h = (out[0].item() * m.target_std.item() + m.target_mean.item()) / 3600.0

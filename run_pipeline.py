@@ -94,6 +94,11 @@ def _predict_all(model_holder):
     records = []
     with torch.no_grad():
         for g in model_holder.test_data:
+            # test_data's graphs are loaded straight from the .pt cache (CPU), never moved
+            # to the training device -- a no-op on a CUDA/CPU-only setup where the model
+            # happens to already be on CPU, but a real cpu-vs-mps mismatch now that an MPS
+            # device is possible (see training.py's device selection).
+            g = g.to(model_holder.device)
             pred_norm = model_holder.model(g.x_dict, g.edge_index_dict)[0].item()
             pred_h = (pred_norm * model_holder.target_std.item()
                       + model_holder.target_mean.item()) / 3600.0
