@@ -138,6 +138,7 @@ celerybeat.pid
 .env
 .envrc
 .venv
+.venv1
 env/
 venv/
 ENV/
@@ -220,6 +221,19 @@ __marimo__/
 /files/results.csv
 /dashboard_cache/
 /data/
+
+# Stray R session files (no R project here, but RStudio has been opened in thesis_parts/)
+.Rhistory
+
+# LaTeX build artifacts (thesis_parts/latex_template/) - regenerable from the .tex source
+*.aux
+*.bbl
+*.blg
+*.lof
+*.lot
+*.out
+*.toc
+*.xmpi
 
 # Legacy/vendored/reference material - large, not source, would otherwise be at risk of an
 # accidental bulk `git add -A`/`git add .` staging several GB into history

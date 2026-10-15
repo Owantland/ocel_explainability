@@ -285,6 +285,139 @@ fixes visually spot-checked against the rendered PDF.
 
 ---
 
+## Self-initiated audit: full-thesis read for figure consistency, source-backed claims, and spelling (2026-08-09)
+
+Not a de Leoni comment — the user asked for a full read of every chapter checking
+three things: every figure/table against its caption and surrounding prose, every
+specific claim against its cited source or underlying data, and spelling/grammar. Ran
+3 parallel Explore agents (one per introduction+related_works+frontmatter,
+preliminaries+models, results+conclusion), each verifying citations directly against
+the source PDFs in `files/papers_full/`, cross-checking numbers against `thesis_parts/
+figures_tables/*.csv` and the real SQLite databases, and viewing figures directly.
+Worked through all 8 files (`references.bib`, `models.tex`, `results.tex`,
+`related_works.tex`, `introduction.tex`, `preliminaries.tex`, `conclusion.tex`,
+`abstract.tex`) in that order, compile-verifying each one before moving to the next.
+
+**Important discovery, logged here so it isn't lost or re-discovered later**: partway
+through this pass, `git diff HEAD` showed that the on-disk copies of `results.tex`,
+`models.tex`, and `references.bib` had reverted to an earlier state than what was
+already committed (`f0a36c4`) — losing the ρ sign fix, the GBT wording, the
+counterfactual "10 hours" fix, the hyperparameter table's 3rd column, two figure
+captions/widths, and two bibtex comma/spacing fixes, all from the graph-staleness audit
+above. The cause is unknown; no git-history mechanism explains it and it was not
+investigated further. All of these fixes were re-applied verbatim as part of this
+pass's P0 tier rather than treated as a separate incident — if this happens again, the
+fix content to restore is documented in the "Self-initiated audit: are all thesis
+graphs up to date?" section above and in this section's items below.
+
+Findings, by severity:
+
+1. **P1 — `related_works.tex` misattributed Zhai et al. \cite{zhai2025} as prior PPM
+   work** (`:132`): claimed it was "the only one that has been applied to
+   object-centric predictive process monitoring specifically" — verified false against
+   the source PDF (`hetero_gnns_with_post_hoc_explanations.pdf`): it's an urban
+   land-use inference paper, unrelated to process mining. Since this is the paper the
+   thesis's entire explainability template is based on, the misstatement is
+   load-bearing. Rewritten to correctly frame it as the best-suited method *despite*
+   being from a different domain (heterogeneous support + open-source + factual/
+   counterfactual coverage), not as prior PPM work.
+2. **P1, later self-corrected — original claim that Zhai et al. use "only 1 node
+   type" is actually accurate, initial "fix" was wrong**: `related_works.tex:126,153`
+   and `preliminaries.tex:301` originally said Zhai et al.'s heterogeneous graphs have
+   "only 1 node type." The first pass rewrote this as false, reasoning from the paper's
+   own narrative/Fig. 1/Table 2 (which conceptually describes tube/bus/bike as distinct
+   station types via a formal node-to-type mapping φ). The user then asked to check
+   this against the actual vendored implementation in `GNN-land-use-main/`, which
+   confirmed the *original* claim was right: `data_preparation.py:20-25` one-hot-encodes
+   station type (`TransportType`) directly into a single combined feature matrix, and
+   `data_preparation_hetero.py:15-19` builds the `HeteroData` object with exactly one
+   node-type key, `'node'` — heterogeneity in the released code is realized only
+   through 5 edge types (road categories), never a second node type; confirmed no other
+   file in the repo creates additional node-type keys. Since this thesis explicitly
+   vendors and builds on that implementation (not just the paper's math), the
+   implementation-level fact is what's relevant. Both passages and the comparison table
+   row were reverted to the original "single node type" claim, but rewritten with
+   sharper precision than the original — distinguishing the paper's conceptual framing
+   from what the released code actually does, and citing the exact files/lines. Lesson:
+   for implementation-grounded claims about a vendored dependency, check the vendored
+   code directly rather than inferring from the paper's narrative alone.
+3. **P1 — `related_works.tex:75` overstated Adams et al.'s explainability gap**:
+   claimed none of 4 cited graph-based works (Adams et al., Gherissi et al., Smit et
+   al., de Leoni & Volpato) "offer any type of explainability method" — false for
+   Adams et al., who apply SHAP to individual graph edges (§6.3) on their homogeneous
+   encoding. Narrowed to credit that preliminary component while keeping the thesis's
+   real, still-valid gap claim: none of the four extend explainability to a genuinely
+   heterogeneous graph structure.
+4. **P1 — `introduction.tex:6` was a near-verbatim, uncited paraphrase** of Galanti et
+   al. 2023a's own abstract definition of object-centric processes (confirmed via
+   direct read of the source PDF) — the paragraph's only citation was attached to a
+   later, different sentence. Reworded more distinctly and the citation moved directly
+   onto the borrowed definition.
+5. **P1 — `introduction.tex:11` overstated Smit et al.'s result**: claimed
+   heterogeneous structures "provide better predictive results," contradicting
+   `related_works.tex`'s own (already-accurate) characterization of the same paper as
+   inconclusive (wins one dataset, ties/loses on two others). Softened to match.
+6. **P2 — `models.tex:44-48` Logistics process description had DB-inaccurate event
+   names/order**: "(Create Handling Unit)" isn't a real event (`sqlite3
+   files/databases/logistics.sqlite` confirms the real event is `Collect Goods`); "Load
+   to Vehicle, Bring to Loading Bay" stated the wrong order (querying actual event
+   timestamps confirms Bring to Loading Bay precedes Load to Vehicle). Rewritten
+   against the real event names/order and Title-Case convention.
+7. **P2 — `results.tex:108` sparsity claim was wrong**: "LOO outperformed GNNExplainer
+   on both metrics" — false for sparsity per `fidelity_comparison_summary.csv`
+   (GNNExplainer actually wins sparsity in both datasets: OM 0.807 vs. LOO's 0.645,
+   Logistics 0.929 vs. 0.868). Corrected to attribute the sparsity win to GNNExplainer
+   and the characterization win to LOO, with the reason (LOO's exhaustive search finds
+   more impactful but proportionally larger element sets).
+8. **P2 — `conclusion.tex:9` contradicted `results.tex`'s own findings**: claimed the
+   heterogeneous model "obtained better accuracy on all four KPI tests" on last-event
+   comparison — actually wins significantly on 2 of 4 (Depart, LoadToVehicle), is
+   statistically tied with the k-dim GNN baseline on a 3rd (PayOrder, though still
+   ahead of the other three baselines), and loses on the 4th (PackageDelivered, tied
+   with HomoGNN, beaten by mean/GBT/k-dim). Also fixed the adjacent all-prefix "1 of
+   the 4 chosen KPIs" claim, which wasn't traceable to anything `results.tex` actually
+   states (the real all-prefix finding is that HGT and HomoGNN are roughly on par
+   across all four, with overlapping confidence intervals, not a 1-of-4 split).
+9. **P2 — `preliminaries.tex`'s `def:fidelity` (nandan2025) and `def:sparsity`
+   (stevens2022) lacked "adapted from" framing** used everywhere else in the same
+   section for zhai2025-derived definitions. Added a matching sentence to each.
+10. **P3 — large volume of spelling/grammar fixes** across all 8 files: `payed` and
+    `aformentioned` were already fixed by an earlier pass this session (confirmed
+    absent, not re-found here); genuinely found and fixed in this pass:
+    `alligns`→`aligns` (`introduction.tex:6`), `apriori`→`a priori`, doubled `the the`,
+    `Weinzier`→`Weinzierl`, `Pytorch`→`PyTorch` ×2, `succesfully`→`successfully` ×2,
+    `has lead to`→`has led to`, comma
+    splices (`chapter, however`→`chapter; however,`, multiple garden-path sentences
+    needing an introductory comma), capitalization consistency (`Deep Learning`/
+    `Neural Networks`→lowercase to match each file's own established convention,
+    inconsistent `chapter`/`Chapter` cross-references), a subject-verb mismatch
+    (`aggregate...and updates`→`...and update`), `it's`/`its` confusion, `different
+    to`→`different from`, first-person-plural slips (`we`/`our`→`I`/`my`, 7 instances
+    across `preliminaries.tex`/`introduction.tex`), a factual error (GBT described as
+    a "Neural Network" — it's a tree ensemble, `introduction.tex:9`), missing
+    terminal punctuation before 4 `\begin{definition}` blocks, `\prod`→`\Pi` notation
+    fix for the permutation set, a stray 12-column table spec on `tab:dataset_summary`
+    trimmed to the 7 actually populated, and an object-type singular/plural
+    inconsistency (`Order, Customer, Items, and Packages`→`Orders, Customers, Items,
+    and Packages`, matching the DB's actual table names).
+
+Verified via full end-to-end compile (`xelatex`→`bibtex`→`xelatex`×2, all chapters,
+87 pages): zero errors, zero undefined references, zero multiply-defined labels, back
+to only the 2 pre-existing, already-vetted "Float too large" warnings (`tab:
+xai_comparison`, `tab:ocel_example`) — no new ones. Every changed passage spot-checked
+visually against the rendered PDF (the `tab:xai_comparison` table, the Zhai et al.
+node-type paragraph in `preliminaries.tex`, and the abstract). Final grep sweep across
+the whole `latex_template/` tree confirmed none of the target broken strings survive
+anywhere (`-0.66`, `10 hours`, `Create Handling Unit`, `succesfully`, doubled `the
+the`, `median estimator`, `aformentioned`, `alligns`, `payed`, `Weinzier[^l]`,
+`apriori`, `only 1 node type`/`single node type`).
+
+Noted but out of scope (authorial content, not fixed): `thesis_parts/latex_template/
+frontmatter/thanks.tex` is completely empty (only the `%!TEX root` comment line) — the
+compiled thesis currently has an "Acknowledgments" heading with no body text.
+
+---
+
 ## Cross-cutting notes
 
 - **`.txt`/`.tex` divergence** (not a de Leoni comment, flagged for awareness): most

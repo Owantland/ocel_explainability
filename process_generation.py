@@ -20,8 +20,20 @@ class ProcessGeneration:
     def get_data_dictionaries(self):
         # Generate a list of object to object relationships
         cols = self.funcs.col_names('object_object')
+        # Not every database's object_object table has qualifier/timestamp columns beyond the
+        # two ids (order_management/logistics don't; CargoPickup_IoT does) -- project them only
+        # when present, schema-aware like every other table lookup in this method. 'qualifier'
+        # and 'o2o_time' are consumed by the optional episode-scoped-traversal mechanism below;
+        # absent for every database that doesn't configure episode_scoped_ids.
+        extra_select, extra_cols = '', []
+        if len(cols) > 2:
+            extra_select += f', O_O.{cols[2]}'
+            extra_cols.append('qualifier')
+        if len(cols) > 3:
+            extra_select += f', O_O.{cols[3]}'
+            extra_cols.append('o2o_time')
         qry = f'''
-                    SELECT O_O.{cols[0]}, O_O.{cols[1]}, OM.OCEL_TYPE_MAP, TM.OCEL_TYPE_MAP
+                    SELECT O_O.{cols[0]}, O_O.{cols[1]}, OM.OCEL_TYPE_MAP, TM.OCEL_TYPE_MAP{extra_select}
                     FROM OBJECT_OBJECT O_O
                     JOIN OBJECT O ON O.OCEL_ID = O_O.ocel_source_id
                     JOIN OBJECT T ON T.OCEL_ID = O_O.ocel_target_id
@@ -31,7 +43,8 @@ class ProcessGeneration:
                '''
         self.cursor.execute(qry)
         objects = self.cursor.fetchall()
-        o2o_table = pd.DataFrame.from_records(objects, columns=['src_id', 'trgt_id', 'src_type', 'trgt_type'])
+        o2o_table = pd.DataFrame.from_records(
+            objects, columns=['src_id', 'trgt_id', 'src_type', 'trgt_type'] + extra_cols)
 
         # Obtain events to objects table
         cols = self.funcs.col_names('event_object')
@@ -79,6 +92,65 @@ class ProcessGeneration:
 
         return o2o_table, e20_table, ev_tables, ev_ts_dict
 
+    def _resolve_episode_window(self, o2o_table, shared_id, anchor_id, start_q, end_q,
+                                 start_ts, global_max_ts):
+        """Resolve the [start, end] validity window for one shared-resource object's (shared_id)
+        relationship to one specific anchor object (e.g. a Truck's assignment to one Pickup
+        Plan), using object_object's own qualifier/timestamp columns -- this is how a
+        many-to-many shared resource (unlike a strictly-owned hierarchy member) gets its
+        traversal/event-inclusion scoped to one case instead of its entire cross-case history.
+
+        If no matching end-qualifier row exists for this specific (shared_id, anchor_id) pair,
+        the window is clamped to just before shared_id's own next start-qualifier timestamp (its
+        next assignment to any OTHER case), or to the dataset's global max timestamp if there
+        isn't one. This is a modeling policy choice, not a neutral default: it treats an
+        unresolved ("still open") episode as lasting until the shared resource is reassigned
+        elsewhere. Confirmed empirically for CargoPickup_IoT: ~68% of Truck/Pickup-Plan
+        assignments have no 'Dropped' row at all, so this is the common case, not an edge case.
+
+        The clamped end is nudged 1 second earlier than the next assignment's own timestamp,
+        not equal to it: the window check elsewhere (_edge_time_ok) is inclusive on both ends,
+        which is correct for a real 'Dropped' timestamp (that event genuinely belongs to this
+        episode) but wrong for a clamped one -- an inclusive match would let the reassignment
+        edge ITSELF (to a different case) pass as if still part of this episode, letting that
+        other case leak in. Confirmed by direct reproduction against this dataset before this
+        nudge was added."""
+        start_ts = pd.to_datetime(start_ts)
+        end_rows = o2o_table[(o2o_table['src_id'] == shared_id)
+                              & (o2o_table['trgt_id'] == anchor_id)
+                              & (o2o_table['qualifier'] == end_q)]
+        if len(end_rows) > 1:
+            print(f"  [_resolve_episode_window] {shared_id}->{anchor_id}: {len(end_rows)} "
+                  f"'{end_q}' rows found for one pair (expected at most 1); using the earliest.")
+        if not end_rows.empty:
+            return start_ts, pd.to_datetime(end_rows['o2o_time']).min()
+
+        later_starts = o2o_table[(o2o_table['src_id'] == shared_id)
+                                  & (o2o_table['qualifier'] == start_q)
+                                  & (pd.to_datetime(o2o_table['o2o_time']) > start_ts)]
+        if not later_starts.empty:
+            end_ts = pd.to_datetime(later_starts['o2o_time']).min() - pd.Timedelta(seconds=1)
+        else:
+            end_ts = global_max_ts
+        return start_ts, end_ts
+
+    @staticmethod
+    def _edge_time_ok(row, episode_windows):
+        """Gate for traversal hops that originate FROM an already episode-windowed object (e.g.
+        reaching Silo via an already-windowed Truck): the edge's own timestamp must fall inside
+        every endpoint's resolved window. A no-op (always True) when episode_windows is empty,
+        so this never touches the optional 'o2o_time'/'qualifier' columns for databases that
+        don't have them."""
+        if not episode_windows:
+            return True
+        ts = pd.to_datetime(row['o2o_time'])
+        for anchor_id in (row['src_id'], row['trgt_id']):
+            if anchor_id in episode_windows:
+                start, end = episode_windows[anchor_id]
+                if not (start <= ts <= end):
+                    return False
+        return True
+
     def related_nodes(self):
         print("Obtaining all related nodes and arcs")
 
@@ -93,6 +165,24 @@ class ProcessGeneration:
         self.cursor.execute(qry, (self.cant,))
         vwpnt_objects = self.cursor.fetchall()
         o2o_table, e20_table, ev_tables, ev_ts_dict = self.get_data_dictionaries()
+
+        # Optional: shared-resource unique_ids types (e.g. CargoPickup_IoT's Truck, which serves
+        # many Pickup Plans) whose event/traversal inclusion must be scoped to a bounded
+        # object_object episode rather than that object's entire cross-case history. Empty for
+        # every database that doesn't configure it -- every gate below is then a guaranteed no-op
+        # and this whole mechanism never touches the (possibly absent) qualifier/o2o_time columns.
+        episode_cfg = self.path_dict.get('episode_scoped_ids', {})
+        global_max_ts = None
+        if episode_cfg:
+            if 'o2o_time' not in o2o_table.columns:
+                raise ValueError(
+                    f"config.yml['{self.database}'].episode_scoped_ids is set but object_object "
+                    f"has no timestamp column for this database -- episode windows cannot be "
+                    f"resolved."
+                )
+            o2o_times = pd.to_datetime(o2o_table['o2o_time'])
+            ev_times = pd.to_datetime(pd.Series(list(ev_ts_dict.values())))
+            global_max_ts = max(o2o_times.max(), ev_times.max())
 
         # For each viewpoint object obtain a list of related objects
         rltd_nodes = {}
@@ -117,19 +207,94 @@ class ProcessGeneration:
                 private_types.add(row['src_type'])
                 private_types.add(row['trgt_type'])
 
+            # Resolved [start, end] episode windows for this trace's shared-resource objects,
+            # keyed by object id. Stays empty (and every gate below stays a no-op) whenever
+            # episode_cfg is empty.
+            episode_windows = {}
+
+            # Symmetric pass: the block above only catches object_object edges where the
+            # viewpoint object is the SOURCE. Some databases' schemas model the viewpoint's
+            # relevant neighbors as the TARGET instead (e.g. CargoPickup_IoT's Truck->Pickupplan,
+            # the reverse of order_management/logistics' parent->child convention) -- without
+            # this, such a neighbor type never enters private_types, so stray same-typed objects
+            # swept in later via unrelated events wrongly pass the "generic, non-private touched
+            # object" check below instead of being gated by actual ob_list membership. Gated by
+            # unique_ids membership, exactly like the depth loop already is, so this is a no-op
+            # wherever the matched type isn't traversed at all -- confirmed inert for
+            # order_management (its one such edge, customers->orders, involves 'customers',
+            # which isn't in unique_ids there) and logistics (no such edge exists at all).
+            rltd_trgt = o2o_table[o2o_table['trgt_id'] == vwpnt_object[0]]
+            for i, row in rltd_trgt.iterrows():
+                if row['src_type'] in self.path_dict['unique_ids']:
+                    private_types.add(row['src_type'])
+                    private_types.add(row['trgt_type'])
+                    if (row['src_type'] in episode_cfg and row['src_id'] not in episode_windows
+                            and row['qualifier'] == episode_cfg[row['src_type']]['start_qualifier']):
+                        episode_windows[row['src_id']] = self._resolve_episode_window(
+                            o2o_table, row['src_id'], row['trgt_id'],
+                            episode_cfg[row['src_type']]['start_qualifier'],
+                            episode_cfg[row['src_type']]['end_qualifier'],
+                            row['o2o_time'], global_max_ts)
+                    ob_list.add(row['src_id'])
+                    ob_list.add(row['trgt_id'])
+
             for i in range(self.path_dict['depth']):
                 src_objects = o2o_table[(o2o_table['src_id'].isin(ob_list))]
                 trgt_objects = o2o_table[(o2o_table['trgt_id'].isin(ob_list))]
                 rltd_objects = pd.concat([src_objects, trgt_objects])
                 for idx, row in rltd_objects.iterrows():
+                    # Further hops originating from an already-windowed object (e.g. reaching
+                    # Silo via an already-windowed Truck) must respect that object's window --
+                    # a no-op when episode_windows is empty.
+                    if not self._edge_time_ok(row, episode_windows):
+                        continue
+                    # Deliberately do NOT resolve new episode windows here. Once an
+                    # episode-scoped object (e.g. a shared Truck) is already in ob_list, this
+                    # query re-matches ALL of its object_object rows -- including its OTHER
+                    # cases' assignments -- in one unordered batch, so resolving a window from
+                    # whichever row happens to be seen first here would be ambiguous and can
+                    # pick the wrong anchor. Windows are only ever resolved in the one-shot
+                    # trgt-pass above, where the anchor is unambiguously this trace's own
+                    # viewpoint object. An episode-scoped type not yet windowed by that point
+                    # is skipped here rather than guessed at.
+                    # General invariant, independent of episode_scoped_ids: a trace must never
+                    # admit a DIFFERENT instance of the viewpoint's own type. Any object type
+                    # shared across multiple cases (e.g. CargoPickup_IoT's Cargo, confirmed to
+                    # serve exactly 2 Pickup Plans each -- NOT 1:1 as the aggregate row count
+                    # alone suggested) can otherwise act as a pivot: once it's in ob_list, this
+                    # query re-matches its edge to every OTHER case it touches, and without this
+                    # guard the other case's own viewpoint object slips back in alongside it.
+                    # Only episode-scoping the "obviously" shared type (Truck) was not sufficient
+                    # in practice -- this blanket rule covers every such type without having to
+                    # enumerate them all in config.
+                    viewpoint_type = self.path_dict['viewpoint']
                     if row['src_type'] in self.path_dict['unique_ids']:
-                        ob_list.add(row['src_id'])
+                        if not (row['src_type'] in episode_cfg and row['src_id'] not in episode_windows):
+                            if not (row['src_type'] == viewpoint_type and row['src_id'] != vwpnt_object[0]):
+                                ob_list.add(row['src_id'])
                     if row['trgt_type'] in self.path_dict['unique_ids']:
-                        ob_list.add(row['trgt_id'])
+                        if not (row['trgt_type'] in episode_cfg and row['trgt_id'] not in episode_windows):
+                            if not (row['trgt_type'] == viewpoint_type and row['trgt_id'] != vwpnt_object[0]):
+                                ob_list.add(row['trgt_id'])
 
             # Generate a list of related events to the viewpoint object
             rltd_events = set()
-            events = e20_table[(e20_table['ob_id'].isin(ob_list))]
+            if episode_windows:
+                # Shared-resource objects: only pull in events within their resolved window, not
+                # their entire cross-case history. Strictly-owned objects (not in
+                # episode_windows) are unaffected -- this reduces to the original single-line
+                # query below whenever episode_windows is empty.
+                plain_ids = ob_list - set(episode_windows.keys())
+                events = e20_table[e20_table['ob_id'].isin(plain_ids)]
+                windowed = e20_table[e20_table['ob_id'].isin(episode_windows.keys())].copy()
+                if not windowed.empty:
+                    windowed['_ts'] = pd.to_datetime(windowed['ev_id'].map(ev_ts_dict))
+                    keep = windowed.apply(
+                        lambda r: episode_windows[r['ob_id']][0] <= r['_ts'] <= episode_windows[r['ob_id']][1],
+                        axis=1)
+                    events = pd.concat([events, windowed[keep].drop(columns='_ts')], ignore_index=True)
+            else:
+                events = e20_table[(e20_table['ob_id'].isin(ob_list))]
 
             # Add a timestamp to each event (O(1) dict lookup instead of DataFrame scan per event)
             for i, row in events.iterrows():
@@ -255,10 +420,22 @@ class ProcessGeneration:
                             # The object isn't tied to any instance of the KPI event -- fall
                             # back to the trace's last instance instead. Logged since a
                             # misconfigured kpi_event would otherwise silently affect every trace.
+                            trace_kpi_idx = ev_df[ev_df['type'] == kpi_event]['index'].values
+                            if len(trace_kpi_idx) == 0:
+                                # Not even the trace-wide fallback has one: this object's own
+                                # process never reached kpi_event at all (e.g. a Truck that failed
+                                # a weigh/load check before the event that defines "success").
+                                # Skip this object rather than crash the whole run -- a real
+                                # per-object condition, not a misconfiguration, so it's logged but
+                                # not treated as fatal.
+                                print(f"  [get_ev_log] object {ob_id} (viewpoint {vwpnt_object}) "
+                                      f"has no '{kpi_event}' event anywhere in its trace; "
+                                      f"skipping this object's KPI row entirely.")
+                                continue
                             print(f"  [get_ev_log] object {ob_id} (viewpoint {vwpnt_object}) has "
                                   f"no '{kpi_event}' event of its own; falling back to the "
                                   f"trace's last instance.")
-                            end_event = ev_df[ev_df['type'] == kpi_event]['index'].values[-1]
+                            end_event = trace_kpi_idx[-1]
                         start_time = ev_df[ev_df['index'] == first_event]['timestamp'].values[0]
                         end_time = ev_df[ev_df['index'] == end_event]['timestamp'].values[0]
 

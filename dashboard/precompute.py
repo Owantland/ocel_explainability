@@ -1,18 +1,18 @@
-"""Warms dashboard_cache.py's on-disk cache for a small, deterministic set of demo
+"""Warms dashboard/cache.py's on-disk cache for a small, deterministic set of demo
 orders per dataset (the 'loo' mode -- Shapley-based despite the name, see
-dashboard.py's compute_local()). Run this once before a live demo/defense so the
+dashboard/app.py's compute_local()). Run this once before a live demo/defense so the
 dashboard never hits a cold-cache wait in front of an audience.
 
 The dashboard itself works fine without this -- any order not in the cache is just
 computed live on first view and cached from then on. This script only pre-warms a
 curated subset ahead of time.
 
-Usage: python3 dashboard_precompute.py
+Usage (from repo root): PYTHONPATH=. python3 dashboard/precompute.py
 """
 import os
 
 import explainer as exp
-import dashboard_cache as dc
+from dashboard import cache as dc
 
 DATASETS = [('order_management', 2000), ('logistics', 1000)]
 DEMO_N = 5  # first N last-event orders per dataset, same deterministic ordering

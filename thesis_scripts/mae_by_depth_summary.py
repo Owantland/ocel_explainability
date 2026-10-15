@@ -1,6 +1,11 @@
-"""MAE vs. prefix-depth, all baselines, all 4 currently-relevant KPIs -- addresses
+"""MAE vs. prefix-depth, all baselines, all 5 currently-relevant KPIs -- addresses
 thesis_structure.txt's explicit ask to "report MAE against prefix depth, not just
 an aggregate figure."
+
+Extended 2026-10-13 to add the 5th KPI, CargoPickup_IoT's Pickupplan->EvaluateTruckExit --
+the depth-binned CSV was generated via baselines.py --database cargo_pickup_iot --cant 2000
+(no config.yml switching needed, unlike the 2026-07-27 extension below -- this database
+only has one KPI configured so far).
 
 Extended 2026-07-27 to cover all 4 KPIs featured in hyperparameter_sweep_summary.png /
 combined_baseline_comparison_table.png (previously only PayOrder/Depart). The two new
@@ -17,18 +22,27 @@ PayOrder, logistics/CustomerOrder->Depart) via baselines.py's run(database, cant
 -- previously baselines.py only ever ran hardcoded for order_management/2000 and
 Logistics' only depth-binned file on disk was keyed to the superseded
 TransportDocument viewpoint; both gaps are closed (see baselines.py and
-OPEN_ISSUES_FEASIBILITY.md item 7). Source CSVs are now named by task_id rather
+docs/archive/OPEN_ISSUES_FEASIBILITY.md item 7). Source CSVs are now named by task_id rather
 than by event/viewpoint name, so they can't silently go stale the same way again
 if the viewpoint or KPI event changes.
 
 Usage: python3 mae_by_depth_summary.py
 """
 import os
+import shutil
 
 import matplotlib.pyplot as plt
 import pandas as pd
 
 OUT_DIR = "thesis_parts/figures_tables"
+
+# Self-promotion target, added 2026-10-13 to match combined_baseline_comparison.py's
+# STAGING_DIR/BUILD_DIR pattern -- previously this script only wrote to OUT_DIR above,
+# so the actual LaTeX build figure (results.tex's \includegraphics{figures/
+# mae_by_depth_summary.png}) silently went stale every time this script was re-run,
+# since nothing ever copied the regenerated PNG into the build directory. Caught when
+# CargoPickup_IoT's 5th-KPI row was added here but never showed up in the built PDF.
+BUILD_DIR = "thesis_parts/latex_template/figures"
 
 # (dataset label, path) -- label style matches hyperparameter_sweep_summary.png /
 # combined_baseline_comparison_table.png: "[Dataset] / [Object] -> [KPI Event]"
@@ -41,6 +55,8 @@ SOURCES = [
      "files/explainer_outputs/logistics/validation_1000/mae_by_depth_TimeFrom_CustomerOrder_to_Depart.csv"),
     ("Logistics / CustomerOrder → LoadToVehicle",
      "files/explainer_outputs/logistics/validation_1000/mae_by_depth_TimeFrom_CustomerOrder_to_LoadToVehicle.csv"),
+    ("CargoPickup_IoT / Pickup Plan → EvaluateTruckExit",
+     "files/explainer_outputs/cargo_pickup_iot/validation_2000/mae_by_depth_TimeFrom_Pickupplan_to_EvaluateTruckExit.csv"),
 ]
 
 DEPTH_ORDER = ["1-3", "4-6", "7-9", "10+"]
@@ -81,13 +97,18 @@ def render(df):
     for ax in axes[len(SOURCES):]:
         ax.axis('off')
 
-    fig.suptitle("MAE vs. prefix depth, all 4 currently-relevant KPIs",
+    fig.suptitle("MAE vs. prefix depth, all 5 currently-relevant KPIs",
                  fontsize=11)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     png_path = os.path.join(OUT_DIR, "mae_by_depth_summary.png")
     plt.savefig(png_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"Saved {png_path}")
+
+    os.makedirs(BUILD_DIR, exist_ok=True)
+    build_path = os.path.join(BUILD_DIR, "mae_by_depth_summary.png")
+    shutil.copy(png_path, build_path)
+    print(f"Promoted to {build_path}")
 
 
 def main():

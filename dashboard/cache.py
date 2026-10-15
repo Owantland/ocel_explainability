@@ -2,8 +2,8 @@
 
 explain_trace()/explain_gnn_primary() are cheap-to-moderate for LOO but
 explain_gnn_primary()'s GNNExplainer optimization (~200 epochs by default) is far
-too slow for on-demand interactivity. This module gives dashboard.py and
-dashboard_precompute.py a shared, persistent (survives app restarts) cache keyed
+too slow for on-demand interactivity. This module gives dashboard/app.py and
+dashboard/precompute.py a shared, persistent (survives app restarts) cache keyed
 by (database, cant, mode, order_id[, n_events][, top_k][, checkpoint_fingerprint]),
 storing exactly what the
 underlying explain_* function already returns -- verified JSON-serializable as-is
