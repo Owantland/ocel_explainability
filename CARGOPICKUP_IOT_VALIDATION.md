@@ -301,3 +301,11 @@ shape, with HGT below every baseline at every depth (see `mae_by_depth_summary.p
 not the best R² of the three databases, but positive and mid-pack, with no architectural red flags,
 confirming the contamination/Silo/split fixes earlier in this document produced a database that's
 now fully usable for the same comparative analysis as the other two.
+
+**On the much lower raw MAE specifically**: `CARGOPICKUP_IOT_MAE_ANALYSIS.md` root-causes this in
+full — in short, it's overwhelmingly a test-split target-scale effect (EvaluateTruckExit's test std
+is 25.7h vs. 170-222h for the other three KPIs, itself traced to a severe, KPI-specific train→test
+variance drift consistent with a finite-simulation-window effect on this synthetic log), not primarily
+a sign HGT fits this KPI 8-12x better. Once normalized by each KPI's own test-split std, EvaluateTruckExit's
+relative error is only modestly tighter than Depart/LoadToVehicle's — consistent with R²_all=0.085
+actually being the second-worst of the four, not the best.
