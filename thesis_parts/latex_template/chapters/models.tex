@@ -8,7 +8,7 @@ This chapter discusses the experimental setup for the predictive models used for
 \section{Use Cases}
     \subsection{Order Management}
         \label{sec:dataset_order_management}
-    		The first of the two datasets used for validating the proposed explainability framework was a synthetic OCEL 2.0 benchmark dataset named Order Management \cite{knopp2023a}. The general process pipeline in the dataset is as follows; activities are placed in parentheses at relevant points of the explanation.
+    		The first of the three datasets used for validating the proposed explainability framework was a synthetic OCEL 2.0 benchmark dataset named Order Management \cite{knopp2023a}. The general process pipeline in the dataset is as follows; activities are placed in parentheses at relevant points of the explanation.
     
     		The process begins when a customer places an order for different products (Place Order). Each product has a price (which can vary on different dates) and a weight. When a customer places an order it is assigned to an employee to act as a sales-representative. The employees are tasked with confirming the customer's order (Confirm Order) as well as processing the payment (Pay Order) and reminding customers of payments that have not been received yet (Payment Reminder). 
     		Running parallel to this is the company's shipping process. After an order is received the order's items (unique identifiers for the products in each order) are checked against the company's stock. If an item is unavailable it is marked as out of stock (Item Out of Stock) and reordered by the warehouse employee (Reorder Item). Items that are ready for delivery are collected (Pick Item) for placement into packages that are addressed to a single customer. A package may contain items related to multiple orders, and an order's volume may be distributed over multiple packages.
@@ -31,6 +31,7 @@ This chapter discusses the experimental setup for the predictive models used for
             \midrule
             Order Management & 20801 & 11 & 10815 & 6 & 7 & 2000\\
             Logistics & 121913 & 14 & 47591 & 7 & 7 & 2000\\
+            CargoPickup\_IoT & 74217 & 14 & 4400 & 4 & 20 & 1680\\
             \bottomrule
         \end{tabular}
         \end{table}
@@ -48,6 +49,16 @@ This chapter discusses the experimental setup for the predictive models used for
 		The KPIs chosen to analyze in this dataset were Elapsed time from CustomerOrder to Depart, which identifies the time from the creation of the customer's order until the departure of the final container associated with it, and Elapsed time from CustomerOrder to LoadToVehicle, which identifies the time from the creation of the customer's order until the container is loaded onto the vehicle.
 
 		This dataset differs from Order Management in its structure, with a higher quantity of object types and connections represented. Given this added complexity it was necessary to increase the chosen model's depth beyond 2 layers. This is due to the fact that a model at only 2 layers was incapable of creating a connection between the viewpoint node chosen and all the other node types present, causing the model to collapse to a near-constant predictor regardless of training budget. In order to find the proper layer depth the model was evaluated at 3, 4, and 5 layers for each KPI; layer depth 3 showed the best performance for Elapsed time from CustomerOrder to Depart, while Elapsed time from CustomerOrder to LoadToVehicle instead settled on layer depth 4.
+
+	\subsection{CargoPickup\_IoT}
+    \label{sec:dataset_cargo_pickup_iot}
+		The third dataset is CargoPickup\_IoT, a simulated OCEL 2.0 event log of a real-life, IoT-enhanced cargo pickup process at a port \cite{wei2024}. Unlike the two previous datasets, its objects carry time-varying sensor readings (for example, a silo's temperature and humidity, or a truck's weight) in addition to static attributes. The general process pipeline in the dataset is as follows; activities are placed in parentheses at relevant points of the explanation.
+
+		The process begins when a pickup plan is lodged for a given cargo (Lodge Pickup Plan), recording the number of trucks required and the total weight to be picked up. Trucks are then assigned to the plan (Assign Truck). Each assigned truck enters the port (Enter the port) and is weighed while empty (Weigh the Empty Truck), after which this weight is checked for abnormalities (Check Empty Truck Weight Abnormality); a truck may fail this weighing step (Fail to Weigh). At the silo holding the cargo (Arrive at the Silo) it is decided whether the pickup continues (Determine the Continuance of the Pickup), and the loading itself may fail (Fail to Load). A successful truck is loaded (Load Truck) and weighed again (Weigh the Loaded Truck), its tally sheet is recorded (Input the Tally Sheet) and its weighing ticket printed (Print the Weighing Ticket). Finally, the truck's exit from the port is evaluated (Evaluate the Truck Exit).
+
+		The KPI chosen to analyze in this dataset was Elapsed time from Pickupplan to EvaluateTruckExit, which identifies the time from the lodging of the pickup plan until the exit evaluation of the last truck associated with it.
+
+		This dataset differs from the previous two in that two of its object types are shared resources rather than strictly-owned parts of a single case: trucks are reassigned across many pickup plans, and over a quarter of the cargos are served by more than one plan. Following the object-to-object relationships naively therefore pulls other plans' events into a trace. To prevent this, a truck's events were only included within the time window between its assignment to and its removal from the plan, and no trace was allowed to include a different pickup plan than its own. Of the 2000 pickup plans sampled, 320 never had any assigned truck reach Evaluate the Truck Exit and were therefore excluded, leaving the 1680 traces shown in Table \ref{tab:dataset_summary}. The resulting traces are short, with 5.4 events on average. A model using 2 layers was sufficient for this dataset, as with Order Management.
 
 	\subsection{Event log processing}
     \label{sec:dataset_data_processing}
@@ -101,21 +112,23 @@ This chapter discusses the experimental setup for the predictive models used for
     \subsection{Hyperparameter sweep}
         \begin{table}[t!]
             \centering
-            \caption{Final chosen hyperparameters for this thesis's two datasets. Logistics is split into its two KPIs since, unlike Order Management, they do not share the same final configuration.}
+            \caption{Final chosen hyperparameters for this thesis's three datasets. Logistics is split into its two KPIs since, unlike Order Management, they do not share the same final configuration.}
             \label{tab:final_hyperparameters}
-            \begin{tabular}{lrrr}
+            \small
+            \setlength{\tabcolsep}{4pt}
+            \begin{tabular}{lrrrr}
             \toprule
-            Hyperparameter & \shortstack{Order\\Management} & \shortstack{Logistics\\(Depart)} & \shortstack{Logistics\\(LoadToVehicle)} \\
+            Hyperparameter & \shortstack{Order\\Management} & \shortstack{Logistics\\(Depart)} & \shortstack{Logistics\\(LoadToVehicle)} & \shortstack{Cargo\\Pickup\_IoT} \\
             \midrule
-            Number of epochs & 30 & 100 & 100 \\
-            Patience & 4 & 10 & 10 \\
-            Number of message-passing layers & 2 & 3 & 4 \\
-            Activation function & PReLU & PReLU & PReLU \\
-            Number of heads & 2 & 2 & 2 \\
-            Optimizer & Adam & AdamW & AdamW \\
-            Number of hidden dimensions & 64 & 16 & 48 \\
-            Learning rate & 0.001 & 0.005 & 0.003 \\
-            Weight decay & 0.0 & 1e-05 & 1e-05 \\
+            Number of epochs & 30 & 100 & 100 & 30 \\
+            Patience & 4 & 10 & 10 & 4 \\
+            Number of message-passing layers & 2 & 3 & 4 & 2 \\
+            Activation function & PReLU & PReLU & PReLU & PReLU \\
+            Number of heads & 2 & 2 & 2 & 2 \\
+            Optimizer & Adam & AdamW & AdamW & Adam \\
+            Number of hidden dimensions & 64 & 16 & 48 & 24 \\
+            Learning rate & 0.001 & 0.005 & 0.003 & 0.001 \\
+            Weight decay & 0.0 & 1e-05 & 1e-05 & 1e-05 \\
             \bottomrule
             \end{tabular}
             \vspace{2pt}
