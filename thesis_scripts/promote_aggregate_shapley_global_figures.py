@@ -76,12 +76,17 @@ def main():
         csv_path = os.path.join(save_dir, "aggregate_explanation_bars.csv")
         df = pd.read_csv(csv_path)
         shifts = {row["label"]: [row["mean_signed_shift"]] for _, row in df.iterrows()}
+        # Same title wording as explain_aggregate_shapley(): each bar averages at most
+        # `count` Shapley values, not all 50 traces of the LOO selection pool.
+        max_count = int(df["count"].max())
 
         tmp_png = os.path.join(save_dir, "aggregate_explanation_bars.png")
         e.plot_aggregate_explanation_bars(
             shifts, tmp_png,
             "Global Shapley explanations for remaining time prediction",
-            dataset_label=database, n_traces=50, top_n=20,
+            dataset_label=database, top_n=20,
+            n_label=f"top-20 picked by LOO over n=50 traces; "
+                    f"Shapley on ≤{max_count} traces per label",
         )
 
         staging_path = os.path.join(STAGING_DIR, out_name)
