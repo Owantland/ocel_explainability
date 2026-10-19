@@ -63,7 +63,7 @@ checkpoint round-trip, sweep/train consistency):
 ```
 PYTHONPATH=. python3 debug_scripts/sanity_check.py --database order_management --cant 2000
 ```
-(`--database logistics --cant 1000` works the same way for the other dataset.)
+(`--database logistics --cant 1000` and `--database cargo_pickup_iot --cant 2000` work the same way for the other datasets.)
 
 ## Interactive demo
 

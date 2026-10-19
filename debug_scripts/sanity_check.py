@@ -5,7 +5,7 @@ Runs 6 sequential check groups and prints PASS / FAIL for each.
 Exits with code 1 if any check fails.
 
 Usage (from repo root): PYTHONPATH=. python3 debug_scripts/sanity_check.py
-                         [--database order_management|logistics] [--cant N]
+                         [--database order_management|logistics|cargo_pickup_iot] [--cant N]
 Defaults to --database order_management --cant 2000 (this script's original,
 only-ever-run configuration) when no flags are given.
 """
@@ -205,9 +205,14 @@ def main(database, cant):
         _fail("target_std in seconds", f"std={ts:.1f} — looks like hours, not seconds?")
 
     # --- 3c. Normalised node features on training data have mean ≈ 0 per dim ---
-    # Check Events and kpi_viewpoint as representative types
+    # Check Events and kpi_viewpoint as representative types, but only those
+    # Modelling.__init__ actually standardises (a viewpoint with no configured
+    # attributes keeps its constant placeholder feature unnormalised by design)
+    normalised_types = (list((path_dict.get('attributes') or {}).keys()) +
+                        list((path_dict.get('time_attributes') or {}).keys()) + ['Events'])
+    checked_types = [nt for nt in ['Events', vp] if nt in normalised_types]
     problem_features = []
-    for nt in ['Events', vp]:
+    for nt in checked_types:
         xs = [g[nt].x for g in m.train_data if g[nt].num_nodes > 0]
         if not xs:
             continue
@@ -218,7 +223,7 @@ def main(database, cant):
             problem_features.append(f"{nt} dims {bad} (max|mean|={per_dim_mean.max():.3f})")
 
     if not problem_features:
-        _ok("Normalised node features mean ≈ 0 (Events, Orders)")
+        _ok(f"Normalised node features mean ≈ 0 ({', '.join(checked_types)})")
     else:
         _fail("Normalised node features mean ≈ 0", "; ".join(problem_features))
 
@@ -243,7 +248,7 @@ def main(database, cant):
     # --- 4a. Output shape ---
     m.model.eval()
     loader = DataLoader(m.test_data, batch_size=4)
-    batch  = next(iter(loader))
+    batch  = next(iter(loader)).to(m.device)
 
     with torch.no_grad():
         out = m.model(batch.x_dict, batch.edge_index_dict)
@@ -276,7 +281,7 @@ def main(database, cant):
     # Use a large batch so that every node type has at least some nodes represented
     # (small batches can have 0-node types → no gradient for their projection matrices)
     big_loader = DataLoader(m.train_data, batch_size=64, shuffle=False)
-    big_batch  = next(iter(big_loader))
+    big_batch  = next(iter(big_loader)).to(m.device)
 
     # Identify which node types are present in this batch (num_nodes > 0)
     active_types = {nt for nt in big_batch.node_types if big_batch[nt].num_nodes > 0}
@@ -378,7 +383,7 @@ def main(database, cant):
 
     # Materialise lazy layers on a dummy forward pass
     with torch.no_grad():
-        _dummy = next(iter(DataLoader(m.test_data, batch_size=1)))
+        _dummy = next(iter(DataLoader(m.test_data, batch_size=1))).to(m.device)
         model_a(_dummy.x_dict, _dummy.edge_index_dict)
         model_b(_dummy.x_dict, _dummy.edge_index_dict)
 
@@ -389,7 +394,7 @@ def main(database, cant):
 
     sample_graphs = m.test_data[:10]
     loader_sample = DataLoader(sample_graphs, batch_size=10)
-    b = next(iter(loader_sample))
+    b = next(iter(loader_sample)).to(m.device)
 
     with torch.no_grad():
         preds_a = model_a(b.x_dict, b.edge_index_dict)
@@ -464,7 +469,7 @@ def main(database, cant):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", default="order_management",
-                         choices=["order_management", "logistics"],
+                         choices=["order_management", "logistics", "cargo_pickup_iot"],
                          help="Which configured dataset to check (default: order_management).")
     parser.add_argument("--cant", type=int, default=2000,
                          help="Trace-count checkpoint identifier to check (default: 2000).")
