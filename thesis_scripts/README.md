@@ -25,3 +25,11 @@ and, where noted in their own docstring, also promote the result directly to
 follow that pattern (see `promote_aggregate_shapley_global_figures.py`) for any new
 script, rather than relying on a manual copy/rename step, which is what caused 3
 figures to silently drift out of sync before this directory existed.
+
+## `archive/`
+
+Scripts confirmed (2026-10-12, repo cleanup pass) to produce nothing cited in any
+current `.tex` chapter and nothing staged elsewhere in `thesis_parts/figures_tables/`
+-- one-off experiments and validation checks whose findings, where relevant, are
+already folded into the thesis prose or into `docs/archive/`. Not wired into any
+other script's imports, so moving them here was a plain `git mv`, no code changes.

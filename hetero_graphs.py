@@ -102,6 +102,14 @@ class HeteroGraphsGenerator:
         active_orders = []
         for i in range(self.num_vp_obj):
             temp = self.pd_df[self.pd_df['vwpnt_id'] == i + 1]
+            if temp.empty:
+                # This vwpnt_id was dropped upstream (TrainTestBuilder.get_active_orders()
+                # already skips traces with no rows or no kpi_event in their window --
+                # confirmed real for cargo_pickup_iot, where ~16% of traces never reach
+                # EvaluateTruckExit at all). Previously unguarded here because
+                # order_management/logistics' kpi_event is reached by virtually every trace,
+                # so this path was never exercised before.
+                continue
             strt_time = temp.iloc[0]['timestamp']
             end_time = temp.iloc[-1]['timestamp']
             ob_id = temp.iloc[0]['ob_id']
@@ -118,6 +126,8 @@ class HeteroGraphsGenerator:
         active_orders_dict = {}
         for idx in range(1, self.num_vp_obj + 1):
             rows = self.pd_df[self.pd_df['vwpnt_id'] == idx]
+            if rows.empty:
+                continue
             delivery_time = rows.iloc[-1]['timestamp']
             ob_id = rows.iloc[0]['ob_id']
             active_orders_dict[ob_id] = delivery_time

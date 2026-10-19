@@ -21,6 +21,10 @@ the plan this script implements for the full reasoning):
                                  permanent -- see below for why this is no longer the generic file)
 - logistics/CustomerOrder->LoadToVehicle : validation_1000/model_comparison_LoadToVehicle.csv
                                  (KPI-suffixed, permanent -- new second logistics KPI, 2026-07-26)
+- cargo_pickup_iot/Pickupplan->EvaluateTruckExit : validation_2000/model_comparison.csv (generic
+                                 filename -- only one KPI configured for this database so far, no
+                                 collision risk like logistics' two-KPI situation above; added
+                                 2026-10-13, first training run for this third database)
 
 logistics/TransportDocument->Depart was dropped from this table (2026-07-26) -- it's the
 pre-fix/superseded logistics viewpoint, superseded by CustomerOrder->Depart, and multiple
@@ -43,9 +47,16 @@ read from permanent, KPI-suffixed files instead of the generic one, so this can'
 logistics; order_management/PayOrder still relies on the generic file (unchanged, out of
 scope here) since it wasn't part of this incident.
 
-Usage: python3 combined_baseline_comparison.py
+2026-10-12: at de Leoni & Padellas's request, the rendered table (PNG) no longer reports
+last-event-only values -- only the full/every-event prefix-set comparison remains, same
+style otherwise (grouped rows, per-KPI shading, bold HGT row). combined_baseline_comparison.csv
+is unaffected and still carries both. Also self-promotes to thesis_parts/figures_tables/
+and thesis_parts/latex_template/figures/ now (previously only written to OUT_DIR below).
+
+Usage: PYTHONPATH=. python3 thesis_scripts/combined_baseline_comparison.py
 """
 import os
+import shutil
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -59,11 +70,21 @@ SOURCES = [
      "files/explainer_outputs/logistics/validation_1000/model_comparison_Depart.csv", ""),
     ("Logistics / CustomerOrder → LoadToVehicle",
      "files/explainer_outputs/logistics/validation_1000/model_comparison_LoadToVehicle.csv", ""),
+    ("CargoPickup_IoT / Pickup Plan → EvaluateTruckExit",
+     "files/explainer_outputs/cargo_pickup_iot/validation_2000/model_comparison.csv", ""),
 ]
 
 OUT_DIR = "files/explainer_outputs"
 CSV_PATH = os.path.join(OUT_DIR, "combined_baseline_comparison.csv")
 PNG_PATH = os.path.join(OUT_DIR, "combined_baseline_comparison_table.png")
+
+# Self-promotion targets, added 2026-10-12 -- previously this script only wrote to
+# OUT_DIR above and relied on refresh_logistics_thesis_figures.py's manual copy step
+# to reach STAGING_DIR, which never reached BUILD_DIR (the path results.tex actually
+# \includegraphics-es) at all. Matches promote_aggregate_shapley_global_figures.py's
+# established pattern -- see thesis_scripts/README.md.
+STAGING_DIR = "thesis_parts/figures_tables"
+BUILD_DIR = "thesis_parts/latex_template/figures"
 
 MODEL_ORDER = ["HGT", "HomoGNN (GCN)", "k-dim GNN (HOEG)", "Mean predictor", "GBT"]
 
@@ -95,13 +116,17 @@ def load_combined():
 
 
 def render_table(combined):
+    # Last-event columns removed 2026-10-12 at de Leoni & Padellas's request -- the
+    # rendered table now reports only the full/every-event prefix-set comparison.
+    # combined_baseline_comparison.csv (load_combined()'s output) still carries the
+    # last-event columns untouched -- this is a presentation-only trim, not a data
+    # loss, since the CSV is a provenance artifact the thesis itself never renders.
+    #
     # MAE cells fold their 95% bootstrap CI in as a second line (mae_bootstrap_ci() in
     # baselines.py -- percentile CI over resampled per-sample absolute errors, not a
-    # symmetric +/-sigma), rather than adding two more low/high columns -- keeps the
-    # table at 8 columns instead of 10 while still surfacing both requested figures
-    # (CI and RMSE).
+    # symmetric +/-sigma), rather than adding two more low/high columns.
     col_labels = ["Dataset / KPI", "Model", "MAE (all) [h]\n(95% CI)", "RMSE (all) [h]",
-                  "R² (all)", "MAE (last) [h]\n(95% CI)", "RMSE (last) [h]", "R² (last)"]
+                  "R² (all)"]
     cell_rows = []
     row_kpi = []
     # Only print the Dataset/KPI label on the first row of each group (grouped-row
@@ -115,11 +140,9 @@ def render_table(combined):
         is_first_in_group = r["Dataset_KPI"] != prev_kpi
         label = (r["Dataset_KPI"] + ("*" if r["Note"] else "")) if is_first_in_group else ""
         mae_all_cell = f"{r['MAE_all']:.1f}\n[{r['MAE_all_ci_low']:.1f}, {r['MAE_all_ci_high']:.1f}]"
-        mae_last_cell = f"{r['MAE_last']:.1f}\n[{r['MAE_last_ci_low']:.1f}, {r['MAE_last_ci_high']:.1f}]"
         cell_rows.append([
             label, r["Model"],
             mae_all_cell, f"{r['RMSE_all']:.1f}", f"{r['R2_all']:.3f}",
-            mae_last_cell, f"{r['RMSE_last']:.1f}", f"{r['R2_last']:.3f}",
         ])
         row_kpi.append(r["Dataset_KPI"])
         prev_kpi = r["Dataset_KPI"]
@@ -129,10 +152,10 @@ def render_table(combined):
     # (fig.text at an absolute y) left a large dead gap under a 'center'/'upper
     # center'-positioned table earlier; simplest fix is the asterisk marker in the
     # KPI label plus the Note column already in the CSV and printed summary,
-    # without a second floating text element to position. Width bumped 13->16 and
-    # per-row height 0.4->0.5 to fit the two-line MAE-with-CI cells and 2 new
-    # RMSE columns without crowding.
-    fig, ax = plt.subplots(figsize=(16, 0.5 * len(cell_rows) + 1.0))
+    # without a second floating text element to position. Width dropped 16->11 now
+    # that only 5 columns remain (was sized for 8, including the two removed
+    # two-line MAE-with-CI cells and 2 removed RMSE/R2 columns).
+    fig, ax = plt.subplots(figsize=(11, 0.5 * len(cell_rows) + 1.0))
     ax.axis('off')
     ax.set_title("Baseline comparison — all 5 currently-relevant models", fontsize=12)
     table = ax.table(cellText=cell_rows, colLabels=col_labels, loc='center', cellLoc='center')
@@ -184,6 +207,14 @@ def main():
 
     render_table(combined)
     print(f"Saved presentation table image to {PNG_PATH}")
+
+    os.makedirs(STAGING_DIR, exist_ok=True)
+    os.makedirs(BUILD_DIR, exist_ok=True)
+    for src, name in [(PNG_PATH, "combined_baseline_comparison_table.png"),
+                       (CSV_PATH, "combined_baseline_comparison.csv")]:
+        shutil.copy(src, os.path.join(STAGING_DIR, name))
+    shutil.copy(PNG_PATH, os.path.join(BUILD_DIR, "combined_baseline_comparison_table.png"))
+    print(f"Promoted to {STAGING_DIR}/ and {BUILD_DIR}/")
 
     print_summary(combined)
 

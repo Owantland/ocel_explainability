@@ -18,7 +18,7 @@ Stages (always run in the fixed order below, regardless of the order given on th
                   -- hetero_graphs.py needs all three files in sync (previously 'regenerate' only
                   refreshed ev_log.csv, silently leaving ocel.csv/edges.csv stale and causing a
                   'malformed node or string' crash in hetero_graphs.py's ast.literal_eval; see
-                  OPEN_ISSUES_FEASIBILITY.md item 6a).
+                  docs/archive/OPEN_ISSUES_FEASIBILITY.md item 6a).
                   WARNING: for logistics this overwrites the graph_structures/hetero_structures
                   cache in place (not viewpoint-qualified in its filename) -- back up first if
                   switching kpi_viewpoint, as done historically before the CustomerOrder switch.
@@ -94,6 +94,11 @@ def _predict_all(model_holder):
     records = []
     with torch.no_grad():
         for g in model_holder.test_data:
+            # test_data's graphs are loaded straight from the .pt cache (CPU), never moved
+            # to the training device -- a no-op on a CUDA/CPU-only setup where the model
+            # happens to already be on CPU, but a real cpu-vs-mps mismatch now that an MPS
+            # device is possible (see training.py's device selection).
+            g = g.to(model_holder.device)
             pred_norm = model_holder.model(g.x_dict, g.edge_index_dict)[0].item()
             pred_h = (pred_norm * model_holder.target_std.item()
                       + model_holder.target_mean.item()) / 3600.0
@@ -117,7 +122,7 @@ def run(database, cant, stages, selection_metric='pooled'):
 
     selection_metric: 'pooled' (default, matches every checkpoint trained to date) or
     'last_event' -- passed through to sweep()/Modelling() for the 'sweep'/'train' stages only.
-    See training.py's Het_Reg_Modelling docstring and OPEN_ISSUES_FEASIBILITY.md item 11."""
+    See training.py's Het_Reg_Modelling docstring and docs/archive/OPEN_ISSUES_FEASIBILITY.md item 11."""
     stages = set(stages)
     ordered = [s for s in STAGE_ORDER if s in stages]
     print(f"Running stages {ordered} for database={database}, cant={cant}")
@@ -294,7 +299,7 @@ def run(database, cant, stages, selection_metric='pooled'):
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--database', required=True, choices=['order_management', 'logistics'])
+    parser.add_argument('--database', required=True, choices=['order_management', 'logistics', 'cargo_pickup_iot'])
     parser.add_argument('--cant', required=True, type=int)
     parser.add_argument('--stages', required=True,
                          help=f"Comma-separated subset of: {','.join(STAGE_ORDER)}")
@@ -302,7 +307,7 @@ def main():
                          help="Val MAE used for early stopping / best-checkpoint selection in "
                               "the 'sweep' and 'train' stages. Default 'pooled' matches every "
                               "checkpoint trained to date; 'last_event' selects on the rare "
-                              "last-event subset instead (see OPEN_ISSUES_FEASIBILITY.md item 11).")
+                              "last-event subset instead (see docs/archive/OPEN_ISSUES_FEASIBILITY.md item 11).")
     args = parser.parse_args()
 
     stages = {s.strip() for s in args.stages.split(',') if s.strip()}

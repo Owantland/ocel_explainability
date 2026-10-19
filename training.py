@@ -20,7 +20,18 @@ import matplotlib.pyplot as plt
 import copy
 
 class Modelling:
-    def __init__(self, database, cant, seed=42):
+    def __init__(self, database, cant, seed=42, target_transform='zscore'):
+        """
+        :param target_transform: 'zscore' (default, unchanged behavior -- every currently-cited
+            checkpoint was trained this way) or 'log1p'. 'log1p' applies log1p() to the raw
+            remaining-time target (seconds) before fitting/applying the usual z-score, to test
+            whether de-emphasizing the heavy right tail of the remaining-time distribution
+            reduces MAE_all -- see docs/archive/MAE_IMPROVEMENT_OPTIONS.md option 3. Purely opt-in: omitting
+            it reproduces the exact existing pipeline.
+        """
+        if target_transform not in ('zscore', 'log1p'):
+            raise ValueError(f"target_transform must be 'zscore' or 'log1p', got {target_transform!r}")
+        self.target_transform = target_transform
         self.database = database
         self.cant = cant
         self.init_seed = seed  # only affects model weight init below, not training-loop seeding
@@ -28,7 +39,14 @@ class Modelling:
         self.path_dict = self.funcs.get_paths()
         self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
         self.kpi_viewpoint = self.path_dict['kpi_viewpoint']
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # Opt-in Apple-GPU (MPS) fallback for machines with no CUDA -- unreachable on any CUDA
+        # machine (every existing order_management/logistics checkpoint), so this is a pure
+        # addition for CPU-only-by-default environments like this one.
+        self.device = torch.device(
+            'cuda' if torch.cuda.is_available()
+            else 'mps' if torch.backends.mps.is_available()
+            else 'cpu'
+        )
 
         # Load relevant datasets
         self.train_data = torch.load(f"{self.path_dict['pytorch_path']}/train_graphs_sg.pt", weights_only=False)
@@ -45,7 +63,7 @@ class Modelling:
         # zero feature attribution on every non-viewpoint node type) after
         # early-stopping at epoch 6. Kept on a longer, pre-existing budget
         # here as a deliberate, documented deviation from HOEG parity for
-        # this one dataset -- see TRAINING_VS_HOEG.md recommendation 1.
+        # this one dataset -- see docs/archive/TRAINING_VS_HOEG.md recommendation 1.
         if self.database == 'logistics':
             self.max_epochs = 100
             self.early_stop_patience = 10
@@ -89,10 +107,16 @@ class Modelling:
 
         # Standardize the output values.
         # Checks if there is a saved file containing the standardized values to import
+        # (skipped for target_transform='log1p' -- a cached _norm.json on disk was fit on the
+        # raw/untransformed target by a prior 'zscore' run, so reusing it here would silently
+        # apply the wrong stats; log1p always recomputes its own mean/std fresh below).
         train_y_all = torch.cat([g[self.kpi_viewpoint].y for g in self.train_data])
         _model_dir = f"{self.path_dict['model_path']}/Hetero"
         _norm_path = f"{_model_dir}/{self.task_id}_norm.json"
-        if os.path.exists(_norm_path):
+        if self.target_transform == 'log1p':
+            train_y_all = torch.log1p(train_y_all)
+            target_mean, target_std = train_y_all.mean(), train_y_all.std()
+        elif os.path.exists(_norm_path):
             with open(_norm_path) as _f:
                 _saved = json.load(_f)
             target_mean = torch.tensor(_saved["target_mean"])
@@ -101,7 +125,8 @@ class Modelling:
             target_mean, target_std = train_y_all.mean(), train_y_all.std()
         for m in [self.train_data, self.val_data, self.test_data]:
             for g in m:
-                g[self.kpi_viewpoint].y = (g[self.kpi_viewpoint].y - target_mean) / target_std
+                y = torch.log1p(g[self.kpi_viewpoint].y) if self.target_transform == 'log1p' else g[self.kpi_viewpoint].y
+                g[self.kpi_viewpoint].y = (y - target_mean) / target_std
 
         # Print out the Mean and STD of the chosen regression database
         print(f"Training-set target normalization stats -- Mean (hours): "
@@ -291,7 +316,7 @@ class Modelling:
     def het_loss_test_split(self, loader, model, criterion, device):
         """Same as het_loss_test, but also breaks the loss out over last_event==True
         samples only, in the same forward pass (no extra cost). Addresses
-        OPEN_ISSUES_FEASIBILITY.md item 11: pooled val MAE is dominated by the much more
+        docs/archive/OPEN_ISSUES_FEASIBILITY.md item 11: pooled val MAE is dominated by the much more
         numerous non-last-event prefixes, so a model can be 'selected' for improving on
         the majority-class prefixes while quietly regressing on the minority last-event
         case that's actually reported -- see project_capacity_vs_lastevent_mae_tradeoff
@@ -335,7 +360,7 @@ class Modelling:
             scheduler, early stopping, and best-checkpoint selection all use. Both are always
             computed and logged regardless of this choice (see het_loss_test_split), so switching
             to 'last_event' is opt-in per call, not a silent behavior change for existing callers.
-            See OPEN_ISSUES_FEASIBILITY.md item 11 and project_capacity_vs_lastevent_mae_tradeoff
+            See docs/archive/OPEN_ISSUES_FEASIBILITY.md item 11 and project_capacity_vs_lastevent_mae_tradeoff
             memory's 2026-07-25 update for why this matters: pooled selection can lock in an
             undertrained checkpoint that never specializes on the rare last-event case.
         :param optimizer: 'adam' (default -- matches every checkpoint trained to date) or
@@ -400,9 +425,9 @@ class Modelling:
             current_lr = optimizer.param_groups[0]["lr"]
             # Per-node-type lin_dict weight norms -- standing diagnostic so a dead-projection
             # pathology (weight_decay collapsing a node type's input projection to ~0, as
-            # previously root-caused in EXPLAINABILITY_DEPTH.md) is visible from epoch 1 in the
+            # previously root-caused in docs/archive/EXPLAINABILITY_DEPTH.md) is visible from epoch 1 in the
             # training log itself, without a separate post-hoc investigation. See
-            # OPEN_ISSUES_FEASIBILITY.md item 12a. HGT-specific (lin_dict has no HomoGNN analogue).
+            # docs/archive/OPEN_ISSUES_FEASIBILITY.md item 12a. HGT-specific (lin_dict has no HomoGNN analogue).
             weight_norms = {f'norm_{nt}': model.lin_dict[nt].weight.norm().item()
                              for nt in model.lin_dict}
             log.append({'epoch': epoch, 'train_loss': train_loss,
@@ -441,7 +466,8 @@ class Modelling:
         with open(norm_path, "w") as f:
             json.dump({"target_mean": self.target_mean.item(),
                        "target_std":  self.target_std.item(),
-                       "fit_time_s":  fit_time_s}, f)
+                       "fit_time_s":  fit_time_s,
+                       "target_transform": self.target_transform}, f)
 
         log_path = self.model_path.replace(".pth", "_training_log.csv")
         pd.DataFrame(log).to_csv(log_path, index=False)
@@ -453,17 +479,17 @@ class Modelling:
 
         :param selection_metric: 'pooled' (default, matches every sweep run to date) or
             'last_event' -- which val MAE each trial is scored/pruned on. See
-            Het_Reg_Modelling's docstring and OPEN_ISSUES_FEASIBILITY.md item 11: a trial can
+            Het_Reg_Modelling's docstring and docs/archive/OPEN_ISSUES_FEASIBILITY.md item 11: a trial can
             look best on pooled val MAE while its last-event MAE (the metric actually reported)
             is worse. Both are always reported to Optuna as trial user_attrs regardless of this
             choice, so a 'pooled' sweep's results can still be inspected for their last-event
             values after the fact.
 
         num_layers and num_heads are fixed, not tuned, for order_management (see
-        TRAINING_VS_HOEG.md recs 5a/5b): HOEG (Smit et al. 2024) fixes message-passing depth at 2
+        docs/archive/TRAINING_VS_HOEG.md recs 5a/5b): HOEG (Smit et al. 2024) fixes message-passing depth at 2
         and has no attention-head analogue at all, and this session found num_layers=1 makes any
         node type without a direct edge to the viewpoint provably unreachable
-        (EXPLAINABILITY_DEPTH.md) -- sweep() was previously free to (and did) select it.
+        (docs/archive/EXPLAINABILITY_DEPTH.md) -- sweep() was previously free to (and did) select it.
 
         logistics is a deliberate, empirically-forced exception: retraining
         TimeFrom_CustomerOrder_to_Depart under the fixed depth=2 collapsed the model to a
@@ -471,7 +497,7 @@ class Modelling:
         while a prior one-off experiment (experiment_num_layers3.py) showed num_layers=3 alone
         cuts last-event MAE from 243.6h to 28.2h. sweep() now tunes num_layers in {3,4,5} for
         logistics specifically -- a second, documented deviation from HOEG parity for this
-        dataset (see TRAINING_VS_HOEG.md), on top of its already-documented epoch/patience one.
+        dataset (see docs/archive/TRAINING_VS_HOEG.md), on top of its already-documented epoch/patience one.
         num_heads is still fixed at 2 for both datasets (no HOEG analogue either way).
 
         hidden_channels excludes {128, 256} for logistics specifically (rec 5d): HOEG's own

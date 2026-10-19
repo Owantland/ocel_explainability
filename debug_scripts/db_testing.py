@@ -880,7 +880,7 @@ if __name__ == '__main__':
     # verify_hetero_graphs(database, cant)
 
     # Model training and testing -- delegated to run_pipeline.py (2026-07-13) instead of
-    # duplicating the train/homo/compare orchestration inline; closes AUDIT.md's original
+    # duplicating the train/homo/compare orchestration inline; closes docs/archive/AUDIT.md's original
     # "db_testing.py is not a test file" complaint for this specific block. The verify_*/
     # compare_to_hoeg function library above remains this file's own, distinct
     # responsibility and is untouched. Uses run_pipeline's fuller compare_to_baselines()

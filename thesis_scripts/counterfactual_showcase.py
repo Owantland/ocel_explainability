@@ -1,18 +1,22 @@
 """Counterfactual explanation showcase, single trace (order 1801, Order Management /
 Orders -> PayOrder -- config is already live, no switching needed).
 
-explain_counterfactual() already saves 5 PNGs + 1 CSV, but bundles the query and best-CF
+explain_counterfactual() already saves 6 PNGs + 1 CSV, but bundles the query and best-CF
 graphs into ONE combined side-by-side image (cf_graph_structure_comparison.png) rather
 than two separate files, and never renders the full ranked candidate list as a table
 (only as a CSV). This script:
-  1. Calls explain_counterfactual() once -- gets the standard 5 artifacts AND the full
+  1. Calls explain_counterfactual() once -- gets the standard 6 artifacts AND the full
      ranked `results` list (up to n_results candidates, each with its own graph).
   2. Splits the query/CF graphs into two SEPARATE images by calling the same underlying
      drawing primitives the method already uses (_hetero_to_nx + _draw_hetero_nx, which
      draws onto a given axis) directly on two fresh single-axis figures -- not a crop of
      the combined image.
-  3. Copies the method's other 4 already-separate artifacts into thesis_parts/figures_tables/
-     with showcase-prefixed names -- no new computation needed for these.
+  3. Copies the method's other 5 already-separate artifacts into thesis_parts/figures_tables/
+     with showcase-prefixed names -- no new computation needed for these. Includes
+     cf_diff_graph.png (added 2026-10-14, [[project_counterfactual_diff_graph]]) -- the
+     shared-layout, highlighted node/edge diff between query and CF -- as
+     cf_showcase_diff_graph.png, giving this showcase set the full query / CF /
+     diff-highlighted trio in one place.
   4. Renders cf_dissimilarity.csv's full ranked candidate list as a table image (this
      doesn't exist yet -- only the CSV does).
 
@@ -126,12 +130,13 @@ def main():
         f"(pred={best['predicted_hours']:.1f}h, dissimilarity={best['dissimilarity']:.3f})",
         os.path.join(OUT_DIR, "cf_showcase_counterfactual_graph.png"))
 
-    # 3: copy the method's other 4 already-separate artifacts, showcase-prefixed.
+    # 3: copy the method's other 5 already-separate artifacts, showcase-prefixed.
     copy_map = {
         "cf_node_type_comparison.png": "cf_showcase_node_type_comparison.png",
         "cf_dissimilarity_breakdown.png": "cf_showcase_dissimilarity_breakdown.png",
         "cf_event_type_diff.png": "cf_showcase_event_type_diff.png",
         f"cf_{e.kpi_viewpoint.lower()}_feature_diff.png": "cf_showcase_viewpoint_feature_diff.png",
+        "cf_diff_graph.png": "cf_showcase_diff_graph.png",
     }
     for src_name, dst_name in copy_map.items():
         src = os.path.join(cf_dir, src_name)

@@ -50,6 +50,20 @@ class Generator:
         # Dictionary of object sizes for future tensor creation
         self.tensor_dict = {}
 
+        # Every object type this database could ever attach features to, across all 4 feature
+        # "homes" (attributes/time_attributes/role_encoding/encoding) plus unique_ids (which
+        # gates object_object traversal, independent of which feature home a type uses). Used to
+        # pre-seed generate_ocel()'s per-event column set so it's identical across every trace,
+        # even when a given trace happens not to touch one of these types at all (e.g. a Pickup
+        # Plan whose assigned truck's episode never included a Silo visit) -- without this, a
+        # trace lacking a type would silently build a DIFFERENT-shaped ocel.csv row than one that
+        # has it, and pd.DataFrame(ocel, columns=...) would mis-align columns across traces.
+        self._all_ob_types = (set(self.path_dict['unique_ids'])
+                               | set(self.path_dict['encoding'])
+                               | set(self.path_dict['attributes'].keys())
+                               | set(self._time_attrs.keys())
+                               | set(self.role_encodings.keys()))
+
     def table_names(self):
         self.cursor.execute(f"SELECT name FROM sqlite_master")
         table_names = self.cursor.fetchall()
@@ -169,6 +183,20 @@ class Generator:
             fallback = sub.loc[sub[entry['fixed_attr']].notna(), entry['fixed_attr']]
             if not fallback.empty:
                 row[entry['fixed_attr']] = fallback.iloc[0]
+        # Same coalesce for the time-sensitive attr, but preferring the closest-in-time row
+        # that actually has a value (rather than an arbitrary one), to stay faithful to its
+        # time-sensitivity. A real gap, not a code bug: confirmed for CargoPickup_IoT's
+        # Silo/Humidity, where not every changelog snapshot records every sensor reading.
+        # Without this, a None here crashes hetero_graphs.py's torch.tensor() call downstream.
+        if pd.isna(row[entry['time_attr']]):
+            non_null = sub[sub[entry['time_attr']].notna()]
+            if not non_null.empty:
+                row[entry['time_attr']] = non_null.loc[non_null['_delta'].idxmin(), entry['time_attr']]
+        # Final backstop for either attr: if genuinely never recorded for this object at all
+        # (both coalesce attempts exhausted), default to 0.0 rather than propagate None.
+        for attr in (entry['fixed_attr'], entry['time_attr']):
+            if pd.isna(row[attr]):
+                row[attr] = 0.0
         def _py(x):
             """Convert numpy scalar → plain Python float/None so ast.literal_eval works."""
             if pd.isna(x):
@@ -385,8 +413,22 @@ class Generator:
                 self.tensor_dict['Events_to_Events'] = 1
 
                 ob_types = set()
-                ob_attrs = {}
-                edge_attrs = {}
+                if self.path_dict.get('episode_scoped_ids'):
+                    # Only for databases using episode-scoped traversal: a trace can legitimately
+                    # vary in which object types it touches (e.g. a Pickup Plan whose assigned
+                    # truck's episode never included a Silo visit), so pre-seed every type this
+                    # database can ever attach features to -- otherwise a trace lacking a type
+                    # would build a DIFFERENT-shaped ocel.csv/edges.csv row than one that has it,
+                    # and pd.DataFrame(ocel, columns=...) would mis-align columns across traces.
+                    # Left as the original dynamic (only-what's-touched) initialization for every
+                    # other database, unchanged -- confirmed via regression diff that the two
+                    # existing databases are unaffected either way, but logistics' own column set
+                    # does already vary in ways this pre-seeding would otherwise alter.
+                    ob_attrs = {ob_type: [] for ob_type in self._all_ob_types}
+                    edge_attrs = {f"{ob_type}_to_Events": [[], []] for ob_type in self._all_ob_types}
+                else:
+                    ob_attrs = {}
+                    edge_attrs = {}
 
                 # Fix 5: iterate ev_by_ob_dict instead of ev_by_ob.iterrows()
                 for ob_id, ob_info in ev_by_ob_dict.items():
