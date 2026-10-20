@@ -1409,7 +1409,8 @@ class Explainer(Modelling):
         return all_metrics
 
     def explain_aggregate_shapley(self, n_traces=50, top_k=5, n_samples=30, revisit_n=3,
-                                  max_revisit_candidates=6, save_dir=None, seed=0):
+                                  max_revisit_candidates=6, save_dir=None, seed=0,
+                                  scope='last_event'):
         """Aggregate Shapley replacement for the dashboard's two flat "top K" bar
         charts (nodes, features) only -- NOT the per-node-type chart or the depth
         heatmap, which stay LOO-based (both are exhaustive-by-design; Shapley-izing
@@ -1439,38 +1440,72 @@ class Explainer(Modelling):
 
         seed: seeds a private random.Random for the permutation orderings, so the
         bar values are reproducible across reruns (the global `random` state is
-        left untouched)."""
+        left untouched).
+
+        scope: which graphs of the first n_traces test executions are explained.
+          'last_event' (default) -- only each execution's last-event graph, the
+              behaviour every existing caller (dashboard, thesis scripts) relies on.
+          'all_prefixes' -- every prefix graph of those same executions. A label's
+              LOO shifts are first averaged within each execution, then across
+              executions, so a long execution (order_management: 3-26 prefixes,
+              median 10) counts once rather than once per prefix. Each winning
+              label is Shapley-revisited in up to revisit_n DISTINCT executions,
+              one seeded-random prefix each. ~11x more LOO passes than
+              'last_event'; writes to aggregate_all_prefixes/ by default so the
+              dashboard's aggregate/ outputs are never overwritten."""
         import random
 
+        if scope not in ('last_event', 'all_prefixes'):
+            raise ValueError(f"scope must be 'last_event' or 'all_prefixes', got {scope!r}")
+        all_prefixes = scope == 'all_prefixes'
         if save_dir is None:
-            save_dir = os.path.join(self.path_dict['explainer_path'], "aggregate")
+            save_dir = os.path.join(self.path_dict['explainer_path'],
+                                    "aggregate_all_prefixes" if all_prefixes else "aggregate")
         os.makedirs(save_dir, exist_ok=True)
 
         self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
         self.model.eval()
         rng = random.Random(seed)
 
-        last_event_graphs = [g for g in self.test_data
-                             if g[self.kpi_viewpoint]['last_event'][0].item()]
-        sample = last_event_graphs[:n_traces]
-        print(f"Running aggregate Shapley explanation on {len(sample)} traces "
-              f"(identification via exhaustive LOO, unchanged cost; only the top ~20 "
-              f"winners per chart get Shapley-requantified)…")
+        vp = self.kpi_viewpoint
+        last_event_graphs = [g for g in self.test_data if g[vp]['last_event'][0].item()]
+        executions = last_event_graphs[:n_traces]
+        if all_prefixes:
+            # Same executions as the last-event scope, so the two outputs compare
+            # directly; prefixes whose viewpoint has no target yet are skipped, as in
+            # explain_loo_by_depth().
+            exec_ids = {int(g[vp]['id'][0].item()) for g in executions}
+            sample = [g for g in self.test_data
+                      if int(g[vp]['id'][0].item()) in exec_ids and g[vp].y.shape[0] > 0]
+            print(f"Running aggregate Shapley explanation on {len(sample)} prefixes of "
+                  f"{len(executions)} executions (identification via exhaustive LOO on "
+                  f"every prefix; only the top ~20 winners per chart get Shapley-requantified)…")
+        else:
+            sample = executions
+            print(f"Running aggregate Shapley explanation on {len(sample)} traces "
+                  f"(identification via exhaustive LOO, unchanged cost; only the top ~20 "
+                  f"winners per chart get Shapley-requantified)…")
 
         import numpy as np
         import pandas as pd
         from collections import defaultdict
-        explanation_signed_shifts = defaultdict(list)
-        explanation_sources = defaultdict(list)  # label -> [(trace_idx, node_type, idx), ...]
-        feature_signed_shifts = defaultdict(list)
-        feature_sources = defaultdict(list)  # label -> [(trace_idx, node_type, node_idx, feat_idx), ...]
+        # Pooled per execution: label -> {order_id: [...]}, insertion-ordered, so
+        # flattening reproduces the old flat per-label lists exactly in the
+        # last-event scope (one graph per execution).
+        explanation_signed_shifts = defaultdict(lambda: defaultdict(list))
+        explanation_sources = defaultdict(lambda: defaultdict(list))  # -> [(trace_idx, node_type, idx), ...]
+        feature_signed_shifts = defaultdict(lambda: defaultdict(list))
+        feature_sources = defaultdict(lambda: defaultdict(list))  # -> [(trace_idx, node_type, node_idx, feat_idx), ...]
         all_metrics = []
+        metric_meta = []  # (order_id, n_events) per all_metrics row
         names = self.feature_names
         baseline_values = {}
 
         n_failed = 0
         for trace_idx, g in enumerate(sample):
-            oid = int(g[self.kpi_viewpoint]['id'][0].item()) if self.kpi_viewpoint in g.node_types else None
+            if all_prefixes and trace_idx % max(1, len(sample) // 10) == 0:
+                print(f"  LOO over prefixes: {100 * trace_idx // len(sample)}%")
+            oid = int(g[vp]['id'][0].item()) if vp in g.node_types else None
             try:
                 (node_imp, edge_imp, seed_feats, top_node_feats, baseline_value) = self.reg_explanation(g, 0, None, top_k)
             except Exception as ex:
@@ -1479,19 +1514,23 @@ class Explainer(Modelling):
                 continue
             baseline_values[trace_idx] = baseline_value
 
-            id_map = self._decode_all_identifiers(g, oid) if oid is not None else {}
+            n_events = g['Events'].x.size(0) if 'Events' in g.node_types else 0
+            # A prefix's OCEL ids must be decoded at its own event count, not the
+            # execution's last row (None).
+            id_n_events = None if g[vp]['last_event'][0].item() else n_events
+            id_map = self._decode_all_identifiers(g, oid, id_n_events) if oid is not None else {}
             for nt, idx, shift, _, signed_shift in node_imp:
                 decoded = id_map.get((nt, idx))
                 label = f"{nt}={decoded}" if decoded else nt
-                explanation_signed_shifts[label].append(signed_shift / 3600.0)
-                explanation_sources[label].append((trace_idx, nt, idx))
+                explanation_signed_shifts[label][oid].append(signed_shift / 3600.0)
+                explanation_sources[label][oid].append((trace_idx, nt, idx))
 
             for f, shift, _, signed_shift in seed_feats:
-                feat_names_vp = names.get(self.kpi_viewpoint, [])
+                feat_names_vp = names.get(vp, [])
                 feat_label = feat_names_vp[f] if f < len(feat_names_vp) else f"feat_{f}"
-                label = f"{self.kpi_viewpoint}.{feat_label}"
-                feature_signed_shifts[label].append(signed_shift / 3600.0)
-                feature_sources[label].append((trace_idx, self.kpi_viewpoint, 0, f))
+                label = f"{vp}.{feat_label}"
+                feature_signed_shifts[label][oid].append(signed_shift / 3600.0)
+                feature_sources[label][oid].append((trace_idx, vp, 0, f))
 
             if node_imp and top_node_feats:
                 top_nt, top_ni = node_imp[0][0], node_imp[0][1]
@@ -1499,17 +1538,40 @@ class Explainer(Modelling):
                 for f, shift, _, signed_shift in top_node_feats:
                     feat_label = feat_names_top[f] if f < len(feat_names_top) else f"feat_{f}"
                     label = f"{top_nt}.{feat_label}"
-                    feature_signed_shifts[label].append(signed_shift / 3600.0)
-                    feature_sources[label].append((trace_idx, top_nt, top_ni, f))
+                    feature_signed_shifts[label][oid].append(signed_shift / 3600.0)
+                    feature_sources[label][oid].append((trace_idx, top_nt, top_ni, f))
 
             m = self.evaluate_explanation_quality(g, 0, node_imp, edge_imp,
                                                    node_top_k=10, edge_top_k=15, verbose=False)
             all_metrics.append(m)
+            metric_meta.append((oid, n_events))
+        if all_prefixes:
+            print(f"  LOO over prefixes: 100%")
+
+        def _label_values(by_exec):
+            # all_prefixes: one value per execution (mean over its prefixes).
+            # last_event: every occurrence counts, as before (a label can occur
+            # twice in one trace, e.g. two ReorderItem events).
+            if all_prefixes:
+                return [sum(vals) / len(vals) for vals in by_exec.values()]
+            return [v for vals in by_exec.values() for v in vals]
 
         def _top_labels(pooled, top_n=20):
-            scored = [(label, abs(sum(vals) / len(vals))) for label, vals in pooled.items() if vals]
+            scored = []
+            for label, by_exec in pooled.items():
+                vals = _label_values(by_exec)
+                if vals:
+                    scored.append((label, abs(sum(vals) / len(vals))))
             scored.sort(key=lambda t: t[1], reverse=True)
             return [label for label, _ in scored[:top_n]]
+
+        def _revisit_sources(by_exec):
+            # last_event: the first revisit_n occurrences, as before. all_prefixes:
+            # revisit_n distinct executions, one seeded-random prefix each --
+            # otherwise all revisits would be consecutive prefixes of one execution.
+            if all_prefixes:
+                return [rng.choice(srcs) for srcs in list(by_exec.values())[:revisit_n]]
+            return [s for srcs in by_exec.values() for s in srcs][:revisit_n]
 
         def _revisit_node_label(nt, idx, trace_idx):
             g = sample[trace_idx]
@@ -1542,13 +1604,18 @@ class Explainer(Modelling):
 
         # Each bar is the mean of at most revisit_n Shapley values, not of all
         # len(sample) traces -- the title says so instead of a bare "n=50 traces".
-        n_label = (f"top-20 picked by LOO over n={len(sample)} traces; "
-                   f"Shapley on ≤{revisit_n} traces per label")
+        if all_prefixes:
+            n_label = (f"top-20 picked by LOO over {len(executions)} executions "
+                       f"({len(sample)} prefixes, per-execution mean); "
+                       f"Shapley on ≤{revisit_n} executions per label")
+        else:
+            n_label = (f"top-20 picked by LOO over n={len(sample)} traces; "
+                       f"Shapley on ≤{revisit_n} traces per label")
         print(f"  Shapley-requantifying top nodes…")
         winners = _top_labels(explanation_signed_shifts, top_n=20)
         shapley_node_shifts = defaultdict(list)
         for label in winners:
-            for trace_idx, nt, idx in explanation_sources[label][:revisit_n]:
+            for trace_idx, nt, idx in _revisit_sources(explanation_sources[label]):
                 shapley_node_shifts[label].append(_revisit_node_label(nt, idx, trace_idx))
 
         explanation_summary = self.plot_aggregate_explanation_bars(
@@ -1564,7 +1631,7 @@ class Explainer(Modelling):
         feat_winners = _top_labels(feature_signed_shifts, top_n=20)
         shapley_feature_shifts = defaultdict(list)
         for label in feat_winners:
-            for trace_idx, nt, node_idx, feat_idx in feature_sources[label][:revisit_n]:
+            for trace_idx, nt, node_idx, feat_idx in _revisit_sources(feature_sources[label]):
                 shapley_feature_shifts[label].append(_revisit_feature_label(nt, node_idx, feat_idx, trace_idx))
 
         feature_summary = self.plot_aggregate_explanation_bars(
@@ -1580,11 +1647,15 @@ class Explainer(Modelling):
         metric_keys = ["fidelity_plus", "fidelity_minus", "characterization_score",
                        "node_sparsity", "edge_sparsity"]
         csv_path = os.path.join(save_dir, "aggregate_metrics.csv")
+        # order_id/n_events columns only in the all_prefixes scope: the last-event
+        # file's format is read by thesis_scripts/fidelity_comparison_summary.py.
+        meta_keys = ["order_id", "n_events"] if all_prefixes else []
         with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["trace"] + metric_keys)
+            writer = csv.DictWriter(f, fieldnames=["trace"] + meta_keys + metric_keys)
             writer.writeheader()
-            for i, m in enumerate(all_metrics):
-                writer.writerow({"trace": i, **{k: round(m[k], 6) for k in metric_keys}})
+            for i, (m, (oid, n_ev)) in enumerate(zip(all_metrics, metric_meta)):
+                meta = {"order_id": oid, "n_events": n_ev} if all_prefixes else {}
+                writer.writerow({"trace": i, **meta, **{k: round(m[k], 6) for k in metric_keys}})
             summary = {"trace": "mean"}
             for k in metric_keys:
                 vals = [m[k] for m in all_metrics]
