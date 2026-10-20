@@ -373,20 +373,26 @@ class Explainer(Modelling):
     # v(FullSet) is then exactly the real baseline_value, keeping the two methods
     # directly comparable on the same elements. See compare_loo_vs_shapley().
 
-    def _permutation_shapley(self, elements, value_fn, n_samples=100):
+    def _permutation_shapley(self, elements, value_fn, n_samples=100, rng=None):
         """General permutation-sampling Shapley estimator: average, over n_samples
         random orderings of `elements`, each element's marginal contribution
         value_fn(prefix + [e]) - value_fn(prefix) at its position in that ordering.
         v(empty set) is cached once (same regardless of ordering). Cost is exactly
         n_samples * len(elements) calls to value_fn -- one incremental evaluation
-        per permutation step, not a re-evaluation from scratch per coalition."""
+        per permutation step, not a re-evaluation from scratch per coalition.
+
+        rng: optional random.Random to draw orderings from. None keeps the old
+        behaviour (the global `random` module), which callers such as
+        explanation_quality_showcase.py seed themselves via random.seed()."""
         import random
 
+        if rng is None:
+            rng = random
         v_empty = value_fn(frozenset())
         totals = {e: 0.0 for e in elements}
         for _ in range(n_samples):
             perm = list(elements)
-            random.shuffle(perm)
+            rng.shuffle(perm)
             prefix, prev_value = [], v_empty
             for e in perm:
                 prefix.append(e)
@@ -395,7 +401,8 @@ class Explainer(Modelling):
                 prev_value = new_value
         return {e: totals[e] / n_samples for e in elements}
 
-    def shapley_node_importance(self, graph, object_idx, baseline_value, node_keys, n_samples=100):
+    def shapley_node_importance(self, graph, object_idx, baseline_value, node_keys, n_samples=100,
+                                rng=None):
         """Node-level Shapley values for a caller-supplied list of (node_type, idx)
         keys -- same signature shape as _loo_shift_for_nodes() for direct
         comparability. Coalitions vary only over node_keys: nodes in node_keys but
@@ -414,10 +421,11 @@ class Explainer(Modelling):
                     perturbed[node_type].x[idx] = 0.0
             return self._predict_value_for_graph(graph, object_idx, perturbed_graph=perturbed)
 
-        return self._permutation_shapley(list(node_keys), value_fn, n_samples=n_samples)
+        return self._permutation_shapley(list(node_keys), value_fn, n_samples=n_samples, rng=rng)
 
     def shapley_feature_importance_for_node(self, graph, node_type, node_idx, baseline_value,
-                                            target_object_idx, feature_indices=None, n_samples=100):
+                                            target_object_idx, feature_indices=None, n_samples=100,
+                                            rng=None):
         """Feature-level Shapley values for one node's features -- the analogue of
         reg_feature_importance_for_node_in_graph(). Coalitions vary over that node's
         feature dimensions (feature_indices defaults to every nonzero feature,
@@ -437,7 +445,7 @@ class Explainer(Modelling):
                     perturbed[node_type].x[node_idx, f] = 0.0
             return self._predict_value_for_graph(graph, target_object_idx, perturbed_graph=perturbed)
 
-        return self._permutation_shapley(feature_indices, value_fn, n_samples=n_samples)
+        return self._permutation_shapley(feature_indices, value_fn, n_samples=n_samples, rng=rng)
 
     def shapley_edge_importance(self, graph, object_idx, baseline_value, edge_keys, n_samples=100):
         """Edge-level Shapley values for a caller-supplied list of (edge_type, edge_idx)
@@ -632,7 +640,8 @@ class Explainer(Modelling):
         plt.close()
 
     def plot_aggregate_explanation_bars(self, explanation_signed_shifts, save_path, title,
-                                        dataset_label=None, n_traces=None, top_n=15):
+                                        dataset_label=None, n_traces=None, top_n=15,
+                                        n_label=None):
         """Single, global, ranked horizontal bar chart of the most influential
         'attr=value' explanations across many traces -- cf. Galanti et al. 2023b's
         Fig. 1 (a global explanation bar chart for remaining-time prediction).
@@ -644,7 +653,10 @@ class Explainer(Modelling):
         every other importance chart in this project.
 
         explanation_signed_shifts: {label: [signed_shift_hours, ...]} -- one entry
-        per (decoded identity or bare node type) label, values already in hours."""
+        per (decoded identity or bare node type) label, values already in hours.
+        n_label: optional text for the title's parenthetical, replacing the default
+        "n=<n_traces> traces" -- used when the bars are NOT a mean over all
+        n_traces (see explain_aggregate_shapley())."""
         import numpy as np
         summary = []
         for label, vals in explanation_signed_shifts.items():
@@ -677,7 +689,10 @@ class Explainer(Modelling):
         full_title = title
         if dataset_label is not None:
             full_title += f" — {dataset_label}"
-        if n_traces is not None:
+        if n_label is not None:
+            # Own line: n_label is long enough to stretch the figure if inlined.
+            full_title += f"\n({n_label})"
+        elif n_traces is not None:
             full_title += f" (n={n_traces} traces)"
         ax.set_title(full_title)
         # Offset scaled to the axis range (not a fixed constant) -- a fixed offset is
@@ -1394,7 +1409,7 @@ class Explainer(Modelling):
         return all_metrics
 
     def explain_aggregate_shapley(self, n_traces=50, top_k=5, n_samples=30, revisit_n=3,
-                                  max_revisit_candidates=6, save_dir=None):
+                                  max_revisit_candidates=6, save_dir=None, seed=0):
         """Aggregate Shapley replacement for the dashboard's two flat "top K" bar
         charts (nodes, features) only -- NOT the per-node-type chart or the depth
         heatmap, which stay LOO-based (both are exhaustive-by-design; Shapley-izing
@@ -1420,13 +1435,20 @@ class Explainer(Modelling):
         cost ~81s instead, confirmed to still surface the same redundancy-driven
         corrections (see logistics' BringToLoadingBay case, corrected this
         session's earlier compare_loo_vs_shapley() runs) while staying close to
-        the originally planned budget."""
+        the originally planned budget.
+
+        seed: seeds a private random.Random for the permutation orderings, so the
+        bar values are reproducible across reruns (the global `random` state is
+        left untouched)."""
+        import random
+
         if save_dir is None:
             save_dir = os.path.join(self.path_dict['explainer_path'], "aggregate")
         os.makedirs(save_dir, exist_ok=True)
 
         self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
         self.model.eval()
+        rng = random.Random(seed)
 
         last_event_graphs = [g for g in self.test_data
                              if g[self.kpi_viewpoint]['last_event'][0].item()]
@@ -1498,7 +1520,8 @@ class Explainer(Modelling):
                 candidates = others + [(nt, idx)]
             else:
                 candidates = all_same_type
-            sv = self.shapley_node_importance(g, 0, baseline_value, candidates, n_samples=n_samples)
+            sv = self.shapley_node_importance(g, 0, baseline_value, candidates, n_samples=n_samples,
+                                              rng=rng)
             return sv[(nt, idx)] / 3600.0
 
         def _revisit_feature_label(nt, node_idx, feat_idx, trace_idx):
@@ -1513,9 +1536,14 @@ class Explainer(Modelling):
             else:
                 candidates = all_feats
             sv = self.shapley_feature_importance_for_node(g, nt, node_idx, baseline_value, 0,
-                                                           feature_indices=candidates, n_samples=n_samples)
+                                                           feature_indices=candidates, n_samples=n_samples,
+                                                           rng=rng)
             return sv[feat_idx] / 3600.0
 
+        # Each bar is the mean of at most revisit_n Shapley values, not of all
+        # len(sample) traces -- the title says so instead of a bare "n=50 traces".
+        n_label = (f"top-20 picked by LOO over n={len(sample)} traces; "
+                   f"Shapley on ≤{revisit_n} traces per label")
         print(f"  Shapley-requantifying top nodes…")
         winners = _top_labels(explanation_signed_shifts, top_n=20)
         shapley_node_shifts = defaultdict(list)
@@ -1526,7 +1554,7 @@ class Explainer(Modelling):
         explanation_summary = self.plot_aggregate_explanation_bars(
             shapley_node_shifts, os.path.join(save_dir, "aggregate_explanation_bars.png"),
             "Global Shapley explanations for remaining time prediction",
-            dataset_label=self.database, n_traces=len(sample), top_n=20,
+            dataset_label=self.database, top_n=20, n_label=n_label,
         )
         pd.DataFrame(explanation_summary).to_csv(
             os.path.join(save_dir, "aggregate_explanation_bars.csv"), index=False
@@ -1542,7 +1570,7 @@ class Explainer(Modelling):
         feature_summary = self.plot_aggregate_explanation_bars(
             shapley_feature_shifts, os.path.join(save_dir, "aggregate_feature_bars.png"),
             "Global Shapley feature attribution for remaining time prediction",
-            dataset_label=self.database, n_traces=len(sample), top_n=20,
+            dataset_label=self.database, top_n=20, n_label=n_label,
         )
         pd.DataFrame(feature_summary).to_csv(
             os.path.join(save_dir, "aggregate_feature_bars.csv"), index=False
