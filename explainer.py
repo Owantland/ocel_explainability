@@ -1410,7 +1410,7 @@ class Explainer(Modelling):
 
     def explain_aggregate_shapley(self, n_traces=50, top_k=5, n_samples=30, revisit_n=3,
                                   max_revisit_candidates=6, save_dir=None, seed=0,
-                                  scope='last_event'):
+                                  scope='last_event', pooling='execution_mean'):
         """Aggregate Shapley replacement for the dashboard's two flat "top K" bar
         charts (nodes, features) only -- NOT the per-node-type chart or the depth
         heatmap, which stay LOO-based (both are exhaustive-by-design; Shapley-izing
@@ -1452,15 +1452,35 @@ class Explainer(Modelling):
               label is Shapley-revisited in up to revisit_n DISTINCT executions,
               one seeded-random prefix each. ~11x more LOO passes than
               'last_event'; writes to aggregate_all_prefixes/ by default so the
-              dashboard's aggregate/ outputs are never overwritten."""
+              dashboard's aggregate/ outputs are never overwritten.
+
+        pooling: how 'all_prefixes' weights executions of different lengths.
+          'execution_mean' (default) -- as described above.
+          'flat' -- every prefix occurrence counts equally (long executions weigh
+              more), and revisits are revisit_n occurrences drawn uniformly
+              without replacement from all of a label's occurrences. Writes to
+              aggregate_all_prefixes_flat/ by default. Ignored for 'last_event'.
+
+        The per-graph LOO results are cached on the instance (keyed by scope,
+        n_traces, top_k), so calling this again with the other pooling skips the
+        LOO pass. Both poolings then start from identical LOO numbers. Each run
+        also writes loo_pooled_nodes.csv / loo_pooled_features.csv: every label's
+        pre-Shapley LOO mean under that pooling, with occurrence/execution counts
+        and the share of occurrences from its busiest execution."""
         import random
 
         if scope not in ('last_event', 'all_prefixes'):
             raise ValueError(f"scope must be 'last_event' or 'all_prefixes', got {scope!r}")
+        if pooling not in ('execution_mean', 'flat'):
+            raise ValueError(f"pooling must be 'execution_mean' or 'flat', got {pooling!r}")
         all_prefixes = scope == 'all_prefixes'
+        per_execution = all_prefixes and pooling == 'execution_mean'
+        flat_prefixes = all_prefixes and pooling == 'flat'
         if save_dir is None:
-            save_dir = os.path.join(self.path_dict['explainer_path'],
-                                    "aggregate_all_prefixes" if all_prefixes else "aggregate")
+            save_dir = os.path.join(
+                self.path_dict['explainer_path'],
+                ("aggregate_all_prefixes_flat" if flat_prefixes else "aggregate_all_prefixes")
+                if all_prefixes else "aggregate")
         os.makedirs(save_dir, exist_ok=True)
 
         self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
@@ -1501,24 +1521,43 @@ class Explainer(Modelling):
         names = self.feature_names
         baseline_values = {}
 
-        n_failed = 0
-        for trace_idx, g in enumerate(sample):
-            if all_prefixes and trace_idx % max(1, len(sample) // 10) == 0:
-                print(f"  LOO over prefixes: {100 * trace_idx // len(sample)}%")
-            oid = int(g[vp]['id'][0].item()) if vp in g.node_types else None
-            try:
-                (node_imp, edge_imp, seed_feats, top_node_feats, baseline_value) = self.reg_explanation(g, 0, None, top_k)
-            except Exception as ex:
-                n_failed += 1
-                print(f"  [trace failed] order={oid}: {type(ex).__name__}: {ex}")
-                continue
-            baseline_values[trace_idx] = baseline_value
+        # Per-graph LOO pass, cached so a second call with the other pooling reuses
+        # it: [(trace_idx, oid, n_events, node_imp, seed_feats, top_node_feats,
+        # baseline_value, id_map, metrics), ...] plus the failure count.
+        cache_key = (scope, n_traces, top_k, self.model_path)
+        if not hasattr(self, '_agg_loo_cache'):
+            self._agg_loo_cache = {}
+        if cache_key in self._agg_loo_cache:
+            loo_results, n_failed = self._agg_loo_cache[cache_key]
+            print(f"  Reusing cached LOO results for {len(loo_results)} graphs")
+        else:
+            loo_results, n_failed = [], 0
+            for trace_idx, g in enumerate(sample):
+                if all_prefixes and trace_idx % max(1, len(sample) // 10) == 0:
+                    print(f"  LOO over prefixes: {100 * trace_idx // len(sample)}%")
+                oid = int(g[vp]['id'][0].item()) if vp in g.node_types else None
+                try:
+                    (node_imp, edge_imp, seed_feats, top_node_feats, baseline_value) = self.reg_explanation(g, 0, None, top_k)
+                except Exception as ex:
+                    n_failed += 1
+                    print(f"  [trace failed] order={oid}: {type(ex).__name__}: {ex}")
+                    continue
+                n_events = g['Events'].x.size(0) if 'Events' in g.node_types else 0
+                # A prefix's OCEL ids must be decoded at its own event count, not the
+                # execution's last row (None).
+                id_n_events = None if g[vp]['last_event'][0].item() else n_events
+                id_map = self._decode_all_identifiers(g, oid, id_n_events) if oid is not None else {}
+                m = self.evaluate_explanation_quality(g, 0, node_imp, edge_imp,
+                                                       node_top_k=10, edge_top_k=15, verbose=False)
+                loo_results.append((trace_idx, oid, n_events, node_imp, seed_feats, top_node_feats,
+                                    baseline_value, id_map, m))
+            if all_prefixes:
+                print(f"  LOO over prefixes: 100%")
+            self._agg_loo_cache[cache_key] = (loo_results, n_failed)
 
-            n_events = g['Events'].x.size(0) if 'Events' in g.node_types else 0
-            # A prefix's OCEL ids must be decoded at its own event count, not the
-            # execution's last row (None).
-            id_n_events = None if g[vp]['last_event'][0].item() else n_events
-            id_map = self._decode_all_identifiers(g, oid, id_n_events) if oid is not None else {}
+        for (trace_idx, oid, n_events, node_imp, seed_feats, top_node_feats,
+             baseline_value, id_map, m) in loo_results:
+            baseline_values[trace_idx] = baseline_value
             for nt, idx, shift, _, signed_shift in node_imp:
                 decoded = id_map.get((nt, idx))
                 label = f"{nt}={decoded}" if decoded else nt
@@ -1541,18 +1580,14 @@ class Explainer(Modelling):
                     feature_signed_shifts[label][oid].append(signed_shift / 3600.0)
                     feature_sources[label][oid].append((trace_idx, top_nt, top_ni, f))
 
-            m = self.evaluate_explanation_quality(g, 0, node_imp, edge_imp,
-                                                   node_top_k=10, edge_top_k=15, verbose=False)
             all_metrics.append(m)
             metric_meta.append((oid, n_events))
-        if all_prefixes:
-            print(f"  LOO over prefixes: 100%")
 
         def _label_values(by_exec):
-            # all_prefixes: one value per execution (mean over its prefixes).
-            # last_event: every occurrence counts, as before (a label can occur
-            # twice in one trace, e.g. two ReorderItem events).
-            if all_prefixes:
+            # execution_mean: one value per execution (mean over its prefixes).
+            # flat / last_event: every occurrence counts (a label can occur twice
+            # in one trace, e.g. two ReorderItem events).
+            if per_execution:
                 return [sum(vals) / len(vals) for vals in by_exec.values()]
             return [v for vals in by_exec.values() for v in vals]
 
@@ -1569,9 +1604,32 @@ class Explainer(Modelling):
             # last_event: the first revisit_n occurrences, as before. all_prefixes:
             # revisit_n distinct executions, one seeded-random prefix each --
             # otherwise all revisits would be consecutive prefixes of one execution.
-            if all_prefixes:
+            # flat: revisit_n occurrences drawn uniformly from all of them, so long
+            # executions are proportionally more likely to be revisited.
+            if per_execution:
                 return [rng.choice(srcs) for srcs in list(by_exec.values())[:revisit_n]]
-            return [s for srcs in by_exec.values() for s in srcs][:revisit_n]
+            occurrences = [s for srcs in by_exec.values() for s in srcs]
+            if flat_prefixes:
+                return rng.sample(occurrences, min(revisit_n, len(occurrences)))
+            return occurrences[:revisit_n]
+
+        def _write_loo_pooled(pooled, path):
+            # Every label's pre-Shapley LOO value under this run's pooling -- the
+            # deterministic data the weighted-vs-flat comparison works from.
+            rows = []
+            for label, by_exec in pooled.items():
+                vals = _label_values(by_exec)
+                if not vals:
+                    continue
+                counts = [len(v) for v in by_exec.values()]
+                rows.append({'label': label, 'loo_mean': sum(vals) / len(vals),
+                             'n_occurrences': sum(counts), 'n_executions': len(counts),
+                             'max_exec_share': max(counts) / sum(counts)})
+            rows.sort(key=lambda r: abs(r['loo_mean']), reverse=True)
+            pd.DataFrame(rows).to_csv(path, index=False)
+
+        _write_loo_pooled(explanation_signed_shifts, os.path.join(save_dir, "loo_pooled_nodes.csv"))
+        _write_loo_pooled(feature_signed_shifts, os.path.join(save_dir, "loo_pooled_features.csv"))
 
         def _revisit_node_label(nt, idx, trace_idx):
             g = sample[trace_idx]
@@ -1604,10 +1662,14 @@ class Explainer(Modelling):
 
         # Each bar is the mean of at most revisit_n Shapley values, not of all
         # len(sample) traces -- the title says so instead of a bare "n=50 traces".
-        if all_prefixes:
+        if per_execution:
             n_label = (f"top-20 picked by LOO over {len(executions)} executions "
                        f"({len(sample)} prefixes, per-execution mean); "
                        f"Shapley on ≤{revisit_n} executions per label")
+        elif flat_prefixes:
+            n_label = (f"top-20 picked by LOO over {len(executions)} executions "
+                       f"(flat over {len(sample)} prefixes); "
+                       f"Shapley on ≤{revisit_n} prefixes per label")
         else:
             n_label = (f"top-20 picked by LOO over n={len(sample)} traces; "
                        f"Shapley on ≤{revisit_n} traces per label")
