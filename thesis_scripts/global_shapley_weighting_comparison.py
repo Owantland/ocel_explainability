@@ -10,23 +10,31 @@ Explainer, so it is paid once per dataset) and draws a series of comparison grap
 Weighting acts in two places, and the graphs cover both:
   - LOO pooling/ranking (loo_pooled_*.csv) -- decides which labels make the top 20.
   - Shapley revisits (aggregate_*_bars.csv) -- the displayed bar values.
+A third run, pooling='flat_distinct', separates the two: it selects like 'flat'
+but revisits like 'execution_mean'. So weighted vs. flat_distinct differs only in
+selection, and flat_distinct vs. flat only in how revisit prefixes are sampled.
 
 Graphs, per dataset and per chart kind (nodes / features), in
 files/explainer_outputs/<db>/aggregate_weighting_comparison_<task_id>/:
-  1. side_by_side_<kind>.png   weighted | flat Shapley bar charts, shared x-axis
+  1. side_by_side_<kind>.png   weighted | flat_distinct | flat Shapley bar charts
   2. rank_shift_<kind>.png     LOO rank under each pooling (slope chart)
   3. loo_scatter_<kind>.png    weighted vs. flat LOO mean per label, y=x diagonal,
                                size = occurrences, colour = busiest-execution share
-  4. dumbbell_<kind>.png       weighted vs. flat Shapley value per label
+  4. dumbbell_<kind>.png       Shapley value per label under each pooling
   5. prefixes_per_execution.png  how unequal the execution lengths are
-plus a CSV per graph and summary.csv (top-20 Jaccard overlap, Spearman rank
-correlation of LOO means, largest movers).
+plus a CSV per graph and summary.csv (top-20 Jaccard overlaps, Spearman rank
+correlation of LOO means, mean |Shapley difference| on shared labels per pair,
+largest movers). Graphs 2-3 need only the weighted and flat runs (flat_distinct's
+LOO ranking is flat's); the flat_distinct run is left out if it has not been
+collected.
 
-save_dirs are KPI-suffixed (aggregate_all_prefixes[_flat]_<task_id>) rather than
-the function's default, same reasoning as loo_shapley_aggregate_showcase.py.
+save_dirs are KPI-suffixed (aggregate_all_prefixes[_flat|_flat_distinct]_<task_id>)
+rather than the function's default, same reasoning as
+loo_shapley_aggregate_showcase.py.
 
 Usage:
     python3 thesis_scripts/global_shapley_weighting_comparison.py --collect   # ~1 h
+    python3 thesis_scripts/global_shapley_weighting_comparison.py --collect --poolings flat_distinct
     python3 thesis_scripts/global_shapley_weighting_comparison.py             # plots only
 """
 import argparse
@@ -44,20 +52,24 @@ DATASETS = [
 ]
 N_TRACES = 50
 TOP_N = 20
-POOLINGS = [("execution_mean", "weighted (per-execution mean)"), ("flat", "flat (every prefix)")]
+POOLINGS = [("execution_mean", "weighted (per-execution mean)"),
+            ("flat_distinct", "flat selection, distinct-execution revisits"),
+            ("flat", "flat (every prefix)")]
+LOO_POOLINGS = [POOLINGS[0], POOLINGS[2]]  # flat_distinct's LOO ranking is flat's
+POOLING_NAMES = dict(POOLINGS)
 KINDS = [("nodes", "aggregate_explanation_bars.csv", "loo_pooled_nodes.csv"),
          ("features", "aggregate_feature_bars.csv", "loo_pooled_features.csv")]
 
 INCREASE, DECREASE = "#2ca02c", "#d62728"  # plot_aggregate_explanation_bars() convention
-WEIGHTED_C, FLAT_C = "#4C72B0", "#DD8452"
+POOLING_COLORS = {"execution_mean": "#4C72B0", "flat_distinct": "#55A868", "flat": "#DD8452"}
 
 
 def run_dir(database, task_id, pooling):
-    suffix = "_flat" if pooling == "flat" else ""
+    suffix = {"execution_mean": "", "flat": "_flat", "flat_distinct": "_flat_distinct"}[pooling]
     return f"files/explainer_outputs/{database}/aggregate_all_prefixes{suffix}_{task_id}"
 
 
-def collect():
+def collect(poolings):
     import torch
     import explainer as exp
 
@@ -67,7 +79,7 @@ def collect():
         e.model.eval()
         if e.task_id != expected_task:
             raise SystemExit(f"{database}: config.yml points at {e.task_id}, expected {expected_task}")
-        for pooling, _ in POOLINGS:
+        for pooling in poolings:
             print(f"\n=== {database} / {e.task_id} / pooling={pooling}")
             e.explain_aggregate_shapley(n_traces=N_TRACES, scope='all_prefixes', pooling=pooling,
                                         save_dir=run_dir(database, e.task_id, pooling))
@@ -78,9 +90,11 @@ def _short(label, n=38):
 
 
 def _plot_side_by_side(bars, kind, title, path):
-    fig, axes = plt.subplots(1, 2, figsize=(15, max(4, 0.38 * TOP_N + 1.5)), sharex=True)
+    panels = [(p, n) for p, n in POOLINGS if p in bars]
+    fig, axes = plt.subplots(1, len(panels), figsize=(7.5 * len(panels), max(4, 0.38 * TOP_N + 1.5)),
+                             sharex=True)
     lim = max(float(df.mean_signed_shift.abs().max()) for df in bars.values()) * 1.15
-    for ax, (pooling, name) in zip(axes, POOLINGS):
+    for ax, (pooling, name) in zip(axes, panels):
         df = bars[pooling].head(TOP_N)
         vals = df.mean_signed_shift.values
         ax.barh(range(len(df)), vals, color=[INCREASE if v > 0 else DECREASE for v in vals])
@@ -95,7 +109,7 @@ def _plot_side_by_side(bars, kind, title, path):
         ax.set_title(name, fontsize=11)
         ax.set_xlabel("Shapley influence on predicted remaining time (hours)")
         ax.grid(True, axis="x", alpha=0.3)
-    fig.suptitle(f"{title} — global Shapley {kind}: weighted vs. flat pooling")
+    fig.suptitle(f"{title} — global Shapley {kind} under each pooling")
     plt.tight_layout()
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
@@ -139,7 +153,7 @@ def _plot_rank_shift(loo_w, loo_f, kind, title, path):
     ax.set_ylim(min(lowest, cap) + max(n_capped.values()) + 1, 0)
     ax.set_xlim(-0.9, 1.9)
     ax.set_xticks([0, 1])
-    ax.set_xticklabels([n for _, n in POOLINGS])
+    ax.set_xticklabels([n for _, n in LOO_POOLINGS])
     ax.set_yticks([])
     for s in ("left", "right", "top"):
         ax.spines[s].set_visible(False)
@@ -182,34 +196,33 @@ def _plot_loo_scatter(loo_w, loo_f, kind, title, path):
 
 
 def _plot_dumbbell(bars, kind, title, path):
-    w = bars["execution_mean"].head(TOP_N).set_index("label").mean_signed_shift
-    f = bars["flat"].head(TOP_N).set_index("label").mean_signed_shift
-    labels = sorted(set(w.index) | set(f.index),
-                    key=lambda l: -max(abs(w.get(l, 0.0)), abs(f.get(l, 0.0))))
+    panels = [(p, n) for p, n in POOLINGS if p in bars]
+    vals = {p: bars[p].head(TOP_N).set_index("label").mean_signed_shift for p, _ in panels}
+    labels = sorted(set().union(*(v.index for v in vals.values())),
+                    key=lambda l: -max(abs(v.get(l, 0.0)) for v in vals.values()))
     fig, ax = plt.subplots(figsize=(9, max(5, 0.3 * len(labels) + 1.5)))
     rows = []
     for i, l in enumerate(labels):
-        a, b = w.get(l), f.get(l)
-        if a is not None and b is not None:
-            ax.plot([a, b], [i, i], color="#999999", linewidth=1.2, zorder=1)
-        if a is not None:
-            ax.scatter(a, i, color=WEIGHTED_C, s=36, zorder=2)
-        if b is not None:
-            ax.scatter(b, i, color=FLAT_C, s=36, zorder=2)
-        if a is None or b is None:
-            x = b if a is None else a
-            ax.text(x, i, f"  only in {'flat' if a is None else 'weighted'} top {TOP_N}",
+        present = {p: v[l] for p, v in vals.items() if l in v.index}
+        if len(present) > 1:
+            ax.plot([min(present.values()), max(present.values())], [i, i], color="#999999",
+                    linewidth=1.2, zorder=1)
+        for p, x in present.items():
+            ax.scatter(x, i, color=POOLING_COLORS[p], s=36, zorder=2)
+        if len(present) < len(vals):
+            missing = ", ".join(POOLING_NAMES[p].split(" (")[0] for p in vals if p not in present)
+            ax.text(max(present.values()), i, f"  not in top {TOP_N}: {missing}",
                     va="center", ha="left", fontsize=7, color="#555555")
-        rows.append({"label": l, "shapley_weighted": a, "shapley_flat": b})
+        rows.append({"label": l, **{f"shapley_{p}": present.get(p) for p in vals}})
     ax.set_yticks(range(len(labels)))
     ax.set_yticklabels([_short(l) for l in labels], fontsize=8)
     ax.invert_yaxis()
     ax.axvline(0, color="black", linewidth=0.8)
-    ax.scatter([], [], color=WEIGHTED_C, label=POOLINGS[0][1])
-    ax.scatter([], [], color=FLAT_C, label=POOLINGS[1][1])
-    ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=2)
+    for p, name in panels:
+        ax.scatter([], [], color=POOLING_COLORS[p], label=name)
+    ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=len(panels))
     ax.set_xlabel("Shapley influence on predicted remaining time (hours)")
-    ax.set_title(f"{title}\nShapley value per {kind[:-1]} label, weighted vs. flat", fontsize=10)
+    ax.set_title(f"{title}\nShapley value per {kind[:-1]} label under each pooling", fontsize=10)
     ax.grid(True, axis="x", alpha=0.3)
     plt.tight_layout()
     plt.savefig(path, dpi=150, bbox_inches="tight")
@@ -241,6 +254,9 @@ def plot():
         out = f"files/explainer_outputs/{database}/aggregate_weighting_comparison_{task_id}"
         os.makedirs(out, exist_ok=True)
         dirs = {p: run_dir(database, task_id, p) for p, _ in POOLINGS}
+        if not os.path.isdir(dirs["flat_distinct"]):
+            print(f"{database}: no flat_distinct run collected, comparing weighted vs. flat only")
+            del dirs["flat_distinct"]
         summary = []
         for kind, bars_csv, loo_csv in KINDS:
             bars = {p: pd.read_csv(os.path.join(d, bars_csv)) for p, d in dirs.items()}
@@ -258,15 +274,31 @@ def plot():
             dumb.to_csv(os.path.join(out, f"dumbbell_{kind}.csv"), index=False)
 
             top_w, top_f = set(_ranked(loo_w).query("rank <= @TOP_N").index), set(_ranked(loo_f).query("rank <= @TOP_N").index)
-            shap_w, shap_f = set(bars["execution_mean"].head(TOP_N).label), set(bars["flat"].head(TOP_N).label)
             movers = scatter.reindex(scatter["diff"].abs().sort_values(ascending=False).index).head(5)
-            summary.append({
+            row = {
                 "kind": kind,
                 "labels": len(scatter),
                 "loo_top20_jaccard": round(len(top_w & top_f) / len(top_w | top_f), 3),
-                "shapley_top20_jaccard": round(len(shap_w & shap_f) / len(shap_w | shap_f), 3),
                 "loo_mean_spearman": round(scatter[["loo_mean_weighted", "loo_mean_flat"]]
                                            .corr(method="spearman").iloc[0, 1], 3),
+            }
+            # Per pair of runs: overlap of the displayed top 20, and the mean absolute
+            # Shapley difference on the labels both display. With flat_distinct present,
+            # weighted vs. flat_distinct is the selection effect alone and
+            # flat_distinct vs. flat the revisit-sampling effect alone.
+            shap = {p: b.head(TOP_N).set_index("label").mean_signed_shift for p, b in bars.items()}
+            pairs = [("execution_mean", "flat"), ("execution_mean", "flat_distinct"),
+                     ("flat_distinct", "flat")]
+            for a, b in pairs:
+                if a not in shap or b not in shap:
+                    continue
+                shared = shap[a].index.intersection(shap[b].index)
+                union = shap[a].index.union(shap[b].index)
+                row[f"shapley_top20_jaccard_{a}_vs_{b}"] = round(len(shared) / len(union), 3)
+                row[f"shapley_mean_abs_diff_h_{a}_vs_{b}"] = round(
+                    float((shap[a][shared] - shap[b][shared]).abs().mean()), 3)
+            summary.append({
+                **row,
                 "largest_movers": "; ".join(
                     f"{r.label}: {r.loo_mean_weighted:+.2f}h -> {r.loo_mean_flat:+.2f}h "
                     f"(busiest exec {r.max_exec_share:.0%} of {r.n_occurrences})"
@@ -278,14 +310,17 @@ def plot():
             os.path.join(out, "prefixes_per_execution.csv"), header=["n_prefixes"])
         pd.DataFrame(summary).to_csv(os.path.join(out, "summary.csv"), index=False)
         print(f"\n{title}  ->  {out}")
-        print(pd.DataFrame(summary).drop(columns="largest_movers").to_string(index=False))
+        print(pd.DataFrame(summary).drop(columns="largest_movers").T.to_string(header=False))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--collect", action="store_true",
-                        help="run both poolings per dataset first (~1 h), then plot")
+                        help="run the poolings per dataset first (~1 h), then plot")
+    parser.add_argument("--poolings", nargs="+", choices=[p for p, _ in POOLINGS],
+                        default=[p for p, _ in POOLINGS],
+                        help="poolings to collect (default: all three)")
     args = parser.parse_args()
     if args.collect:
-        collect()
+        collect(args.poolings)
     plot()
