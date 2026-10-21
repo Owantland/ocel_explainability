@@ -1460,6 +1460,11 @@ class Explainer(Modelling):
               more), and revisits are revisit_n occurrences drawn uniformly
               without replacement from all of a label's occurrences. Writes to
               aggregate_all_prefixes_flat/ by default. Ignored for 'last_event'.
+          'flat_distinct' -- flat selection as in 'flat', but revisits as in
+              'execution_mean' (revisit_n distinct executions, one seeded-random
+              prefix each). Isolates the effect of weighting on selection from its
+              effect on revisit sampling. Writes to
+              aggregate_all_prefixes_flat_distinct/ by default.
 
         The per-graph LOO results are cached on the instance (keyed by scope,
         n_traces, top_k), so calling this again with the other pooling skips the
@@ -1471,16 +1476,21 @@ class Explainer(Modelling):
 
         if scope not in ('last_event', 'all_prefixes'):
             raise ValueError(f"scope must be 'last_event' or 'all_prefixes', got {scope!r}")
-        if pooling not in ('execution_mean', 'flat'):
-            raise ValueError(f"pooling must be 'execution_mean' or 'flat', got {pooling!r}")
+        if pooling not in ('execution_mean', 'flat', 'flat_distinct'):
+            raise ValueError(f"pooling must be 'execution_mean', 'flat' or 'flat_distinct', "
+                             f"got {pooling!r}")
         all_prefixes = scope == 'all_prefixes'
+        # per_execution: LOO values averaged within each execution before pooling.
+        # distinct_revisits: Shapley revisits spread over distinct executions.
         per_execution = all_prefixes and pooling == 'execution_mean'
+        distinct_revisits = all_prefixes and pooling in ('execution_mean', 'flat_distinct')
         flat_prefixes = all_prefixes and pooling == 'flat'
         if save_dir is None:
-            save_dir = os.path.join(
-                self.path_dict['explainer_path'],
-                ("aggregate_all_prefixes_flat" if flat_prefixes else "aggregate_all_prefixes")
-                if all_prefixes else "aggregate")
+            dir_names = {'execution_mean': "aggregate_all_prefixes",
+                         'flat': "aggregate_all_prefixes_flat",
+                         'flat_distinct': "aggregate_all_prefixes_flat_distinct"}
+            save_dir = os.path.join(self.path_dict['explainer_path'],
+                                    dir_names[pooling] if all_prefixes else "aggregate")
         os.makedirs(save_dir, exist_ok=True)
 
         self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
@@ -1606,7 +1616,8 @@ class Explainer(Modelling):
             # otherwise all revisits would be consecutive prefixes of one execution.
             # flat: revisit_n occurrences drawn uniformly from all of them, so long
             # executions are proportionally more likely to be revisited.
-            if per_execution:
+            # flat_distinct revisits like execution_mean.
+            if distinct_revisits:
                 return [rng.choice(srcs) for srcs in list(by_exec.values())[:revisit_n]]
             occurrences = [s for srcs in by_exec.values() for s in srcs]
             if flat_prefixes:
@@ -1662,14 +1673,13 @@ class Explainer(Modelling):
 
         # Each bar is the mean of at most revisit_n Shapley values, not of all
         # len(sample) traces -- the title says so instead of a bare "n=50 traces".
-        if per_execution:
+        if all_prefixes:
+            pooling_text = (f"{len(sample)} prefixes, per-execution mean" if per_execution
+                            else f"flat over {len(sample)} prefixes")
+            revisit_unit = "executions" if distinct_revisits else "prefixes"
             n_label = (f"top-20 picked by LOO over {len(executions)} executions "
-                       f"({len(sample)} prefixes, per-execution mean); "
-                       f"Shapley on ≤{revisit_n} executions per label")
-        elif flat_prefixes:
-            n_label = (f"top-20 picked by LOO over {len(executions)} executions "
-                       f"(flat over {len(sample)} prefixes); "
-                       f"Shapley on ≤{revisit_n} prefixes per label")
+                       f"({pooling_text}); "
+                       f"Shapley on ≤{revisit_n} {revisit_unit} per label")
         else:
             n_label = (f"top-20 picked by LOO over n={len(sample)} traces; "
                        f"Shapley on ≤{revisit_n} traces per label")
