@@ -35,6 +35,7 @@ loo_shapley_aggregate_showcase.py.
 Usage:
     python3 thesis_scripts/global_shapley_weighting_comparison.py --collect   # ~1 h
     python3 thesis_scripts/global_shapley_weighting_comparison.py --collect --poolings flat_distinct
+    python3 thesis_scripts/global_shapley_weighting_comparison.py --collect --revisit-n 8
     python3 thesis_scripts/global_shapley_weighting_comparison.py             # plots only
 """
 import argparse
@@ -51,6 +52,7 @@ DATASETS = [
     ("cargo_pickup_iot", 2000, "TimeFrom_Pickupplan_to_EvaluateTruckExit"),
 ]
 N_TRACES = 50
+DEFAULT_REVISIT_N = 3  # explain_aggregate_shapley()'s default
 TOP_N = 20
 POOLINGS = [("execution_mean", "weighted (per-execution mean)"),
             ("flat_distinct", "flat selection, distinct-execution revisits"),
@@ -64,12 +66,18 @@ INCREASE, DECREASE = "#2ca02c", "#d62728"  # plot_aggregate_explanation_bars() c
 POOLING_COLORS = {"execution_mean": "#4C72B0", "flat_distinct": "#55A868", "flat": "#DD8452"}
 
 
-def run_dir(database, task_id, pooling):
+def _revisit_suffix(revisit_n):
+    # The default revisit_n keeps the original, unsuffixed paths.
+    return "" if revisit_n == DEFAULT_REVISIT_N else f"_revisit{revisit_n}"
+
+
+def run_dir(database, task_id, pooling, revisit_n=None):
     suffix = {"execution_mean": "", "flat": "_flat", "flat_distinct": "_flat_distinct"}[pooling]
-    return f"files/explainer_outputs/{database}/aggregate_all_prefixes{suffix}_{task_id}"
+    return (f"files/explainer_outputs/{database}/aggregate_all_prefixes{suffix}_{task_id}"
+            f"{_revisit_suffix(revisit_n or DEFAULT_REVISIT_N)}")
 
 
-def collect(poolings):
+def collect(poolings, revisit_n):
     import torch
     import explainer as exp
 
@@ -80,9 +88,10 @@ def collect(poolings):
         if e.task_id != expected_task:
             raise SystemExit(f"{database}: config.yml points at {e.task_id}, expected {expected_task}")
         for pooling in poolings:
-            print(f"\n=== {database} / {e.task_id} / pooling={pooling}")
+            print(f"\n=== {database} / {e.task_id} / pooling={pooling} / revisit_n={revisit_n}")
             e.explain_aggregate_shapley(n_traces=N_TRACES, scope='all_prefixes', pooling=pooling,
-                                        save_dir=run_dir(database, e.task_id, pooling))
+                                        revisit_n=revisit_n,
+                                        save_dir=run_dir(database, e.task_id, pooling, revisit_n))
 
 
 def _short(label, n=38):
@@ -248,12 +257,13 @@ def _plot_prefix_histogram(metrics, title, path):
     return per_exec
 
 
-def plot():
+def plot(revisit_n):
     for database, _, task_id in DATASETS:
         title = f"{database} / {task_id.replace('TimeFrom_', '').replace('_to_', ' → ')}"
-        out = f"files/explainer_outputs/{database}/aggregate_weighting_comparison_{task_id}"
+        out = (f"files/explainer_outputs/{database}/aggregate_weighting_comparison_{task_id}"
+               f"{_revisit_suffix(revisit_n)}")
         os.makedirs(out, exist_ok=True)
-        dirs = {p: run_dir(database, task_id, p) for p, _ in POOLINGS}
+        dirs = {p: run_dir(database, task_id, p, revisit_n) for p, _ in POOLINGS}
         if not os.path.isdir(dirs["flat_distinct"]):
             print(f"{database}: no flat_distinct run collected, comparing weighted vs. flat only")
             del dirs["flat_distinct"]
@@ -320,7 +330,10 @@ if __name__ == "__main__":
     parser.add_argument("--poolings", nargs="+", choices=[p for p, _ in POOLINGS],
                         default=[p for p, _ in POOLINGS],
                         help="poolings to collect (default: all three)")
+    parser.add_argument("--revisit-n", type=int, default=DEFAULT_REVISIT_N,
+                        help="Shapley revisits per label; values other than "
+                             f"{DEFAULT_REVISIT_N} write to _revisit<n>-suffixed dirs")
     args = parser.parse_args()
     if args.collect:
-        collect(args.poolings)
-    plot()
+        collect(args.poolings, args.revisit_n)
+    plot(args.revisit_n)
