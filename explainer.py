@@ -2023,6 +2023,10 @@ class Explainer(Modelling):
                                  results[0]['order_id'], query_pred / 3600.0,
                                  results[0]['predicted_hours'], save_dir,
                                  id_map_q=id_map_q, id_map_cf=id_map_cf)
+        self._plot_cf_union_graph(query_graph, results[0]['graph'], order_id,
+                                  results[0]['order_id'], query_pred / 3600.0,
+                                  results[0]['predicted_hours'], save_dir,
+                                  id_map_q=id_map_q, id_map_cf=id_map_cf)
         self._plot_cf_event_type_diff(query_graph, results[0]['graph'], order_id,
                                       results[0]['order_id'], save_dir)
         self._plot_cf_viewpoint_feature_diff(query_graph, results[0]['graph'], order_id,
@@ -2283,7 +2287,7 @@ class Explainer(Modelling):
         the two graphs independently, with no highlighting). Query is treated as the
         "base": a node/edge unique to it is marked in the query panel (nothing exists
         there to show on the CF side); a node/edge new to the CF is marked in the CF
-        panel; a node present in both (see canon() below) whose own feature values
+        panel; a node present in both (see canon() in _cf_correspondence) whose own feature values
         differ gets a third marker in both panels.
 
         Node identity across the two graphs isn't free -- HeteroData carries no OCEL id,
@@ -2299,7 +2303,7 @@ class Explainer(Modelling):
         different Events nodes in the SAME graph already share it -- matching on it would
         wrongly collapse several real events into one node instead of recognizing genuine
         cross-trace recurrence (which Events, being trace-local, never has anyway). Any
-        type listed in config's role_encoding (e.g. order_management's Employees, decoded
+        type listed in both config's role_encoding and encoding (e.g. order_management's Employees, decoded
         to a ROLE like "Warehousing" rather than a per-employee id -- see training.py's
         Modelling.__init__, ~line 177) is excluded for the identical reason, confirmed
         empirically: order #1801 alone decodes 3 separate Employees nodes to the same
@@ -2311,7 +2315,7 @@ class Explainer(Modelling):
         Reuses the shared-layout + Counter-based edge-diff technique from
         thesis_scripts/archive/example_dissimilarity_showcase.py's draw_with_fixed_layout
         -- that script's node keys only worked because every scenario was a .clone() of
-        the same base graph at identical indices; the canon() mapping below is what makes
+        the same base graph at identical indices; the canon() mapping in _cf_correspondence is what makes
         the same technique valid for two independent real traces instead.
         """
         import networkx as nx
@@ -2319,58 +2323,13 @@ class Explainer(Modelling):
 
         id_map_q = id_map_q or {}
         id_map_cf = id_map_cf or {}
-        role_encoded_types = set(self.path_dict.get('role_encoding') or {})
-        no_identity_match = {'Events'} | role_encoded_types
-
-        def canon(node_type, idx, id_map, role):
-            if node_type not in no_identity_match and (node_type, idx) in id_map:
-                return (node_type, id_map[(node_type, idx)])
-            return (node_type, role, idx)
-
-        G_q = self._hetero_to_nx(query_graph)
-        G_cf = self._hetero_to_nx(cf_graph)
-        map_q = {n: canon(n[0], n[1], id_map_q, 'q') for n in G_q.nodes}
-        map_cf = {n: canon(n[0], n[1], id_map_cf, 'cf') for n in G_cf.nodes}
-        G_q_c = nx.relabel_nodes(G_q, map_q)
-        G_cf_c = nx.relabel_nodes(G_cf, map_cf)
-
-        q_nodes, cf_nodes = set(G_q_c.nodes), set(G_cf_c.nodes)
-        query_only = q_nodes - cf_nodes
-        cf_only = cf_nodes - q_nodes
-        shared = q_nodes & cf_nodes
-
-        # Pull back one original (node_type, idx) per shared canonical key in each
-        # graph, to compare its actual feature vector -- the SAME real-world entity can
-        # still have different attribute values recorded in each order's snapshot.
-        orig_q = {v: k for k, v in map_q.items()}
-        orig_cf = {v: k for k, v in map_cf.items()}
-        feat_changed = set()
-        for key in shared:
-            if key[0] == 'Events':
-                continue
-            nt_q, idx_q = orig_q[key]
-            nt_cf, idx_cf = orig_cf[key]
-            x_q = query_graph[nt_q].x[idx_q]
-            x_cf = cf_graph[nt_cf].x[idx_cf]
-            if x_q.shape == x_cf.shape and not torch.allclose(x_q, x_cf, atol=1e-2):
-                feat_changed.add(key)
-
-        def edge_counts(G):
-            return Counter((u, v, d['edge_type']) for u, v, d in G.edges(data=True))
-
-        q_edges, cf_edges = edge_counts(G_q_c), edge_counts(G_cf_c)
-        added_edges = cf_edges - q_edges      # present in CF, not in query
-        removed_edges = q_edges - cf_edges    # present in query, not in CF
-
-        def label_for(orig_key, id_map, canon_key):
-            if len(canon_key) == 2:  # identity-matched: (node_type, name)
-                return f"{canon_key[0]}: {canon_key[1]}"
-            node_type, idx = orig_key
-            name = id_map.get((node_type, idx))
-            return f"{node_type}: {name}" if name else f"{node_type}[{idx}]"
-
-        labels_q = {ck: label_for(ok, id_map_q, ck) for ok, ck in map_q.items()}
-        labels_cf = {ck: label_for(ok, id_map_cf, ck) for ok, ck in map_cf.items()}
+        corr = self._cf_correspondence(query_graph, cf_graph, id_map_q, id_map_cf)
+        G_q_c, G_cf_c = corr['G_q_c'], corr['G_cf_c']
+        map_q, map_cf = corr['map_q'], corr['map_cf']
+        query_only, cf_only, shared = corr['query_only'], corr['cf_only'], corr['shared']
+        feat_changed = corr['feat_changed']
+        added_edges, removed_edges = corr['added_edges'], corr['removed_edges']
+        labels_q, labels_cf = corr['labels_q'], corr['labels_cf']
 
         palette = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2",
                    "#937860", "#DA8BC3", "#8C8C8C", "#CCB974", "#64B5CD"]
@@ -2476,6 +2435,365 @@ class Explainer(Modelling):
         plt.savefig(os.path.join(save_dir, "cf_diff_graph.png"), dpi=150, bbox_inches='tight')
         plt.close()
         print(f"Saved CF diff graph to {save_dir}")
+
+    def _cf_correspondence(self, query_graph, cf_graph, id_map_q, id_map_cf,
+                           event_pairs=None, merge_seeds=False, match_by_role=False):
+        """Node/edge correspondence between a query graph and a CF graph, shared by
+        _plot_cf_diff_graph (two panels) and _plot_cf_union_graph (one union panel).
+        See _plot_cf_diff_graph's docstring for why canon() identity-matches only real
+        objects and excludes 'Events' plus every role-labelled type.
+
+        event_pairs: optional {query_event_idx: cf_event_idx} (from _align_cf_events) --
+                     each aligned pair is mapped onto one shared ('Events', 'aligned', q_idx)
+                     key instead of staying trace-local.
+        merge_seeds: map both graphs' viewpoint node 0 (the KPI object -- by construction a
+                     different real object in each trace) onto one shared key, so the union
+                     is anchored on a single "this order vs. that order" node.
+        match_by_role: additionally pair objects that are DIFFERENT real objects but play
+                     the same role in both traces (see _role_match_objects) -- without it,
+                     two orders share almost no object instances and a union is mostly
+                     red/green.
+        """
+        import networkx as nx
+        from collections import Counter
+
+        # Only role_encoding types that are ALSO in `encoding` get a role label (e.g.
+        # "Warehousing") from _decode_all_identifiers; the rest (e.g. cargo_pickup_iot's
+        # Truck) keep their real OCEL id, which is a valid identity to match on.
+        role_encoded_types = (set(self.path_dict.get('role_encoding') or {})
+                              & set(self.path_dict.get('encoding') or []))
+        no_identity_match = {'Events'} | role_encoded_types
+        event_pairs = event_pairs or {}
+        cf_event_to_q = {c: q for q, c in event_pairs.items()}
+        seed = (self.kpi_viewpoint, 0)
+        seed_key = (self.kpi_viewpoint, 'seed', 0)
+
+        def canon(node_type, idx, id_map, role):
+            if merge_seeds and (node_type, idx) == seed:
+                return seed_key
+            if node_type == 'Events':
+                if role == 'q' and idx in event_pairs:
+                    return ('Events', 'aligned', idx)
+                if role == 'cf' and idx in cf_event_to_q:
+                    return ('Events', 'aligned', cf_event_to_q[idx])
+            if node_type not in no_identity_match and (node_type, idx) in id_map:
+                return (node_type, id_map[(node_type, idx)])
+            return (node_type, role, idx)
+
+        G_q = self._hetero_to_nx(query_graph)
+        G_cf = self._hetero_to_nx(cf_graph)
+        map_q = {n: canon(n[0], n[1], id_map_q, 'q') for n in G_q.nodes}
+        map_cf = {n: canon(n[0], n[1], id_map_cf, 'cf') for n in G_cf.nodes}
+        role_labels = {}
+        if match_by_role:
+            role_labels = self._role_match_objects(G_q, G_cf, map_q, map_cf,
+                                                   id_map_q, id_map_cf, role_encoded_types)
+        for name, m in (('query', map_q), ('CF', map_cf)):
+            if len(set(m.values())) != len(m):
+                # nx.relabel_nodes would silently merge these -- surface it instead
+                print(f"  [cf-correspondence] WARNING: {len(m) - len(set(m.values()))} "
+                      f"{name} node(s) collapsed onto an already-used identity")
+        G_q_c = nx.relabel_nodes(G_q, map_q)
+        G_cf_c = nx.relabel_nodes(G_cf, map_cf)
+
+        q_nodes, cf_nodes = set(G_q_c.nodes), set(G_cf_c.nodes)
+        shared = q_nodes & cf_nodes
+
+        # Pull back one original (node_type, idx) per shared canonical key in each
+        # graph, to compare its actual feature vector -- the SAME real-world entity can
+        # still have different attribute values recorded in each order's snapshot.
+        # Aligned Events are skipped: same activity, but elapsed/waiting times always differ.
+        # Role-matched objects are skipped too: they are two different real objects, so
+        # their features differing is expected rather than a finding.
+        orig_q = {v: k for k, v in map_q.items()}
+        orig_cf = {v: k for k, v in map_cf.items()}
+        feat_changed = set()
+        for key in shared:
+            if key[0] == 'Events' or key in role_labels:
+                continue
+            nt_q, idx_q = orig_q[key]
+            nt_cf, idx_cf = orig_cf[key]
+            x_q = query_graph[nt_q].x[idx_q]
+            x_cf = cf_graph[nt_cf].x[idx_cf]
+            if x_q.shape == x_cf.shape and not torch.allclose(x_q, x_cf, atol=1e-2):
+                feat_changed.add(key)
+
+        def edge_counts(G):
+            return Counter((u, v, d['edge_type']) for u, v, d in G.edges(data=True))
+
+        q_edges, cf_edges = edge_counts(G_q_c), edge_counts(G_cf_c)
+
+        def label_for(orig_key, id_map, canon_key):
+            if len(canon_key) == 2:  # identity-matched: (node_type, name)
+                return f"{canon_key[0]}: {canon_key[1]}"
+            node_type, idx = orig_key
+            name = id_map.get((node_type, idx))
+            return f"{node_type}: {name}" if name else f"{node_type}[{idx}]"
+
+        return {
+            'G_q_c': G_q_c, 'G_cf_c': G_cf_c, 'map_q': map_q, 'map_cf': map_cf,
+            'query_only': q_nodes - cf_nodes, 'cf_only': cf_nodes - q_nodes,
+            'shared': shared, 'feat_changed': feat_changed,
+            'q_edges': q_edges, 'cf_edges': cf_edges,
+            'added_edges': cf_edges - q_edges,      # present in CF, not in query
+            'removed_edges': q_edges - cf_edges,    # present in query, not in CF
+            'shared_edges': q_edges & cf_edges,
+            'labels_q': {ck: label_for(ok, id_map_q, ck) for ok, ck in map_q.items()},
+            'labels_cf': {ck: label_for(ok, id_map_cf, ck) for ok, ck in map_cf.items()},
+            'seed_key': seed_key if merge_seeds else None,
+            'role_matched': role_labels,   # {shared key: "q name / cf name"}
+        }
+
+    def _role_match_objects(self, G_q, G_cf, map_q, map_cf, id_map_q, id_map_cf,
+                            role_encoded_types):
+        """Pair still-unmatched query/CF objects of the same type that play the same role,
+        rewriting both maps in place onto a shared (node_type, 'role', q_idx) key. Two
+        different orders share almost no object instances (different Items, Packages,
+        HandlingUnits, ...), so without this an event-aligned union is still mostly
+        query-only/CF-only.
+
+        1. Neighbourhood matching, repeated until nothing changes: an object's signature is
+           the set of its neighbours' keys that are ALREADY shared (aligned Events, the
+           merged seed, identity- or previously role-matched objects); query/CF pairs are
+           taken greedily by signature overlap (> 0), so e.g. "the Item picked in aligned
+           event 3" matches across traces, and a Product reached only through that Item
+           matches on the next round.
+        2. Fallback: leftovers of the same type are paired by order of first appearance
+           (earliest neighbouring Events index in their own trace).
+        Role-labelled types (role_encoding AND encoding, decoded to e.g. a job role
+        rather than an identity) only pair with the same decoded role. Returns {shared key: "query name / CF name"} for labelling.
+        """
+        def unmatched(m, other, n):
+            # Events are matched by alignment only; the seed and identity/role matches
+            # are already shared. Anything else whose key the other trace lacks is open.
+            return n[0] != 'Events' and m[n] not in other
+
+        def name(id_map, n):
+            return id_map.get(n, f"{n[0]}[{n[1]}]")
+
+        def compatible(nq, ncf):
+            if nq[0] != ncf[0]:
+                return False
+            if nq[0] in role_encoded_types:
+                return id_map_q.get(nq) == id_map_cf.get(ncf)
+            return True
+
+        def neighbours(G, n):
+            return set(G.predecessors(n)) | set(G.successors(n))
+
+        def first_seen(G, n):
+            evs = [nb[1] for nb in neighbours(G, n) if nb[0] == 'Events']
+            return (min(evs) if evs else float('inf'), n[1])
+
+        labels = {}
+
+        def pair(nq, ncf):
+            key = (nq[0], 'role', nq[1])
+            map_q[nq] = map_cf[ncf] = key
+            labels[key] = f"{nq[0]}: {name(id_map_q, nq)} / {name(id_map_cf, ncf)}"
+
+        while True:
+            keys_q, keys_cf = set(map_q.values()), set(map_cf.values())
+            shared = keys_q & keys_cf
+            un_q = [n for n in G_q.nodes if unmatched(map_q, keys_cf, n)]
+            un_cf = [n for n in G_cf.nodes if unmatched(map_cf, keys_q, n)]
+            sig_q = {n: {map_q[nb] for nb in neighbours(G_q, n)} & shared for n in un_q}
+            sig_cf = {n: {map_cf[nb] for nb in neighbours(G_cf, n)} & shared for n in un_cf}
+            cands = sorted(((len(sig_q[a] & sig_cf[b]), a, b) for a in un_q for b in un_cf
+                            if compatible(a, b) and sig_q[a] & sig_cf[b]),
+                           key=lambda t: (-t[0], first_seen(G_q, t[1]), first_seen(G_cf, t[2])))
+            used_q, used_cf = set(), set()
+            for _, a, b in cands:
+                if a not in used_q and b not in used_cf:
+                    pair(a, b)
+                    used_q.add(a)
+                    used_cf.add(b)
+            if not used_q:
+                break
+
+        keys_q, keys_cf = set(map_q.values()), set(map_cf.values())
+        un_cf = sorted((n for n in G_cf.nodes if unmatched(map_cf, keys_q, n)),
+                       key=lambda n: first_seen(G_cf, n))
+        for a in sorted((n for n in G_q.nodes if unmatched(map_q, keys_cf, n)),
+                        key=lambda n: first_seen(G_q, n)):
+            b = next((b for b in un_cf if compatible(a, b)), None)
+            if b is not None:
+                pair(a, b)
+                un_cf.remove(b)
+        return labels
+
+    def _event_activity_sequence(self, graph):
+        """Per-Events-index activity names, in Events index order -- which is
+        chronological, since hetero_graphs.py's get_learning_set() appends one Events row
+        per active_df row in timestamp order."""
+        seq = [None] * (graph['Events'].x.size(0) if 'Events' in graph.node_types else 0)
+        for name, idxs in self._decode_event_types_with_indices(graph).items():
+            for i in idxs:
+                seq[i] = name
+        return seq
+
+    @staticmethod
+    def _indel_alignment(a, b):
+        """Levenshtein alignment of two sequences with insertions/deletions only (no
+        substitutions -- an activity-type change becomes one deletion + one insertion,
+        never a merge of two different activities). Returns ({i: j} for matched
+        positions, edit distance). Ties prefer a match, then a deletion."""
+        n, m = len(a), len(b)
+        D = [[0] * (m + 1) for _ in range(n + 1)]
+        for i in range(n + 1):
+            D[i][0] = i
+        for j in range(m + 1):
+            D[0][j] = j
+        for i in range(1, n + 1):
+            for j in range(1, m + 1):
+                best = min(D[i - 1][j] + 1, D[i][j - 1] + 1)
+                if a[i - 1] == b[j - 1]:
+                    best = min(best, D[i - 1][j - 1])
+                D[i][j] = best
+        pairs, i, j = {}, n, m
+        while i > 0 and j > 0:
+            if a[i - 1] == b[j - 1] and D[i][j] == D[i - 1][j - 1]:
+                pairs[i - 1] = j - 1
+                i, j = i - 1, j - 1
+            elif D[i][j] == D[i - 1][j] + 1:
+                i -= 1
+            else:
+                j -= 1
+        return pairs, D[n][m]
+
+    def _align_cf_events(self, query_graph, cf_graph):
+        """Pair query and CF Events nodes by aligning their chronological activity
+        sequences (LORELEY-style edit distance, see _indel_alignment). Returns
+        ({query_event_idx: cf_event_idx}, edit distance)."""
+        return self._indel_alignment(self._event_activity_sequence(query_graph),
+                                     self._event_activity_sequence(cf_graph))
+
+    def _plot_cf_union_graph(self, query_graph, cf_graph, query_id, cf_id,
+                             query_hours, cf_hours, save_dir, id_map_q=None, id_map_cf=None):
+        """Single-panel UNION of the query graph and its best counterfactual (de Leoni's
+        proposal, replacing the need to compare _plot_cf_diff_graph's two panels by eye):
+        everything the two traces have in common is drawn once, and only what differs is
+        marked -- red/dashed for what exists only in the query (what would have to
+        disappear), green for what exists only in the CF (what would have to appear),
+        orange for a shared object whose own features differ.
+
+        Shared Events come from aligning the two activity sequences (_align_cf_events);
+        shared objects from the same identity matching as _plot_cf_diff_graph, plus role
+        matching (_role_match_objects): two DIFFERENT real objects that play the same part
+        in both traces become one node labelled "query name / CF name". The two viewpoint
+        (KPI) objects are merged into one anchor node for the same reason.
+        """
+        import networkx as nx
+
+        id_map_q = id_map_q or {}
+        id_map_cf = id_map_cf or {}
+        event_pairs, edit_dist = self._align_cf_events(query_graph, cf_graph)
+        corr = self._cf_correspondence(query_graph, cf_graph, id_map_q, id_map_cf,
+                                       event_pairs=event_pairs, merge_seeds=True,
+                                       match_by_role=True)
+        query_only, cf_only, shared = corr['query_only'], corr['cf_only'], corr['shared']
+        feat_changed, seed_key = corr['feat_changed'], corr['seed_key']
+
+        labels = {**corr['labels_cf'], **corr['labels_q']}
+        labels.update(corr['role_matched'])
+        labels[seed_key] = f"{self.kpi_viewpoint}\n#{query_id} vs #{cf_id}"
+
+        # Most links are stored twice (to + rev_to) and some repeat; for reading, a link
+        # is just "these two nodes are connected", so draw each node pair once, undirected.
+        def pairs(counter):
+            return {frozenset((u, v)) for (u, v, _) in counter if u != v}
+        links_q, links_cf = pairs(corr['q_edges']), pairs(corr['cf_edges'])
+        edge_sets = {'shared': links_q & links_cf, 'query': links_q - links_cf,
+                     'cf': links_cf - links_q}
+
+        G = nx.Graph()
+        G.add_nodes_from(shared | query_only | cf_only)
+        G.add_edges_from(tuple(p) for p in links_q | links_cf)
+
+        try:
+            pos = nx.kamada_kawai_layout(G)
+        except Exception as exc:
+            print(f"  [layout] kamada_kawai_layout failed ({type(exc).__name__}: {exc}), "
+                  f"falling back to spring_layout")
+            pos = nx.spring_layout(G, seed=42, k=0.9)
+
+        palette = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2",
+                   "#937860", "#DA8BC3", "#8C8C8C", "#CCB974", "#64B5CD"]
+        all_types = sorted({n[0] for n in G.nodes})
+        type_colors = {nt: palette[i % len(palette)] for i, nt in enumerate(all_types)}
+        RED, GREEN, ORANGE = '#e34948', '#1baf7a', '#eda100'
+
+        fig, ax = plt.subplots(figsize=(13, 10))
+
+        # Edges: shared first (quiet), then the differences on top.
+        def edgelist(links):
+            return [tuple(p) for p in links]
+        nx.draw_networkx_edges(G, pos, ax=ax, edgelist=edgelist(edge_sets['shared']),
+                               edge_color="gray", width=1.0, alpha=0.45)
+        if edge_sets['query']:
+            nx.draw_networkx_edges(G, pos, ax=ax, edgelist=edgelist(edge_sets['query']),
+                                   edge_color=RED, width=1.8, alpha=0.9, style='dashed')
+        if edge_sets['cf']:
+            nx.draw_networkx_edges(G, pos, ax=ax, edgelist=edgelist(edge_sets['cf']),
+                                   edge_color=GREEN, width=2.0, alpha=0.95)
+
+        # Nodes, drawn per group so query-only nodes can be faded.
+        groups = [
+            (shared - feat_changed - {seed_key}, 'none', 0, 200, 0.95),
+            (feat_changed - {seed_key}, ORANGE, 2.5, 280, 0.95),
+            (query_only, RED, 2.5, 280, 0.45),
+            (cf_only, GREEN, 2.5, 280, 0.95),
+            ({seed_key}, ORANGE if seed_key in feat_changed else 'black', 2.5, 520, 0.95),
+        ]
+        for nodes, edgecolor, lw, size, alpha in groups:
+            nodes = [n for n in nodes if n in G]
+            if not nodes:
+                continue
+            nx.draw_networkx_nodes(G, pos, ax=ax, nodelist=nodes,
+                                   node_color=[type_colors[n[0]] for n in nodes],
+                                   node_size=size, edgecolors=edgecolor, linewidths=lw,
+                                   alpha=alpha)
+
+        # Label the differences always; label everything when the graph is small enough.
+        to_label = G.nodes if G.number_of_nodes() <= 30 else (query_only | cf_only |
+                                                               feat_changed | {seed_key})
+        nx.draw_networkx_labels(G, pos, ax=ax, font_size=6,
+                                labels={n: labels.get(n, str(n)) for n in to_label})
+
+        type_handles = [plt.Line2D([0], [0], marker="o", color="w", label=nt,
+                                    markerfacecolor=c, markersize=10)
+                        for nt, c in type_colors.items()]
+        diff_handles = [
+            plt.Line2D([0], [0], marker="o", color="w", label="only in query",
+                       markerfacecolor="#dddddd", markeredgecolor=RED, markeredgewidth=2.2,
+                       markersize=10),
+            plt.Line2D([0], [0], marker="o", color="w", label="only in CF",
+                       markerfacecolor="w", markeredgecolor=GREEN, markeredgewidth=2.2,
+                       markersize=10),
+            plt.Line2D([0], [0], marker="o", color="w", label="in both, features differ",
+                       markerfacecolor="w", markeredgecolor=ORANGE, markeredgewidth=2.2,
+                       markersize=10),
+            plt.Line2D([0], [0], color="gray", lw=1.2, label="link in both"),
+            plt.Line2D([0], [0], color=RED, lw=1.8, linestyle='dashed', label="link only in query"),
+            plt.Line2D([0], [0], color=GREEN, lw=2.0, label="link only in CF"),
+        ]
+        fig.legend(handles=type_handles + diff_handles, loc="lower center",
+                   ncol=min(len(type_handles) + len(diff_handles), 6), fontsize=8.5,
+                   bbox_to_anchor=(0.5, -0.02))
+        n_q = query_graph['Events'].x.size(0) if 'Events' in query_graph.node_types else 0
+        n_cf = cf_graph['Events'].x.size(0) if 'Events' in cf_graph.node_types else 0
+        ax.set_title(f"Union of query #{query_id} ({n_q} events, {query_hours:.1f}h predicted) "
+                     f"and CF #{cf_id} ({n_cf} events, {cf_hours:.1f}h predicted)\n"
+                     f"{len(shared)} nodes in both, {len(query_only)} only in query, "
+                     f"{len(cf_only)} only in CF  |  activity-sequence edit distance: {edit_dist}\n"
+                     f"({len(corr['role_matched'])} shared nodes pair two different objects in the "
+                     f"same role, labelled \"query / CF\")",
+                     fontsize=11)
+        ax.axis("off")
+        plt.tight_layout(rect=[0, 0.07, 1, 1])
+        plt.savefig(os.path.join(save_dir, "cf_union_graph.png"), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Saved CF union graph to {save_dir}")
 
     def _decode_event_types(self, graph):
         """Decode each Events node's activity type from the one-hot block of its
