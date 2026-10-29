@@ -1428,7 +1428,7 @@ class Explainer(Modelling):
     def explain_aggregate_shapley(self, n_traces=50, top_k=5, n_samples=30, revisit_n=3,
                                   max_revisit_candidates=6, save_dir=None, seed=0,
                                   scope='last_event', pooling='execution_mean', normalize=None,
-                                  elapsed_floor_h=1.0):
+                                  elapsed_floor_h=1.0, fill_sparse=True):
         """Aggregate Shapley replacement for the dashboard's two flat "top K" bar
         charts (nodes, features) only -- NOT the per-node-type chart or the depth
         heatmap, which stay LOO-based (both are exhaustive-by-design; Shapley-izing
@@ -1499,6 +1499,16 @@ class Explainer(Modelling):
               at elapsed_floor_h (the first prefix's elapsed time is 0).
           'total_duration' -- elapsed + true remaining time, i.e. the execution's whole
               duration (uses the ground-truth target, not the prediction).
+        fill_sparse: for the distinct-execution revisits ('execution_mean',
+        'flat_distinct'), a label found in fewer than revisit_n executions has its
+        remaining revisits filled with other prefixes of those same executions
+        (round-robin, seeded-random order), up to revisit_n or until every prefix
+        holding it is used. Without it, a label from one execution gets one revisit
+        on one random prefix, and its bar moves whenever the random stream shifts
+        (OM, revisit_n 8 vs 16: 9 of the top-20 nodes, ~3.6 h). False reproduces
+        the earlier one-prefix-per-execution runs. The bar CSVs carry an
+        n_executions column with the distinct executions behind each bar.
+
         Writes to <default dir>_norm_elapsed / _norm_total by default. The LOO cache
         stays in hours, so all normalizations share one LOO pass. Every run also writes
         loo_occurrences_nodes.csv / loo_occurrences_features.csv: one row per label
@@ -1673,7 +1683,18 @@ class Explainer(Modelling):
             # executions are proportionally more likely to be revisited.
             # flat_distinct revisits like execution_mean.
             if distinct_revisits:
-                return [rng.choice(srcs) for srcs in list(by_exec.values())[:revisit_n]]
+                execs = list(by_exec.values())[:revisit_n]
+                picks = [rng.randrange(len(srcs)) for srcs in execs]
+                chosen = [srcs[i] for srcs, i in zip(execs, picks)]
+                if fill_sparse and len(chosen) < revisit_n:
+                    # Too few executions: top up with their other prefixes, one
+                    # execution at a time, so a sparse label is not one random prefix.
+                    rest = [rng.sample([s for j, s in enumerate(srcs) if j != i], len(srcs) - 1)
+                            for srcs, i in zip(execs, picks)]
+                    for k in range(max(len(r) for r in rest)):
+                        chosen += [r[k] for r in rest if k < len(r)]
+                    chosen = chosen[:revisit_n]
+                return chosen
             occurrences = [s for srcs in by_exec.values() for s in srcs]
             if flat_prefixes:
                 return rng.sample(occurrences, min(revisit_n, len(occurrences)))
@@ -1736,7 +1757,8 @@ class Explainer(Modelling):
         if all_prefixes:
             pooling_text = (f"{len(sample)} prefixes, per-execution mean" if per_execution
                             else f"flat over {len(sample)} prefixes")
-            revisit_unit = "executions" if distinct_revisits else "prefixes"
+            revisit_unit = ("executions (topped up with prefixes)" if distinct_revisits and fill_sparse
+                            else "executions" if distinct_revisits else "prefixes")
             n_label = (f"top-20 picked by LOO over {len(executions)} executions "
                        f"({pooling_text}); "
                        f"Shapley on ≤{revisit_n} {revisit_unit} per label")
@@ -1750,6 +1772,14 @@ class Explainer(Modelling):
             n_label += f"; each value ÷ {unit}"
             norm_kw = {'xlabel': f"Average influence ÷ {unit.split(' (')[0]} (unitless)",
                        'show_large': False}
+        def _with_executions(summary, sources):
+            # Distinct executions behind each bar (the revisits use the first
+            # revisit_n executions holding the label).
+            df = pd.DataFrame(summary)
+            if distinct_revisits and not df.empty:
+                df['n_executions'] = df['label'].map(lambda l: min(len(sources[l]), revisit_n))
+            return df
+
         print(f"  Shapley-requantifying top nodes…")
         winners = _top_labels(explanation_signed_shifts, top_n=20)
         shapley_node_shifts = defaultdict(list)
@@ -1762,7 +1792,7 @@ class Explainer(Modelling):
             "Global Shapley explanations for remaining time prediction",
             dataset_label=self.database, top_n=20, n_label=n_label, **norm_kw,
         )
-        pd.DataFrame(explanation_summary).to_csv(
+        _with_executions(explanation_summary, explanation_sources).to_csv(
             os.path.join(save_dir, "aggregate_explanation_bars.csv"), index=False
         )
 
@@ -1778,7 +1808,7 @@ class Explainer(Modelling):
             "Global Shapley feature attribution for remaining time prediction",
             dataset_label=self.database, top_n=20, n_label=n_label, **norm_kw,
         )
-        pd.DataFrame(feature_summary).to_csv(
+        _with_executions(feature_summary, feature_sources).to_csv(
             os.path.join(save_dir, "aggregate_feature_bars.csv"), index=False
         )
 
