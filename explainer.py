@@ -2641,13 +2641,16 @@ class Explainer(Modelling):
                                      self._event_activity_sequence(cf_graph))
 
     def _plot_cf_union_graph(self, query_graph, cf_graph, query_id, cf_id,
-                             query_hours, cf_hours, save_dir, id_map_q=None, id_map_cf=None):
+                             query_hours, cf_hours, save_dir, id_map_q=None, id_map_cf=None,
+                             filename="cf_union_graph.png"):
         """Single-panel UNION of the query graph and its best counterfactual (de Leoni's
         proposal, replacing the need to compare _plot_cf_diff_graph's two panels by eye):
         everything the two traces have in common is drawn once, and only what differs is
-        marked -- red/dashed for what exists only in the query (what would have to
-        disappear), green for what exists only in the CF (what would have to appear),
-        orange for a shared object whose own features differ.
+        marked. Nodes and links share one colour code: red (links dashed) for what exists
+        only in the query (what would have to disappear), green for what exists only in
+        the CF (what would have to appear), grey for what is in both. A shared node whose
+        own features differ keeps its grey fill with an orange outline. Node types are
+        not colour-coded; each label names the node's type.
 
         Shared Events come from aligning the two activity sequences (_align_cf_events);
         shared objects from the same identity matching as _plot_cf_diff_graph, plus role
@@ -2689,11 +2692,7 @@ class Explainer(Modelling):
                   f"falling back to spring_layout")
             pos = nx.spring_layout(G, seed=42, k=0.9)
 
-        palette = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2",
-                   "#937860", "#DA8BC3", "#8C8C8C", "#CCB974", "#64B5CD"]
-        all_types = sorted({n[0] for n in G.nodes})
-        type_colors = {nt: palette[i % len(palette)] for i, nt in enumerate(all_types)}
-        RED, GREEN, ORANGE = '#e34948', '#1baf7a', '#eda100'
+        RED, GREEN, ORANGE, GREY = '#e34948', '#1baf7a', '#eda100', 'gray'
 
         fig, ax = plt.subplots(figsize=(13, 10))
 
@@ -2701,7 +2700,7 @@ class Explainer(Modelling):
         def edgelist(links):
             return [tuple(p) for p in links]
         nx.draw_networkx_edges(G, pos, ax=ax, edgelist=edgelist(edge_sets['shared']),
-                               edge_color="gray", width=1.0, alpha=0.45)
+                               edge_color=GREY, width=1.0, alpha=0.45)
         if edge_sets['query']:
             nx.draw_networkx_edges(G, pos, ax=ax, edgelist=edgelist(edge_sets['query']),
                                    edge_color=RED, width=1.8, alpha=0.9, style='dashed')
@@ -2709,48 +2708,43 @@ class Explainer(Modelling):
             nx.draw_networkx_edges(G, pos, ax=ax, edgelist=edgelist(edge_sets['cf']),
                                    edge_color=GREEN, width=2.0, alpha=0.95)
 
-        # Nodes, drawn per group so query-only nodes can be faded.
+        # Nodes are filled like their links: grey in both, red only in the query, green
+        # only in the CF. Outlines mark a shared node with changed features and the anchor.
         groups = [
-            (shared - feat_changed - {seed_key}, 'none', 0, 200, 0.95),
-            (feat_changed - {seed_key}, ORANGE, 2.5, 280, 0.95),
-            (query_only, RED, 2.5, 280, 0.45),
-            (cf_only, GREEN, 2.5, 280, 0.95),
-            ({seed_key}, ORANGE if seed_key in feat_changed else 'black', 2.5, 520, 0.95),
+            (shared - feat_changed - {seed_key}, GREY, 'none', 0, 220),
+            (feat_changed - {seed_key}, GREY, ORANGE, 2.5, 280),
+            (query_only, RED, 'none', 0, 280),
+            (cf_only, GREEN, 'none', 0, 280),
+            ({seed_key}, GREY, ORANGE if seed_key in feat_changed else 'black', 2.5, 520),
         ]
-        for nodes, edgecolor, lw, size, alpha in groups:
+        for nodes, fill, edgecolor, lw, size in groups:
             nodes = [n for n in nodes if n in G]
             if not nodes:
                 continue
-            nx.draw_networkx_nodes(G, pos, ax=ax, nodelist=nodes,
-                                   node_color=[type_colors[n[0]] for n in nodes],
+            nx.draw_networkx_nodes(G, pos, ax=ax, nodelist=nodes, node_color=fill,
                                    node_size=size, edgecolors=edgecolor, linewidths=lw,
-                                   alpha=alpha)
+                                   alpha=0.9)
 
         # Label the differences always; label everything when the graph is small enough.
         to_label = G.nodes if G.number_of_nodes() <= 30 else (query_only | cf_only |
                                                                feat_changed | {seed_key})
-        nx.draw_networkx_labels(G, pos, ax=ax, font_size=6,
+        nx.draw_networkx_labels(G, pos, ax=ax, font_size=6, clip_on=False,
                                 labels={n: labels.get(n, str(n)) for n in to_label})
 
-        type_handles = [plt.Line2D([0], [0], marker="o", color="w", label=nt,
-                                    markerfacecolor=c, markersize=10)
-                        for nt, c in type_colors.items()]
-        diff_handles = [
-            plt.Line2D([0], [0], marker="o", color="w", label="only in query",
-                       markerfacecolor="#dddddd", markeredgecolor=RED, markeredgewidth=2.2,
-                       markersize=10),
-            plt.Line2D([0], [0], marker="o", color="w", label="only in CF",
-                       markerfacecolor="w", markeredgecolor=GREEN, markeredgewidth=2.2,
-                       markersize=10),
-            plt.Line2D([0], [0], marker="o", color="w", label="in both, features differ",
-                       markerfacecolor="w", markeredgecolor=ORANGE, markeredgewidth=2.2,
-                       markersize=10),
-            plt.Line2D([0], [0], color="gray", lw=1.2, label="link in both"),
+        def node_handle(label, fill, edge='none', lw=0):
+            return plt.Line2D([0], [0], marker="o", color="w", label=label,
+                              markerfacecolor=fill, markeredgecolor=edge,
+                              markeredgewidth=lw, markersize=10)
+        handles = [
+            node_handle("only in query", RED),
+            node_handle("only in CF", GREEN),
+            node_handle("in both", GREY),
+            node_handle("in both, features differ", GREY, ORANGE, 2.2),
+            plt.Line2D([0], [0], color=GREY, lw=1.2, label="link in both"),
             plt.Line2D([0], [0], color=RED, lw=1.8, linestyle='dashed', label="link only in query"),
             plt.Line2D([0], [0], color=GREEN, lw=2.0, label="link only in CF"),
         ]
-        fig.legend(handles=type_handles + diff_handles, loc="lower center",
-                   ncol=min(len(type_handles) + len(diff_handles), 6), fontsize=8.5,
+        fig.legend(handles=handles, loc="lower center", ncol=4, fontsize=8.5,
                    bbox_to_anchor=(0.5, -0.02))
         n_q = query_graph['Events'].x.size(0) if 'Events' in query_graph.node_types else 0
         n_cf = cf_graph['Events'].x.size(0) if 'Events' in cf_graph.node_types else 0
@@ -2763,7 +2757,7 @@ class Explainer(Modelling):
                      fontsize=11)
         ax.axis("off")
         plt.tight_layout(rect=[0, 0.07, 1, 1])
-        plt.savefig(os.path.join(save_dir, "cf_union_graph.png"), dpi=150, bbox_inches='tight')
+        plt.savefig(os.path.join(save_dir, filename), dpi=150, bbox_inches='tight')
         plt.close()
         print(f"Saved CF union graph to {save_dir}")
 
