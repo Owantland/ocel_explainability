@@ -16,7 +16,9 @@ than two separate files, and never renders the full ranked candidate list as a t
      cf_diff_graph.png (added 2026-10-14, [[project_counterfactual_diff_graph]]) -- the
      shared-layout, highlighted node/edge diff between query and CF -- as
      cf_showcase_diff_graph.png, giving this showcase set the full query / CF /
-     diff-highlighted trio in one place.
+     diff-highlighted trio in one place. Also copies
+     cf_union_graph.png (added 2026-10-19, de Leoni's single-panel union proposal) as
+     cf_showcase_union_graph.png.
   4. Renders cf_dissimilarity.csv's full ranked candidate list as a table image (this
      doesn't exist yet -- only the CSV does).
 
@@ -137,6 +139,7 @@ def main():
         "cf_event_type_diff.png": "cf_showcase_event_type_diff.png",
         f"cf_{e.kpi_viewpoint.lower()}_feature_diff.png": "cf_showcase_viewpoint_feature_diff.png",
         "cf_diff_graph.png": "cf_showcase_diff_graph.png",
+        "cf_union_graph.png": "cf_showcase_union_graph.png",
     }
     for src_name, dst_name in copy_map.items():
         src = os.path.join(cf_dir, src_name)
