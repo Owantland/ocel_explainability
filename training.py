@@ -143,6 +143,8 @@ class Modelling:
             list((self.path_dict.get('time_attributes') or {}).keys()) +
             ['Events']
         )
+        # Kept so explainers can recover raw feature values (e.g. Events.elapsed_h).
+        self.node_feat_stats = {}
         for node_type in continuous_node_types:
             x_train = [g[node_type].x for g in self.train_data if g[node_type].num_nodes > 0]
             if not x_train:
@@ -150,6 +152,7 @@ class Modelling:
             x_cat = torch.cat(x_train, dim=0)
             feat_mean = x_cat.mean(dim=0)
             feat_std = x_cat.std(dim=0).clamp(min=1e-8)
+            self.node_feat_stats[node_type] = (feat_mean, feat_std)
             for split in [self.train_data, self.val_data, self.test_data]:
                 for g in split:
                     if g[node_type].num_nodes > 0:

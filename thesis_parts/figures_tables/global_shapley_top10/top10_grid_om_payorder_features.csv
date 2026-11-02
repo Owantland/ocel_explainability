@@ -1,0 +1,21 @@
+method,,label,mean_signed_shift,std_shift,count,n_executions
+flat,0,Events.FailedDelivery,-40.54273401331018,14.821462063977458,8,
+flat,1,Events.PackageDelivered,-26.08750882523148,8.44447020736059,8,
+flat,2,Events.CreatePackage,-25.06800202546296,9.765977749366533,8,
+flat,3,Customers.Mediterranea Luxury Cruises S.p.A.,20.068940586419753,1.6004427764722056,6,
+flat,4,Events.ItemOutOfStock,-19.793704282407404,7.589465064395688,8,
+flat,5,Customers.Celtica Green Farms Oy,-18.581465663580246,7.802817862156005,6,
+flat,6,Events.PlaceOrder,17.217168836805556,22.94897146319443,8,
+flat,7,Customers.Riviera Robotics SAS,-14.013555700231482,3.202462877415889,8,
+flat,8,Events.ReorderItem,-11.214749855324074,14.390768639750512,8,
+flat,9,Events.ConfirmOrder,9.29340870949074,9.347399509969955,8,
+norm_total,0,Events.FailedDelivery,-0.1953642543427389,0.0792597763257099,8,8.0
+norm_total,1,Events.PackageDelivered,-0.0733843980127563,0.0271458629689746,8,8.0
+norm_total,2,Customers.Celtica Green Farms Oy,-0.0712391689953475,0.0314425832162028,6,2.0
+norm_total,3,Events.PlaceOrder,0.0627686051911552,0.082715331650226,8,8.0
+norm_total,4,Events.ItemOutOfStock,-0.0597358941837936,0.020985073516558,8,8.0
+norm_total,5,Events.CreatePackage,-0.0507577562172308,0.0409659783661432,8,8.0
+norm_total,6,Events.ReorderItem,-0.0484523181222413,0.0516316307518362,8,8.0
+norm_total,7,Customers.Riviera Robotics SAS,-0.0423472697883162,0.0053756478067547,8,3.0
+norm_total,8,Customers.Mediterranea Luxury Cruises S.p.A.,0.0412221718216356,0.002844842482087,6,2.0
+norm_total,9,Events.ConfirmOrder,0.0308587009385022,0.0129372013187675,8,8.0

@@ -130,7 +130,7 @@ def _ranked(loo):
     return loo.set_index("label")
 
 
-def _plot_rank_shift(loo_w, loo_f, kind, title, path):
+def _plot_rank_shift(loo_w, loo_f, kind, title, path, names=None):
     rw, rf = _ranked(loo_w), _ranked(loo_f)
     labels = sorted(set(rw.index[rw["rank"] <= TOP_N]) | set(rf.index[rf["rank"] <= TOP_N]),
                     key=lambda l: rw["rank"].get(l, 1e9))
@@ -162,11 +162,11 @@ def _plot_rank_shift(loo_w, loo_f, kind, title, path):
     ax.set_ylim(min(lowest, cap) + max(n_capped.values()) + 1, 0)
     ax.set_xlim(-0.9, 1.9)
     ax.set_xticks([0, 1])
-    ax.set_xticklabels([n for _, n in LOO_POOLINGS])
+    ax.set_xticklabels(names or [n for _, n in LOO_POOLINGS])
     ax.set_yticks([])
     for s in ("left", "right", "top"):
         ax.spines[s].set_visible(False)
-    ax.set_title(f"{title} — LOO rank of {kind} under each pooling\n"
+    ax.set_title(f"{title} — LOO rank of {kind} under each setting\n"
                  f"(orange: enters or leaves the top {TOP_N})", fontsize=10)
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
