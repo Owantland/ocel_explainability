@@ -1,0 +1,21 @@
+method,,label,mean_signed_shift,std_shift,count,n_executions
+flat,0,Events=FailedDelivery,-17.089191948784723,21.71642813768917,8,
+flat,1,Customers=Mediterranea Luxury Cruises S.p.A.,14.98829636863426,3.2455218596842017,8,
+flat,2,Customers=Riviera Robotics SAS,-12.028732638888888,2.1224238333412413,8,
+flat,3,Events=ReorderItem,-10.031646412037036,5.0386039037665,8,
+flat,4,Events=ConfirmOrder,7.85929050925926,14.41939724005672,8,
+flat,5,Customers=Nordica Systems GmbH,7.855436631944444,1.929980269467664,8,
+flat,6,Customers=Eastern Oak Insurance Zrt.,-7.584903428819445,1.1746685744723857,8,
+flat,7,Events=ItemOutOfStock,-7.572596535011575,8.620447061344347,8,
+flat,8,Customers=Celtica Green Farms Oy,-7.174349645543982,2.7466972071768256,8,
+flat,9,Items=i-886890,6.728442563657408,3.7221020639004783,8,
+norm_total,0,Events=ReorderItem,-0.0929060942920092,0.0479807356758195,8,8.0
+norm_total,1,Events=FailedDelivery,-0.069867372500519,0.0786222499233417,8,8.0
+norm_total,2,Events=PackageDelivered,-0.0649404145786883,0.0762390210562067,8,8.0
+norm_total,3,Events=ItemOutOfStock,-0.048326884968284,0.0444858216382255,8,8.0
+norm_total,4,Customers=Celtica Green Farms Oy,-0.0402693568749534,0.0257959630743267,8,4.0
+norm_total,5,Customers=Mediterranea Luxury Cruises S.p.A.,0.0385875473905582,0.009044761687814,8,4.0
+norm_total,6,Customers=Riviera Robotics SAS,-0.0361367010564969,0.009187667174073,8,5.0
+norm_total,7,Customers=Eastern Oak Insurance Zrt.,-0.0312064596134854,0.0048329220019405,8,1.0
+norm_total,8,Events=ConfirmOrder,0.0308250216362615,0.0372515523318579,8,8.0
+norm_total,9,Customers=Nordica Systems GmbH,0.0276952731599968,0.0053856854097678,8,2.0

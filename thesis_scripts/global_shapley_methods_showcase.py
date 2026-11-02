@@ -1,16 +1,16 @@
-"""Side-by-side showcase of the three global Shapley variants de Leoni asked to compare.
+"""Side-by-side showcase of the two global Shapley variants the thesis reports.
 
-All run on the same N_TRACES test executions with seed=0 and revisit_n=8:
-  flat           every prefix; every prefix occurrence counts equally
-  norm_elapsed   flat selection, every shift ÷ elapsed time (floored at 1 h)
-  norm_total     flat selection, every shift ÷ total execution duration
-The norm_* runs draw their Shapley revisits from distinct executions, while flat samples
-prefix occurrences uniformly (and may repeat an execution), so bar magnitudes and spread
-differ partly through revisit sampling; the top-20 selection differs only by normalization.
-The runs come from global_shapley_weighting_comparison.py --collect --revisit-n 8 (flat)
-and global_shapley_normalization_comparison.py --collect (norm_*).
+Per the meeting with de Leoni, the elapsed-time normalization is dropped; the thesis shows
+  flat           every prefix; every prefix occurrence counts equally (hours)
+  norm_total     flat selection, every shift ÷ total execution duration (unitless)
+for each of the five KPIs (KPIS below). Both run on the same N_TRACES test executions with
+seed=0 and revisit_n=8. norm_total draws its Shapley revisits from distinct executions,
+topped up with their other prefixes when a label has fewer than 8 (fill_sparse), while
+flat samples prefix occurrences uniformly (and may repeat an execution), so bar magnitudes
+and spread differ partly through revisit sampling; the top-20 selection differs only by
+normalization.
 
-Graphs, per dataset, in
+Graphs, per KPI, in
 files/explainer_outputs/<db>/aggregate_methods_showcase_<task_id>/:
   1. top10_grid_<kind>.png      each method's top-10 Shapley bars, ±1 std whiskers
                                 across revisits (own x-axes: hours or unitless)
@@ -18,15 +18,25 @@ files/explainer_outputs/<db>/aggregate_methods_showcase_<task_id>/:
                                 process its labels occur, across how many executions,
                                 how concentrated in one execution, which node types
   3. rank_bump_<kind>.png       rank of every label in any method's top 10, per method
-  4. overlap_heatmap.png        3x3 top-20 Jaccard, nodes and features
-plus a CSV per graph, and in files/explainer_outputs/:
+  4. overlap_heatmap.png        2x2 top-20 Jaccard, nodes and features
+plus a CSV per graph. The top-10 grids of all KPIs are also copied to GRID_DIR as
+top10_grid_<kpi>_<kind>.{png,csv}. In files/explainer_outputs/:
   global_shapley_methods_table.{png,tex,csv}  how each method works, pros and cons,
-                                              and measured OM / IoT numbers
+                                              and measured numbers per KPI
+
+--collect <kpi> runs both methods for one KPI against whatever config.yml and the graph
+caches CURRENTLY point at (it checks task_id), so Depart and PackageDelivered need their
+caches swapped in first, as for loo_shapley_trace_showcase.py.
 
 Usage:
-    PYTHONPATH=. python3 thesis_scripts/global_shapley_methods_showcase.py
+    PYTHONPATH=. python3 thesis_scripts/global_shapley_methods_showcase.py --collect om_payorder
+    PYTHONPATH=. python3 thesis_scripts/global_shapley_methods_showcase.py --collect om_payorder --only norm_total
+    PYTHONPATH=. python3 thesis_scripts/global_shapley_methods_showcase.py            # plots, all KPIs
+    PYTHONPATH=. python3 thesis_scripts/global_shapley_methods_showcase.py --kpi iot_evaluatetruckexit
 """
+import argparse
 import os
+import shutil
 import textwrap
 
 import matplotlib
@@ -36,20 +46,27 @@ import numpy as np
 import pandas as pd
 
 from thesis_scripts.global_shapley_weighting_comparison import (
-    DATASETS, N_TRACES, INCREASE, DECREASE, KINDS, _short, run_dir)
-from thesis_scripts.global_shapley_normalization_comparison import method_dir
+    N_TRACES, INCREASE, DECREASE, KINDS, _short, run_dir)
+from thesis_scripts.global_shapley_normalization_comparison import POOLING, method_dir
 
 REVISIT_N = 8
 TOP_N = 20
 GRID_N = 10
 METHODS = [("flat", "all prefixes, flat"),
-           ("norm_elapsed", "flat ÷ elapsed time"),
            ("norm_total", "flat ÷ total duration")]
 METHOD_NAMES = dict(METHODS)
-METHOD_COLORS = {"flat": "#DD8452", "norm_elapsed": "#C44E52", "norm_total": "#8172B2"}
+METHOD_COLORS = {"flat": "#DD8452", "norm_total": "#8172B2"}
 UNITS = {m: "unitless" if m.startswith("norm_") else "hours" for m, _ in METHODS}
-DB_SHORT = {"order_management": "OM", "cargo_pickup_iot": "IoT"}
+# slug -> (database, cant, task_id, short name for the methods table)
+KPIS = {
+    "om_payorder": ("order_management", 2000, "TimeFrom_Orders_to_PayOrder", "OM-Pay"),
+    "om_packagedelivered": ("order_management", 2000, "TimeFrom_Orders_to_PackageDelivered", "OM-Pkg"),
+    "logistics_depart": ("logistics", 1000, "TimeFrom_CustomerOrder_to_Depart", "Depart"),
+    "logistics_loadtovehicle": ("logistics", 1000, "TimeFrom_CustomerOrder_to_LoadToVehicle", "LoadTV"),
+    "iot_evaluatetruckexit": ("cargo_pickup_iot", 2000, "TimeFrom_Pickupplan_to_EvaluateTruckExit", "IoT"),
+}
 TABLE_DIR = "files/explainer_outputs"
+GRID_DIR = "thesis_parts/figures_tables/global_shapley_top10"
 
 # How each method works, and its trade-offs; the measured columns are filled in from the runs.
 DESCRIPTIONS = {
@@ -59,12 +76,6 @@ DESCRIPTIONS = {
         focus="Elements that recur in long executions",
         pros="Simplest pooling; reflects how often the model sees an element",
         cons="Long executions dominate the selection; revisits can cluster in one execution"),
-    "norm_elapsed": dict(
-        prefixes="Every prefix of each execution",
-        selection="Flat, each shift ÷ elapsed time at the prefix (floor 1 h)",
-        focus="Early-process elements (small denominators)",
-        pros="Unitless; available at prediction time; de Leoni's proposal",
-        cons="Over-corrects toward early prefixes; noisiest on IoT; depends on the floor"),
     "norm_total": dict(
         prefixes="Every prefix of each execution",
         selection="Flat, each shift ÷ the execution's total duration",
@@ -77,8 +88,28 @@ DESCRIPTIONS = {
 
 def run_dirs(database, task_id):
     return {"flat": run_dir(database, task_id, "flat", REVISIT_N),
-            "norm_elapsed": method_dir(database, task_id, "elapsed"),
             "norm_total": method_dir(database, task_id, "total_duration")}
+
+
+def collect(kpi, only=None):
+    import torch
+    import explainer as exp
+
+    database, cant, task_id, _ = KPIS[kpi]
+    e = exp.Explainer(database, cant)
+    if e.task_id != task_id:
+        raise SystemExit(f"config.yml points at {e.task_id}, expected {task_id}")
+    e.model.load_state_dict(torch.load(e.model_path, weights_only=False))
+    e.model.eval()
+    dirs = run_dirs(database, task_id)
+    kwargs = {"flat": dict(pooling="flat"),
+              "norm_total": dict(pooling=POOLING, normalize="total_duration")}
+    for method, _ in METHODS:
+        if only and method != only:
+            continue
+        print(f"\n=== {kpi} / {method} -> {dirs[method]}", flush=True)
+        e.explain_aggregate_shapley(n_traces=N_TRACES, scope="all_prefixes", revisit_n=REVISIT_N,
+                                    save_dir=dirs[method], **kwargs[method])
 
 
 def _node_type(label, kind):
@@ -90,7 +121,7 @@ def _jaccard(a, b):
 
 
 def _plot_top_grid(bars, kind, title, path):
-    fig, axes = plt.subplots(1, 3, figsize=(21, 5))
+    fig, axes = plt.subplots(1, len(METHODS), figsize=(7 * len(METHODS), 5))
     for ax, (method, name) in zip(axes.flat, METHODS):
         df = bars[method].head(GRID_N)
         vals = df.mean_signed_shift.values
@@ -244,9 +275,11 @@ def _median_cv(bars):
     return float((df.std_shift / df.mean_signed_shift.abs()).median())
 
 
-def plot():
-    measured = {}  # method -> {column: {db: value}}
-    for database, _, task_id in DATASETS:
+def plot(kpis):
+    measured = {}  # method -> {column: {kpi: value}}
+    os.makedirs(GRID_DIR, exist_ok=True)
+    for kpi in kpis:
+        database, _, task_id, _ = KPIS[kpi]
         title = f"{database} / {task_id.replace('TimeFrom_', '').replace('_to_', ' → ')}"
         out = f"files/explainer_outputs/{database}/aggregate_methods_showcase_{task_id}"
         os.makedirs(out, exist_ok=True)
@@ -262,13 +295,16 @@ def plot():
         for kind, bars_csv, loo_csv in KINDS:
             bars = {m: pd.read_csv(os.path.join(d, bars_csv)) for m, d in dirs.items()}
             loo = {m: pd.read_csv(os.path.join(d, loo_csv)) for m, d in dirs.items()}
-            # Raw occurrences are identical across the runs; only the normalized runs wrote them.
-            all_prefix_occ = pd.read_csv(os.path.join(dirs["norm_elapsed"], f"loo_occurrences_{kind}.csv"))
+            # Raw occurrences are identical across the runs; the older flat runs predate them.
+            all_prefix_occ = pd.read_csv(os.path.join(dirs["norm_total"], f"loo_occurrences_{kind}.csv"))
             occ = {m: all_prefix_occ for m, _ in METHODS}
 
             _plot_top_grid(bars, kind, title, os.path.join(out, f"top10_grid_{kind}.png"))
             pd.concat({m: b.head(GRID_N) for m, b in bars.items()}, names=["method"]).to_csv(
                 os.path.join(out, f"top10_grid_{kind}.csv"))
+            for ext in ("png", "csv"):
+                shutil.copyfile(os.path.join(out, f"top10_grid_{kind}.{ext}"),
+                                os.path.join(GRID_DIR, f"top10_grid_{kpi}_{kind}.{ext}"))
             focus = _focus_rows(bars, loo, occ, kind)
             focus.to_csv(os.path.join(out, f"focus_profile_{kind}.csv"), index=False)
             _plot_focus(focus, kind, title, os.path.join(out, f"focus_profile_{kind}.png"))
@@ -280,20 +316,21 @@ def plot():
                 med = focus.groupby("method")[["position", "n_executions"]].median()
                 for m, _ in METHODS:
                     col = measured.setdefault(m, {})
-                    col.setdefault("graphs", {})[database] = n_graphs[m]
-                    col.setdefault("position", {})[database] = med.position[m]
-                    col.setdefault("n_exec", {})[database] = med.n_executions[m]
-                    col.setdefault("cv", {})[database] = _median_cv(bars[m])
+                    col.setdefault("graphs", {})[kpi] = n_graphs[m]
+                    col.setdefault("position", {})[kpi] = med.position[m]
+                    col.setdefault("n_exec", {})[kpi] = med.n_executions[m]
+                    col.setdefault("cv", {})[kpi] = _median_cv(bars[m])
 
         _plot_overlap(tops_by_kind, title, os.path.join(out, "overlap_heatmap.png")).to_csv(
             os.path.join(out, "overlap_heatmap.csv"))
         print(f"{title}  ->  {out}")
 
-    _write_table(measured)
+    if list(kpis) == list(KPIS):  # the table compares all KPIs; skip it for a single redraw
+        _write_table(measured)
 
 
 def _write_table(measured):
-    dbs = [d for d, _, _ in DATASETS]
+    dbs = list(KPIS)
     rows = []
     order = [m for m, _ in METHODS]
     for m in order:
@@ -317,11 +354,12 @@ def _write_table(measured):
     cells = [[textwrap.fill(str(v), widths[c]) for c, v in r.items()] for _, r in df.iterrows()]
     fig, ax = plt.subplots(figsize=(26, 5))
     ax.axis("off")
-    short = " / ".join(DB_SHORT[d] for d in dbs)
-    ax.set_title(f"Global Shapley: flat vs. time-normalized — how they work, trade-offs, and measured "
+    short = " / ".join(KPIS[d][3] for d in dbs)
+    ax.set_title(f"Global Shapley: flat vs. ÷ total duration — how they work, trade-offs, and measured "
                  f"values ({short}; nodes; {N_TRACES} executions, ≤{REVISIT_N} revisits)\n"
-                 f"norm_* draw their Shapley revisits from distinct executions; flat samples prefix "
-                 f"occurrences uniformly", fontsize=13, pad=40)
+                 f"norm_total draws its Shapley revisits from distinct executions (topped up with "
+                 f"their other prefixes); flat samples prefix occurrences uniformly",
+                 fontsize=13, pad=40)
     table = ax.table(cellText=cells, colLabels=head, loc="center", cellLoc="left",
                      colWidths=[widths[c] / sum(widths.values()) for c in df.columns])
     table.auto_set_font_size(False)
@@ -358,4 +396,14 @@ def pair_fmt(measured, method, col, fmt, dbs):
 
 
 if __name__ == "__main__":
-    plot()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--collect", choices=list(KPIS),
+                        help="run both methods for this KPI (config.yml must point at it)")
+    parser.add_argument("--only", choices=[m for m, _ in METHODS],
+                        help="with --collect: run just this method")
+    parser.add_argument("--kpi", choices=list(KPIS), help="plot just this KPI")
+    args = parser.parse_args()
+    if args.collect:
+        collect(args.collect, args.only)
+    else:
+        plot([args.kpi] if args.kpi else list(KPIS))
