@@ -36,7 +36,7 @@ def main():
             print(f"  {order_id} ...", end=" ", flush=True)
             try:
                 _, cached = dc.get_or_compute(
-                    scope, 'perturbation', order_id,
+                    scope, dc.PERTURBATION_MODE, order_id,
                     lambda oid=order_id: e.explain_trace_shapley(
                         oid, save_dir=shapley_save_dir(e, oid)),
                     checkpoint_fingerprint=checkpoint_fingerprint,

@@ -12,6 +12,9 @@ import json
 import os
 
 CACHE_ROOT = "dashboard_cache"
+# Bumped whenever the cached single-trace result gains a field the dashboard needs, so
+# older entries are never served ('_v2': node_shapley_std for the bar-chart whiskers).
+PERTURBATION_MODE = "perturbation_v2"
 
 
 def cache_path(scope, mode, order_id, n_events=None, top_k=5, checkpoint_fingerprint=None):

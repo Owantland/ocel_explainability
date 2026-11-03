@@ -375,17 +375,24 @@ class Explainer(Modelling):
     # v(FullSet) is then exactly the real baseline_value, keeping the two methods
     # directly comparable on the same elements. See compare_loo_vs_shapley().
 
-    def _permutation_shapley(self, elements, value_fn, n_samples=100):
+    def _permutation_shapley(self, elements, value_fn, n_samples=100, return_std=False):
         """General permutation-sampling Shapley estimator: average, over n_samples
         random orderings of `elements`, each element's marginal contribution
         value_fn(prefix + [e]) - value_fn(prefix) at its position in that ordering.
         v(empty set) is cached once (same regardless of ordering). Cost is exactly
         n_samples * len(elements) calls to value_fn -- one incremental evaluation
-        per permutation step, not a re-evaluation from scratch per coalition."""
+        per permutation step, not a re-evaluation from scratch per coalition.
+
+        return_std: if True, also return each element's (population) std of its marginal
+        contribution across the n_samples permutations -- how much its effect depends on
+        which other candidates are present. Returns (means, stds) then; the shuffles drawn
+        and the means are identical either way."""
+        import math
         import random
 
         v_empty = value_fn(frozenset())
         totals = {e: 0.0 for e in elements}
+        sq_totals = {e: 0.0 for e in elements}
         for _ in range(n_samples):
             perm = list(elements)
             random.shuffle(perm)
@@ -394,10 +401,16 @@ class Explainer(Modelling):
                 prefix.append(e)
                 new_value = value_fn(frozenset(prefix))
                 totals[e] += new_value - prev_value
+                sq_totals[e] += (new_value - prev_value) ** 2
                 prev_value = new_value
-        return {e: totals[e] / n_samples for e in elements}
+        means = {e: totals[e] / n_samples for e in elements}
+        if not return_std:
+            return means
+        stds = {e: math.sqrt(max(sq_totals[e] / n_samples - means[e] ** 2, 0.0)) for e in elements}
+        return means, stds
 
-    def shapley_node_importance(self, graph, object_idx, baseline_value, node_keys, n_samples=100):
+    def shapley_node_importance(self, graph, object_idx, baseline_value, node_keys, n_samples=100,
+                                return_std=False):
         """Node-level Shapley values for a caller-supplied list of (node_type, idx)
         keys -- same signature shape as _loo_shift_for_nodes() for direct
         comparability. Coalitions vary only over node_keys: nodes in node_keys but
@@ -416,7 +429,8 @@ class Explainer(Modelling):
                     perturbed[node_type].x[idx] = 0.0
             return self._predict_value_for_graph(graph, object_idx, perturbed_graph=perturbed)
 
-        return self._permutation_shapley(list(node_keys), value_fn, n_samples=n_samples)
+        return self._permutation_shapley(list(node_keys), value_fn, n_samples=n_samples,
+                                         return_std=return_std)
 
     def shapley_feature_importance_for_node(self, graph, node_type, node_idx, baseline_value,
                                             target_object_idx, feature_indices=None, n_samples=100):
@@ -1001,9 +1015,12 @@ class Explainer(Modelling):
         node_candidates = list(dict.fromkeys(flat_node_candidates + type_node_candidates))
         edge_candidates = [(et, e) for et, e, _, _, _ in edge_importances[:top_k]]
 
-        node_shapley = (self.shapley_node_importance(explain_subgraph, 0, baseline_value,
-                                                      node_candidates, n_samples=n_samples)
-                        if node_candidates else {})
+        # Std of each node's marginal contribution across the sampled permutations, kept
+        # for the dashboard's whiskers; the means are unchanged by return_std.
+        node_shapley, node_shapley_std = (
+            self.shapley_node_importance(explain_subgraph, 0, baseline_value, node_candidates,
+                                         n_samples=n_samples, return_std=True)
+            if node_candidates else ({}, {}))
         edge_shapley = (self.shapley_edge_importance(explain_subgraph, 0, baseline_value,
                                                       edge_candidates, n_samples=n_samples)
                         if edge_candidates else {})
@@ -1090,6 +1107,8 @@ class Explainer(Modelling):
             "seed_feature_importances": seed_feats,
             "top_neighbor_feature_importances": top_neighbor_feats,
             "top_nodes_per_type": top_per_type,
+            "node_shapley_std": [[nt, idx, sd] for (nt, idx), sd in node_shapley_std.items()],
+            "n_samples": n_samples,
             "metrics": metrics,
             "save_dir": save_dir,
         }

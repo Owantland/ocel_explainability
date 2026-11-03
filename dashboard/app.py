@@ -22,6 +22,7 @@ import pandas as pd
 import streamlit as st
 
 from dashboard import cache as dc
+from dashboard import charts
 from dashboard import kpis
 
 MODE_LABELS = {
@@ -78,7 +79,7 @@ def compute_perturbation(explainer, order_id, n_events, top_k):
     checkpoint_fingerprint = int(os.path.getmtime(explainer.model_path))
     save_dir = _trace_dir(explainer, order_id, n_events, "shapley")
     return dc.get_or_compute(
-        kpis.cache_scope(explainer), 'perturbation', order_id,
+        kpis.cache_scope(explainer), dc.PERTURBATION_MODE, order_id,
         lambda: explainer.explain_trace_shapley(order_id, top_k=top_k, n_events=n_events,
                                                 save_dir=save_dir),
         n_events=n_events, top_k=top_k, checkpoint_fingerprint=checkpoint_fingerprint,
@@ -202,30 +203,29 @@ def render_perturbation_trace(result, cached, explainer, order_id, top_k):
             unsafe_allow_html=True,
         )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        _image(os.path.join(result['save_dir'], "node_type_summary.png"), "Node-type importance")
-    with col2:
-        _image(os.path.join(result['save_dir'], "explanation_subgraph.png"), "Explanation subgraph")
-
     # Human-readable identifiers (activity names / real OCEL ids), cheap graph lookup.
     graph = explainer._locate_test_graph(order_id, result['n_events'])
     id_map = explainer._decode_all_identifiers(graph, order_id, result['n_events'])
 
     node_rows = result.get('node_importances') or []
     if node_rows:
-        st.subheader("Top nodes")
         df = pd.DataFrame(
             node_rows,
             columns=['node_type', 'node_idx', 'shift_seconds', 'large_shift', 'signed_shift_seconds'],
-        )
+        ).head(top_k)
         df['signed_shift_hours'] = df['signed_shift_seconds'] / 3600.0
+        std_lookup = {(nt, idx): sd / 3600.0 for nt, idx, sd in result.get('node_shapley_std', [])}
+        df['std_hours'] = [std_lookup.get((nt, idx), 0.0)
+                           for nt, idx in zip(df['node_type'], df['node_idx'])]
         df['identifier'] = df.apply(
             lambda r: id_map.get((r['node_type'], r['node_idx']), f"{r['node_type']}[{r['node_idx']}]"),
             axis=1,
         )
-        st.dataframe(df[['node_type', 'node_idx', 'identifier', 'signed_shift_hours', 'large_shift']]
-                     .head(top_k), width='stretch')
+        render_trace_node_bars(df, result, order_id, top_k)
+
+        st.subheader("Top nodes")
+        st.dataframe(df[['node_type', 'node_idx', 'identifier', 'signed_shift_hours', 'std_hours',
+                         'large_shift']], width='stretch', hide_index=True)
 
     edge_rows = result.get('edge_importances') or []
     if edge_rows:
@@ -242,6 +242,23 @@ def render_perturbation_trace(result, cached, explainer, order_id, top_k):
 
     with st.expander("Explanation quality metrics"):
         st.json(result['metrics'])
+
+
+def render_trace_node_bars(df, result, order_id, top_k):
+    """Showcase-style bar chart (as loo_shapley_trace_showcase.png): the trace's top-K
+    Shapley-quantified nodes, labelled "Type: identifier", with ±1 std whiskers across the
+    sampler's permutations (same n for every bar, so it goes in the title)."""
+    n = result.get('n_samples', 100)
+    png = os.path.join(result['save_dir'], f"top_nodes_shapley_k{top_k}.png")
+    charts.plot_shapley_bars(
+        [f"{nt}: {ident}" for nt, ident in zip(df['node_type'], df['identifier'])],
+        df['signed_shift_hours'].tolist(), df['std_hours'].tolist(), [n] * len(df), png,
+        title=f"Top {top_k} nodes by Shapley value, #{order_id} "
+              f"(whiskers = ±1 std across {n} sampled permutations)",
+        show_n=False)
+    st.subheader(f"Top {top_k} nodes by Shapley value")
+    _image(png)
+    st.caption("Red pushes the predicted remaining time later, blue earlier.")
 
 
 def render_top_features_by_attribution(explainer, graph, id_map, result, order_id, top_k):
@@ -335,10 +352,14 @@ def render_perturbation_aggregate(explainer, slug, top_k):
         df = pd.read_csv(csv_path)
         top = df.sort_values('mean_signed_shift', key=abs, ascending=False).head(top_k)
         png = os.path.join(out, f"aggregate_{what}_top{top_k}.png")
-        explainer.plot_top_features_bar(top['label'].tolist(), top['mean_signed_shift'].tolist(),
-                                        png, title=f"Top {top_k} {what} by aggregate value",
-                                        xlabel="Shift in Hours")
+        charts.plot_shapley_bars(
+            top['label'].tolist(), top['mean_signed_shift'].tolist(), top['std_shift'].tolist(),
+            top['count'].astype(int).tolist(), png,
+            title=f"Top {top_k} {what} by aggregate Shapley value "
+                  f"(whiskers = ±1 std across revisits; none when n=1)")
         _image(png)
+        st.caption("Red pushes the predicted remaining time later, blue earlier; "
+                   "n = traces revisited for the Shapley value.")
         st.dataframe(top.rename(columns={'mean_signed_shift': 'mean_signed_shift_h',
                                          'std_shift': 'std_shift_h',
                                          'count': 'traces_containing'}),
