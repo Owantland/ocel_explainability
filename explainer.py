@@ -7,8 +7,10 @@ from torch_geometric.explain import Explainer as PyGExplainer, CaptumExplainer, 
 
 
 class Explainer(Modelling):
-    def __init__(self, database, cant):
-        super().__init__(database, cant)
+    def __init__(self, database, cant, kpi_event=None, graph_dir=None):
+        # kpi_event/graph_dir: optional per-KPI overrides (see SupportFunctions.__init__);
+        # None keeps config.yml's KPI and graph cache.
+        super().__init__(database, cant, kpi_event=kpi_event, graph_dir=graph_dir)
         # Found via direct investigation: identical inputs (bit-identical node features
         # and edges, confirmed directly) + identical, fully state_dict-matched weights
         # still produced different raw model outputs across separate Explainer()
@@ -1912,7 +1914,7 @@ class Explainer(Modelling):
 
     def explain_counterfactual(self, order_id, target_band='opposite', n_results=3,
                                 min_candidates=5, n_events=None, min_gap_hours=0.0,
-                                direction='lower'):
+                                direction='lower', save_dir=None):
         """Print counterfactual comparison for a given order and save a node-type bar chart.
 
         n_events: None (default) explains the order's last recorded prefix; an int
@@ -1977,8 +1979,10 @@ class Explainer(Modelling):
 
         # Save bar chart for top CF. Namespace partial-prefix runs by n_events so they
         # never clobber an existing last-event run's output directory for this order.
+        # save_dir: None (default) keeps the usual explainer_path/order_<id>[_evN]_cf folder.
         suffix = f"_ev{n_events}" if n_events is not None else ""
-        save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}{suffix}_cf")
+        if save_dir is None:
+            save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}{suffix}_cf")
         os.makedirs(save_dir, exist_ok=True)
         self._plot_cf_node_comparison(query_graph, results[0]['graph'], order_id,
                                       results[0]['order_id'], save_dir)
@@ -3087,9 +3091,13 @@ class Explainer(Modelling):
         """Run the given Captum attribution method via PyG's Explainer; return signed
         per-type attribution arrays."""
         node_types = list(graph.node_types)
-        x_dict = {nt: graph[nt].x for nt in node_types}
+        # Same cpu-vs-mps fix as _predict_value_for_graph(): test graphs load on CPU, and
+        # only end up on the model's device if some earlier prediction happened to move them
+        # (HeteroData.to() is in place) -- e.g. the dashboard's cache-hit path calls this first.
+        x_dict = {nt: graph[nt].x.to(self.device) for nt in node_types}
+        edge_index_dict = {et: ei.to(self.device) for et, ei in graph.edge_index_dict.items()}
         try:
-            explanation = self._get_pyg_explainer(method)(x_dict, graph.edge_index_dict, index=0)
+            explanation = self._get_pyg_explainer(method)(x_dict, edge_index_dict, index=0)
         except Exception as exc:
             print(f"    {method} failed: {exc}")
             return {}
