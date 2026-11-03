@@ -70,10 +70,26 @@ PYTHONPATH=. python3 debug_scripts/sanity_check.py --database order_management -
 ```
 PYTHONPATH=. streamlit run dashboard/app.py
 ```
-Explores the held-out test set of a trained model interactively (case
-picker + global/local explanation views) — not a live process-monitoring
-feed. Optionally pre-warm its cache before a live demo with
-`PYTHONPATH=. python3 dashboard/precompute.py`.
+Explores the held-out test set of a trained model interactively — not a
+live process-monitoring feed. Pick any of the five KPIs in the sidebar
+(registry: `dashboard/kpis.py`; each KPI loads its own graph cache, so no
+`config.yml` edit or cache swap is needed), then:
+
+- **Perturbation → Single trace**: LOO identification + Shapley
+  quantification for one trace at any prefix length, plus an
+  attribution-vs-Shapley feature comparison.
+- **Perturbation → Aggregate**: top-K nodes/features from the KPI's
+  precomputed last-event aggregate (read-only; the all-prefix/normalized
+  global Shapley analyses are not shown).
+- **Counterfactual**: the most similar test-set trace with a contrasting
+  prediction, drawn as a union graph; "Load curated example" opens the
+  thesis example for the KPI.
+
+Optionally pre-warm the single-trace cache before a live demo with
+`PYTHONPATH=. python3 dashboard/precompute.py` (add `--kpi <slug>` to limit
+it to one KPI). Dashboard outputs go to
+`files/explainer_outputs/<db>/dashboard/<task_id>/`, never into the
+thesis-cited folders.
 
 ## Repo map
 

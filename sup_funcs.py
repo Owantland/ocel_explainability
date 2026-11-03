@@ -25,9 +25,15 @@ def _require(cfg, key, database):
     return cfg[key]
 
 class SupportFunctions:
-    def __init__(self, database, cant):
+    def __init__(self, database, cant, kpi_event=None, graph_dir=None):
+        """kpi_event / graph_dir: optional overrides of config.yml's kpi_event and of the
+        cant-suffixed pytorch_path, so a KPI whose graph cache lives in a *_backup folder can be
+        loaded without swapping config.yml or the cache files (used by the dashboard's KPI
+        registry). None (default) keeps config.yml's values -- unchanged behavior."""
         self.database = database
         self.cant = cant
+        self.kpi_event_override = kpi_event
+        self.graph_dir_override = graph_dir
         self.path_dict = self.get_paths()
         conn = sqlite3.connect(self.path_dict['ocel_path'])
         self.cursor = conn.cursor()
@@ -68,6 +74,15 @@ class SupportFunctions:
         # Validate that explainer path exists
         if not os.path.exists(path_dict['explainer_path']):
             os.makedirs(path_dict['explainer_path'])
+
+        # Optional per-KPI overrides (see __init__). Applied last so they win over config.yml
+        # and over the cant suffixing above; a missing graph_dir is an error, not a mkdir.
+        if self.kpi_event_override is not None:
+            path_dict['kpi_event'] = self.kpi_event_override
+        if self.graph_dir_override is not None:
+            if not os.path.isdir(self.graph_dir_override):
+                raise FileNotFoundError(f"graph_dir override not found: {self.graph_dir_override}")
+            path_dict['pytorch_path'] = self.graph_dir_override.rstrip('/') + '/'
         return path_dict
 
     def col_names(self, table_name):

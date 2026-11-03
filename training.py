@@ -20,7 +20,8 @@ import matplotlib.pyplot as plt
 import copy
 
 class Modelling:
-    def __init__(self, database, cant, seed=42, target_transform='zscore'):
+    def __init__(self, database, cant, seed=42, target_transform='zscore', kpi_event=None,
+                 graph_dir=None):
         """
         :param target_transform: 'zscore' (default, unchanged behavior -- every currently-cited
             checkpoint was trained this way) or 'log1p'. 'log1p' applies log1p() to the raw
@@ -35,7 +36,8 @@ class Modelling:
         self.database = database
         self.cant = cant
         self.init_seed = seed  # only affects model weight init below, not training-loop seeding
-        self.funcs = sf.SupportFunctions(database, cant)
+        # kpi_event/graph_dir: optional per-KPI overrides, see SupportFunctions.__init__.
+        self.funcs = sf.SupportFunctions(database, cant, kpi_event=kpi_event, graph_dir=graph_dir)
         self.path_dict = self.funcs.get_paths()
         self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
         self.kpi_viewpoint = self.path_dict['kpi_viewpoint']
