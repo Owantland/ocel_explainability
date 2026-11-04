@@ -28,8 +28,12 @@ top10_grid_<kpi>_<kind>.{png,csv}. In files/explainer_outputs/:
 caches CURRENTLY point at (it checks task_id), so Depart and PackageDelivered need their
 caches swapped in first, as for loo_shapley_trace_showcase.py.
 
+--window runs further disjoint 50-execution windows (sample-stability check; analysed by
+global_shapley_sample_stability.py); window 0 is the original run the figures show.
+
 Usage:
     PYTHONPATH=. python3 thesis_scripts/global_shapley_methods_showcase.py --collect om_payorder
+    PYTHONPATH=. python3 thesis_scripts/global_shapley_methods_showcase.py --collect om_payorder --window 1 2
     PYTHONPATH=. python3 thesis_scripts/global_shapley_methods_showcase.py --collect om_payorder --only norm_total
     PYTHONPATH=. python3 thesis_scripts/global_shapley_methods_showcase.py            # plots, all KPIs
     PYTHONPATH=. python3 thesis_scripts/global_shapley_methods_showcase.py --kpi iot_evaluatetruckexit
@@ -86,12 +90,15 @@ DESCRIPTIONS = {
 }
 
 
-def run_dirs(database, task_id):
-    return {"flat": run_dir(database, task_id, "flat", REVISIT_N),
-            "norm_total": method_dir(database, task_id, "total_duration")}
+def run_dirs(database, task_id, window=0, tag=""):
+    # Window 0 (the first N_TRACES last-event executions) keeps the original directories;
+    # window w > 0 covers executions [w*N_TRACES, (w+1)*N_TRACES) in a _w<w> sibling.
+    suffix = (f"_w{window}" if window else "") + tag
+    return {"flat": run_dir(database, task_id, "flat", REVISIT_N) + suffix,
+            "norm_total": method_dir(database, task_id, "total_duration") + suffix}
 
 
-def collect(kpi, only=None):
+def collect(kpi, only=None, windows=(0,), tag=""):
     import torch
     import explainer as exp
 
@@ -101,15 +108,17 @@ def collect(kpi, only=None):
         raise SystemExit(f"config.yml points at {e.task_id}, expected {task_id}")
     e.model.load_state_dict(torch.load(e.model_path, weights_only=False))
     e.model.eval()
-    dirs = run_dirs(database, task_id)
     kwargs = {"flat": dict(pooling="flat"),
               "norm_total": dict(pooling=POOLING, normalize="total_duration")}
-    for method, _ in METHODS:
-        if only and method != only:
-            continue
-        print(f"\n=== {kpi} / {method} -> {dirs[method]}", flush=True)
-        e.explain_aggregate_shapley(n_traces=N_TRACES, scope="all_prefixes", revisit_n=REVISIT_N,
-                                    save_dir=dirs[method], **kwargs[method])
+    for window in windows:
+        dirs = run_dirs(database, task_id, window, tag)
+        for method, _ in METHODS:
+            if only and method != only:
+                continue
+            print(f"\n=== {kpi} / window {window} / {method} -> {dirs[method]}", flush=True)
+            e.explain_aggregate_shapley(n_traces=N_TRACES, scope="all_prefixes",
+                                        revisit_n=REVISIT_N, save_dir=dirs[method],
+                                        execution_offset=window * N_TRACES, **kwargs[method])
 
 
 def _node_type(label, kind):
@@ -401,9 +410,14 @@ if __name__ == "__main__":
                         help="run both methods for this KPI (config.yml must point at it)")
     parser.add_argument("--only", choices=[m for m, _ in METHODS],
                         help="with --collect: run just this method")
+    parser.add_argument("--window", type=int, nargs="+", default=[0],
+                        help="with --collect: execution window(s); w covers last-event test "
+                             "executions [w*N_TRACES, (w+1)*N_TRACES). 0 = the original runs")
+    parser.add_argument("--tag", default="",
+                        help="with --collect: extra run-directory suffix (e.g. a rerun check)")
     parser.add_argument("--kpi", choices=list(KPIS), help="plot just this KPI")
     args = parser.parse_args()
     if args.collect:
-        collect(args.collect, args.only)
+        collect(args.collect, args.only, args.window, args.tag)
     else:
         plot([args.kpi] if args.kpi else list(KPIS))
