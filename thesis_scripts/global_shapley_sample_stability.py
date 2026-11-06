@@ -19,6 +19,15 @@ and IoT (2 windows). This script compares the windows of each KPI × method × k
                           executions adds no more noise than revisiting them; >1: the
                           windows genuinely disagree)
   n_persistent            labels in the top 10 of EVERY window
+  low_support_share       share of a window's top-20 labels found in < MIN_SUPPORT of its
+                          executions (one truck, one customer, one item...)
+  jaccard_top20_supported / spearman_supported
+                          the same two metrics with the top 20 re-picked by |pooled LOO mean|
+                          among labels in >= MIN_SUPPORT executions only: how stable the
+                          ranking is once rare instances are set aside (a selection-only
+                          check, these labels are not Shapley-requantified). When fewer than
+                          20 labels clear the bar, both windows may pick the same short list,
+                          so a Jaccard of 1.0 there is not informative on its own
 
 Pairwise metrics are averaged over window pairs (min/max kept for the whiskers).
 
@@ -50,6 +59,7 @@ from thesis_scripts.global_shapley_weighting_comparison import KINDS, _short
 
 OUT_DIR = "files/explainer_outputs/global_shapley_sample_stability"
 MAX_WINDOWS = 6
+MIN_SUPPORT = 5  # executions, of N_TRACES = 50
 # Window-0 directory tag per KPI. Depart's original window-0 run decoded labels against
 # LoadToVehicle's ocel.csv (only the graph tensors were swapped); _csvfix reruns it with
 # Depart's own CSVs, the same way its other windows were collected.
@@ -86,7 +96,15 @@ def pair_metrics(a, b):
     shared = sorted((t20a | t20b) & occ_a & occ_b)
     va, vb = la.reindex(shared).values, lb.reindex(shared).values
     rho = spearmanr(va, vb).statistic if len(shared) >= 3 else np.nan
-    return {"jaccard_top20": _jaccard(t20a, t20b), "jaccard_top10": _jaccard(t10a, t10b),
+    sup_a, sup_b = (l[l.n_executions >= MIN_SUPPORT] for l in (loo_a, loo_b))
+    s20a, s20b = (set(l.loc[l.loo_mean.abs().sort_values(ascending=False).index].label.head(TOP_N))
+                  for l in (sup_a, sup_b))
+    s_shared = sorted((s20a | s20b) & set(sup_a.label) & set(sup_b.label))
+    s_rho = (spearmanr(la.reindex(s_shared).values, lb.reindex(s_shared).values).statistic
+             if len(s_shared) >= 3 else np.nan)
+    return {"jaccard_top20_supported": _jaccard(s20a, s20b) if s20a | s20b else np.nan,
+            "spearman_supported": s_rho, "n_supported": (len(sup_a) + len(sup_b)) / 2,
+            "jaccard_top20": _jaccard(t20a, t20b), "jaccard_top10": _jaccard(t10a, t10b),
             "present_elsewhere": (len(t20a & occ_b) + len(t20b & occ_a)) / (len(t20a) + len(t20b)),
             "spearman": rho,
             "sign_agreement": float(np.mean(np.sign(va) == np.sign(vb))) if shared else np.nan,
@@ -121,8 +139,12 @@ def analyse(kpi, runs_by_method):
             ratio = (across / within.reindex(across.index)).replace([np.inf], np.nan).dropna()
             persistent = set.intersection(*(set(runs[w][0].label.head(GRID_N)) for w in ws))
             row = dict(kpi=kpi, method=method, kind=kind, n_windows=len(ws))
+            low = [(runs[w][1].set_index("label").n_executions
+                    .reindex(runs[w][0].label.head(TOP_N)) < MIN_SUPPORT).mean() for w in ws]
+            row["low_support_share"] = float(np.mean(low))
+            row["n_supported"] = prs.n_supported.mean()
             for col in ["jaccard_top20", "jaccard_top10", "present_elsewhere", "spearman",
-                        "sign_agreement"]:
+                        "sign_agreement", "jaccard_top20_supported", "spearman_supported"]:
                 row[col] = prs[col].mean()
                 row[col + "_min"], row[col + "_max"] = prs[col].min(), prs[col].max()
             row.update(spread_ratio=ratio.median() if len(ratio) else np.nan,
@@ -143,11 +165,12 @@ def _style(ax):
 
 
 def plot_overview(summary, path):
-    metrics = [("jaccard_top20", "Top-20 Jaccard"), ("spearman", "Spearman ρ (pooled LOO)"),
-               ("sign_agreement", "Sign agreement")]
+    metrics = [("jaccard_top20", "Top-20 Jaccard"),
+               ("jaccard_top20_supported", f"Top-20 Jaccard, labels in ≥{MIN_SUPPORT} executions"),
+               ("spearman", "Spearman ρ (pooled LOO)"), ("sign_agreement", "Sign agreement")]
     kinds = [k for k, _, _ in KINDS]
     kpis = [k for k in KPIS if k in set(summary.kpi)]
-    fig, axes = plt.subplots(len(kinds), len(metrics), figsize=(13, 2.2 + 0.55 * len(kpis) * len(kinds)),
+    fig, axes = plt.subplots(len(kinds), len(metrics), figsize=(17, 2.2 + 0.55 * len(kpis) * len(kinds)),
                              sharey=True, squeeze=False)
     offsets = {"flat": -0.14, "norm_total": 0.14}
     for r, kind in enumerate(kinds):
@@ -172,11 +195,11 @@ def plot_overview(summary, path):
             ax.set_yticks(range(len(kpis)))
             ax.set_yticklabels([f"{KPI_NAMES[k]} ({int(summary[summary.kpi == k].n_windows.iloc[0])} win.)"
                                 for k in kpis])
-            ax.invert_yaxis() if c == 0 else None
             if r == 0:
                 ax.set_title(name, fontsize=10, color=INK)
             if c == 0:
                 ax.set_ylabel(kind, fontsize=10, color=INK)
+    axes[0, 0].invert_yaxis()  # shared y: invert once, first KPI on top
     fig.legend(loc="upper center", ncol=2, frameon=False, fontsize=9, bbox_to_anchor=(0.5, 1.0))
     fig.suptitle("Global Shapley across disjoint 50-execution windows "
                  "(dot = mean over window pairs, bar = min–max)", fontsize=11, color=INK, y=1.04)
@@ -304,7 +327,8 @@ def main():
     with pd.option_context("display.width", 200, "display.max_columns", 30):
         print(summary[["kpi", "method", "kind", "n_windows", "jaccard_top20", "jaccard_top10",
                        "present_elsewhere", "spearman", "sign_agreement", "spread_ratio",
-                       "n_persistent"]].round(2).to_string(index=False))
+                       "n_persistent", "low_support_share", "n_supported",
+                       "jaccard_top20_supported", "spearman_supported"]].round(2).to_string(index=False))
 
 
 if __name__ == "__main__":
