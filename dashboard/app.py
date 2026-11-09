@@ -264,7 +264,8 @@ def render_trace_node_bars(df, result, order_id, top_k):
 def render_top_features_by_attribution(explainer, graph, id_map, result, order_id, top_k):
     """Top-K (node, feature) pairs across the whole trace by |InputXGradient attribution|,
     next to the Shapley value of the SAME features -- a feature-for-feature comparison of
-    the two methods. Computed live (one backward pass + one Shapley sweep per node)."""
+    the two methods. Computed live (one backward pass + one Shapley sweep per node); the
+    sweeps run batched (many coalitions per forward pass), ~seconds instead of minutes."""
     masks = explainer._compute_attribution_for_graph(graph, method='InputXGradient')
     rows = []
     for node_type, arr in masks.items():
@@ -287,7 +288,8 @@ def render_top_features_by_attribution(explainer, graph, id_map, result, order_i
     shapley_lookup = {}
     for node_type, node_idx in df[['node_type', 'node_idx']].drop_duplicates().itertuples(index=False):
         feats = explainer.shapley_feature_importance_for_node(
-            graph, node_type, node_idx, baseline_seconds, target_object_idx=0, n_samples=100
+            graph, node_type, node_idx, baseline_seconds, target_object_idx=0, n_samples=100,
+            batched=True,
         )
         shapley_lookup[(node_type, node_idx)] = {f: sv / 3600.0 for f, sv in feats.items()}
     df['shapley_value_hours'] = df.apply(

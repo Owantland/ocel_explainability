@@ -45,6 +45,43 @@ class Explainer(Modelling):
         denorm = out * self.target_std + self.target_mean
         return denorm[object_idx].item()
 
+    @torch.no_grad()
+    def _predict_values_batched(self, graph, object_idx, x_overrides, chunk_size=64):
+        """Predictions for many feature-perturbed copies of one graph, chunk_size copies per
+        forward pass instead of one -- same values as calling _predict_value_for_graph on
+        each copy (up to float noise): the copies are stacked as disjoint components of one
+        big graph, and the HGT's output is per viewpoint node with no pooling, so no message
+        crosses between copies. x_overrides is a list of {node_type: x} dicts, one per copy;
+        node types not in a copy's dict keep graph's own features. Returns a list of floats.
+
+        Copies are assembled on the CPU and moved over once per chunk: building thousands of
+        them with small in-place writes directly on MPS failed with a spurious
+        kIOGPUCommandBufferCallbackErrorOutOfMemory (and NaN outputs) on a 33-node graph."""
+        x_cpu = {nt: graph[nt].x.detach().cpu() for nt in graph.node_types}
+        x_dict = {nt: x.to(self.device) for nt, x in x_cpu.items()}
+        ei_dict = {et: ei.to(self.device) for et, ei in graph.edge_index_dict.items()}
+        n_view = x_dict[self.model.viewpoint].size(0)
+        values = []
+        for start in range(0, len(x_overrides), chunk_size):
+            chunk = x_overrides[start:start + chunk_size]
+            b = len(chunk)
+            bx = {}
+            for nt, x in x_dict.items():
+                if any(nt in o for o in chunk):
+                    bx[nt] = torch.cat([o[nt].cpu() if nt in o else x_cpu[nt]
+                                        for o in chunk]).to(self.device)
+                else:
+                    bx[nt] = x.repeat(b, 1)
+            bei = {}
+            for (src, rel, dst), ei in ei_dict.items():
+                offs = torch.arange(b, device=self.device)
+                shift = torch.stack([offs * x_dict[src].size(0), offs * x_dict[dst].size(0)])
+                bei[(src, rel, dst)] = (ei.unsqueeze(1) + shift.unsqueeze(2)).reshape(2, -1)
+            out = self.model(bx, bei)
+            denorm = out * self.target_std + self.target_mean
+            values.extend(denorm.view(b, n_view, -1)[:, object_idx, 0].tolist())
+        return values
+
     def reg_feature_importance_for_node_in_graph(self, graph, node_type, node_idx, baseline_value,
                                                  target_object_idx, top_k=10):
         """Leave-one-out at the FEATURE level for regression."""
@@ -375,7 +412,8 @@ class Explainer(Modelling):
     # v(FullSet) is then exactly the real baseline_value, keeping the two methods
     # directly comparable on the same elements. See compare_loo_vs_shapley().
 
-    def _permutation_shapley(self, elements, value_fn, n_samples=100, return_std=False):
+    def _permutation_shapley(self, elements, value_fn, n_samples=100, return_std=False,
+                             batch_value_fn=None):
         """General permutation-sampling Shapley estimator: average, over n_samples
         random orderings of `elements`, each element's marginal contribution
         value_fn(prefix + [e]) - value_fn(prefix) at its position in that ordering.
@@ -386,16 +424,43 @@ class Explainer(Modelling):
         return_std: if True, also return each element's (population) std of its marginal
         contribution across the n_samples permutations -- how much its effect depends on
         which other candidates are present. Returns (means, stds) then; the shuffles drawn
-        and the means are identical either way."""
+        and the means are identical either way.
+
+        batch_value_fn: optional list-of-coalitions -> list-of-values version of value_fn.
+        If given, every distinct coalition is evaluated through it in one go (same shuffles,
+        same accumulation) -- much faster when it batches forward passes."""
         import math
         import random
+
+        if batch_value_fn is not None:
+            # Same shuffles in the same order, but every coalition the permutations visit is
+            # evaluated up front in batches (the walk never depends on the values), then
+            # accumulated exactly as below.
+            perms = []
+            for _ in range(n_samples):
+                perm = list(elements)
+                random.shuffle(perm)
+                perms.append(perm)
+            coalitions = {frozenset()}
+            for perm in perms:
+                for i in range(1, len(perm) + 1):
+                    coalitions.add(frozenset(perm[:i]))
+            coalitions = list(coalitions)
+            cache = dict(zip(coalitions, batch_value_fn(coalitions)))
+            value_fn = cache.__getitem__
+            perm_iter = iter(perms)
+        else:
+            perm_iter = None
 
         v_empty = value_fn(frozenset())
         totals = {e: 0.0 for e in elements}
         sq_totals = {e: 0.0 for e in elements}
         for _ in range(n_samples):
-            perm = list(elements)
-            random.shuffle(perm)
+            if perm_iter is not None:
+                perm = next(perm_iter)
+            else:
+                perm = list(elements)
+                random.shuffle(perm)
             prefix, prev_value = [], v_empty
             for e in perm:
                 prefix.append(e)
@@ -433,7 +498,8 @@ class Explainer(Modelling):
                                          return_std=return_std)
 
     def shapley_feature_importance_for_node(self, graph, node_type, node_idx, baseline_value,
-                                            target_object_idx, feature_indices=None, n_samples=100):
+                                            target_object_idx, feature_indices=None, n_samples=100,
+                                            batched=False):
         """Feature-level Shapley values for one node's features -- the analogue of
         reg_feature_importance_for_node_in_graph(). Coalitions vary over that node's
         feature dimensions (feature_indices defaults to every nonzero feature,
@@ -453,7 +519,23 @@ class Explainer(Modelling):
                     perturbed[node_type].x[node_idx, f] = 0.0
             return self._predict_value_for_graph(graph, target_object_idx, perturbed_graph=perturbed)
 
-        return self._permutation_shapley(feature_indices, value_fn, n_samples=n_samples)
+        batch_value_fn = None
+        if batched:
+            # Opt-in (the dashboard uses it): same coalitions, evaluated many per forward pass
+            # via _predict_values_batched. Thesis callers keep the one-at-a-time path.
+            def batch_value_fn(coalitions):
+                x = graph[node_type].x.detach().cpu()  # build copies on CPU, see _predict_values_batched
+                overrides = []
+                for coalition in coalitions:
+                    px = x.clone()
+                    for f in feature_indices:
+                        if f not in coalition:
+                            px[node_idx, f] = 0.0
+                    overrides.append({node_type: px})
+                return self._predict_values_batched(graph, target_object_idx, overrides)
+
+        return self._permutation_shapley(feature_indices, value_fn, n_samples=n_samples,
+                                         batch_value_fn=batch_value_fn)
 
     def shapley_edge_importance(self, graph, object_idx, baseline_value, edge_keys, n_samples=100):
         """Edge-level Shapley values for a caller-supplied list of (edge_type, edge_idx)
