@@ -7,8 +7,11 @@ from torch_geometric.explain import Explainer as PyGExplainer, CaptumExplainer, 
 
 
 class Explainer(Modelling):
-    def __init__(self, database, cant):
-        super().__init__(database, cant)
+    def __init__(self, database, cant, kpi_event=None, graph_dir=None, test_only=False):
+        # kpi_event/graph_dir: optional per-KPI overrides (see SupportFunctions.__init__);
+        # None keeps config.yml's KPI and graph cache. test_only: see Modelling.__init__.
+        super().__init__(database, cant, kpi_event=kpi_event, graph_dir=graph_dir,
+                         test_only=test_only)
         # Found via direct investigation: identical inputs (bit-identical node features
         # and edges, confirmed directly) + identical, fully state_dict-matched weights
         # still produced different raw model outputs across separate Explainer()
@@ -42,6 +45,43 @@ class Explainer(Modelling):
         out = self.model(g.x_dict, g.edge_index_dict)
         denorm = out * self.target_std + self.target_mean
         return denorm[object_idx].item()
+
+    @torch.no_grad()
+    def _predict_values_batched(self, graph, object_idx, x_overrides, chunk_size=64):
+        """Predictions for many feature-perturbed copies of one graph, chunk_size copies per
+        forward pass instead of one -- same values as calling _predict_value_for_graph on
+        each copy (up to float noise): the copies are stacked as disjoint components of one
+        big graph, and the HGT's output is per viewpoint node with no pooling, so no message
+        crosses between copies. x_overrides is a list of {node_type: x} dicts, one per copy;
+        node types not in a copy's dict keep graph's own features. Returns a list of floats.
+
+        Copies are assembled on the CPU and moved over once per chunk: building thousands of
+        them with small in-place writes directly on MPS failed with a spurious
+        kIOGPUCommandBufferCallbackErrorOutOfMemory (and NaN outputs) on a 33-node graph."""
+        x_cpu = {nt: graph[nt].x.detach().cpu() for nt in graph.node_types}
+        x_dict = {nt: x.to(self.device) for nt, x in x_cpu.items()}
+        ei_dict = {et: ei.to(self.device) for et, ei in graph.edge_index_dict.items()}
+        n_view = x_dict[self.model.viewpoint].size(0)
+        values = []
+        for start in range(0, len(x_overrides), chunk_size):
+            chunk = x_overrides[start:start + chunk_size]
+            b = len(chunk)
+            bx = {}
+            for nt, x in x_dict.items():
+                if any(nt in o for o in chunk):
+                    bx[nt] = torch.cat([o[nt].cpu() if nt in o else x_cpu[nt]
+                                        for o in chunk]).to(self.device)
+                else:
+                    bx[nt] = x.repeat(b, 1)
+            bei = {}
+            for (src, rel, dst), ei in ei_dict.items():
+                offs = torch.arange(b, device=self.device)
+                shift = torch.stack([offs * x_dict[src].size(0), offs * x_dict[dst].size(0)])
+                bei[(src, rel, dst)] = (ei.unsqueeze(1) + shift.unsqueeze(2)).reshape(2, -1)
+            out = self.model(bx, bei)
+            denorm = out * self.target_std + self.target_mean
+            values.extend(denorm.view(b, n_view, -1)[:, object_idx, 0].tolist())
+        return values
 
     def reg_feature_importance_for_node_in_graph(self, graph, node_type, node_idx, baseline_value,
                                                  target_object_idx, top_k=10):
@@ -373,7 +413,8 @@ class Explainer(Modelling):
     # v(FullSet) is then exactly the real baseline_value, keeping the two methods
     # directly comparable on the same elements. See compare_loo_vs_shapley().
 
-    def _permutation_shapley(self, elements, value_fn, n_samples=100, rng=None):
+    def _permutation_shapley(self, elements, value_fn, n_samples=100, return_std=False,
+                             batch_value_fn=None, rng=None):
         """General permutation-sampling Shapley estimator: average, over n_samples
         random orderings of `elements`, each element's marginal contribution
         value_fn(prefix + [e]) - value_fn(prefix) at its position in that ordering.
@@ -381,28 +422,67 @@ class Explainer(Modelling):
         n_samples * len(elements) calls to value_fn -- one incremental evaluation
         per permutation step, not a re-evaluation from scratch per coalition.
 
+        return_std: if True, also return each element's (population) std of its marginal
+        contribution across the n_samples permutations -- how much its effect depends on
+        which other candidates are present. Returns (means, stds) then; the shuffles drawn
+        and the means are identical either way.
+
+        batch_value_fn: optional list-of-coalitions -> list-of-values version of value_fn.
+        If given, every distinct coalition is evaluated through it in one go (same shuffles,
+        same accumulation) -- much faster when it batches forward passes.
+
         rng: optional random.Random to draw orderings from. None keeps the old
         behaviour (the global `random` module), which callers such as
         explanation_quality_showcase.py seed themselves via random.seed()."""
+        import math
         import random
 
         if rng is None:
             rng = random
+        if batch_value_fn is not None:
+            # Same shuffles in the same order, but every coalition the permutations visit is
+            # evaluated up front in batches (the walk never depends on the values), then
+            # accumulated exactly as below.
+            perms = []
+            for _ in range(n_samples):
+                perm = list(elements)
+                rng.shuffle(perm)
+                perms.append(perm)
+            coalitions = {frozenset()}
+            for perm in perms:
+                for i in range(1, len(perm) + 1):
+                    coalitions.add(frozenset(perm[:i]))
+            coalitions = list(coalitions)
+            cache = dict(zip(coalitions, batch_value_fn(coalitions)))
+            value_fn = cache.__getitem__
+            perm_iter = iter(perms)
+        else:
+            perm_iter = None
+
         v_empty = value_fn(frozenset())
         totals = {e: 0.0 for e in elements}
+        sq_totals = {e: 0.0 for e in elements}
         for _ in range(n_samples):
-            perm = list(elements)
-            rng.shuffle(perm)
+            if perm_iter is not None:
+                perm = next(perm_iter)
+            else:
+                perm = list(elements)
+                rng.shuffle(perm)
             prefix, prev_value = [], v_empty
             for e in perm:
                 prefix.append(e)
                 new_value = value_fn(frozenset(prefix))
                 totals[e] += new_value - prev_value
+                sq_totals[e] += (new_value - prev_value) ** 2
                 prev_value = new_value
-        return {e: totals[e] / n_samples for e in elements}
+        means = {e: totals[e] / n_samples for e in elements}
+        if not return_std:
+            return means
+        stds = {e: math.sqrt(max(sq_totals[e] / n_samples - means[e] ** 2, 0.0)) for e in elements}
+        return means, stds
 
     def shapley_node_importance(self, graph, object_idx, baseline_value, node_keys, n_samples=100,
-                                rng=None):
+                                return_std=False, rng=None):
         """Node-level Shapley values for a caller-supplied list of (node_type, idx)
         keys -- same signature shape as _loo_shift_for_nodes() for direct
         comparability. Coalitions vary only over node_keys: nodes in node_keys but
@@ -421,11 +501,12 @@ class Explainer(Modelling):
                     perturbed[node_type].x[idx] = 0.0
             return self._predict_value_for_graph(graph, object_idx, perturbed_graph=perturbed)
 
-        return self._permutation_shapley(list(node_keys), value_fn, n_samples=n_samples, rng=rng)
+        return self._permutation_shapley(list(node_keys), value_fn, n_samples=n_samples,
+                                         return_std=return_std, rng=rng)
 
     def shapley_feature_importance_for_node(self, graph, node_type, node_idx, baseline_value,
                                             target_object_idx, feature_indices=None, n_samples=100,
-                                            rng=None):
+                                            batched=False, rng=None):
         """Feature-level Shapley values for one node's features -- the analogue of
         reg_feature_importance_for_node_in_graph(). Coalitions vary over that node's
         feature dimensions (feature_indices defaults to every nonzero feature,
@@ -445,7 +526,23 @@ class Explainer(Modelling):
                     perturbed[node_type].x[node_idx, f] = 0.0
             return self._predict_value_for_graph(graph, target_object_idx, perturbed_graph=perturbed)
 
-        return self._permutation_shapley(feature_indices, value_fn, n_samples=n_samples, rng=rng)
+        batch_value_fn = None
+        if batched:
+            # Opt-in (the dashboard uses it): same coalitions, evaluated many per forward pass
+            # via _predict_values_batched. Thesis callers keep the one-at-a-time path.
+            def batch_value_fn(coalitions):
+                x = graph[node_type].x.detach().cpu()  # build copies on CPU, see _predict_values_batched
+                overrides = []
+                for coalition in coalitions:
+                    px = x.clone()
+                    for f in feature_indices:
+                        if f not in coalition:
+                            px[node_idx, f] = 0.0
+                    overrides.append({node_type: px})
+                return self._predict_values_batched(graph, target_object_idx, overrides)
+
+        return self._permutation_shapley(feature_indices, value_fn, n_samples=n_samples,
+                                         batch_value_fn=batch_value_fn, rng=rng)
 
     def shapley_edge_importance(self, graph, object_idx, baseline_value, edge_keys, n_samples=100):
         """Edge-level Shapley values for a caller-supplied list of (edge_type, edge_idx)
@@ -1014,9 +1111,12 @@ class Explainer(Modelling):
         node_candidates = list(dict.fromkeys(flat_node_candidates + type_node_candidates))
         edge_candidates = [(et, e) for et, e, _, _, _ in edge_importances[:top_k]]
 
-        node_shapley = (self.shapley_node_importance(explain_subgraph, 0, baseline_value,
-                                                      node_candidates, n_samples=n_samples)
-                        if node_candidates else {})
+        # Std of each node's marginal contribution across the sampled permutations, kept
+        # for the dashboard's whiskers; the means are unchanged by return_std.
+        node_shapley, node_shapley_std = (
+            self.shapley_node_importance(explain_subgraph, 0, baseline_value, node_candidates,
+                                         n_samples=n_samples, return_std=True)
+            if node_candidates else ({}, {}))
         edge_shapley = (self.shapley_edge_importance(explain_subgraph, 0, baseline_value,
                                                       edge_candidates, n_samples=n_samples)
                         if edge_candidates else {})
@@ -1103,6 +1203,8 @@ class Explainer(Modelling):
             "seed_feature_importances": seed_feats,
             "top_neighbor_feature_importances": top_neighbor_feats,
             "top_nodes_per_type": top_per_type,
+            "node_shapley_std": [[nt, idx, sd] for (nt, idx), sd in node_shapley_std.items()],
+            "n_samples": n_samples,
             "metrics": metrics,
             "save_dir": save_dir,
         }
@@ -1940,7 +2042,7 @@ class Explainer(Modelling):
 
     def explain_counterfactual(self, order_id, target_band='opposite', n_results=3,
                                 min_candidates=5, n_events=None, min_gap_hours=0.0,
-                                direction='lower'):
+                                direction='lower', save_dir=None):
         """Print counterfactual comparison for a given order and save a node-type bar chart.
 
         n_events: None (default) explains the order's last recorded prefix; an int
@@ -2005,8 +2107,10 @@ class Explainer(Modelling):
 
         # Save bar chart for top CF. Namespace partial-prefix runs by n_events so they
         # never clobber an existing last-event run's output directory for this order.
+        # save_dir: None (default) keeps the usual explainer_path/order_<id>[_evN]_cf folder.
         suffix = f"_ev{n_events}" if n_events is not None else ""
-        save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}{suffix}_cf")
+        if save_dir is None:
+            save_dir = os.path.join(self.path_dict['explainer_path'], f"order_{order_id}{suffix}_cf")
         os.makedirs(save_dir, exist_ok=True)
         self._plot_cf_node_comparison(query_graph, results[0]['graph'], order_id,
                                       results[0]['order_id'], save_dir)
@@ -3115,9 +3219,13 @@ class Explainer(Modelling):
         """Run the given Captum attribution method via PyG's Explainer; return signed
         per-type attribution arrays."""
         node_types = list(graph.node_types)
-        x_dict = {nt: graph[nt].x for nt in node_types}
+        # Same cpu-vs-mps fix as _predict_value_for_graph(): test graphs load on CPU, and
+        # only end up on the model's device if some earlier prediction happened to move them
+        # (HeteroData.to() is in place) -- e.g. the dashboard's cache-hit path calls this first.
+        x_dict = {nt: graph[nt].x.to(self.device) for nt in node_types}
+        edge_index_dict = {et: ei.to(self.device) for et, ei in graph.edge_index_dict.items()}
         try:
-            explanation = self._get_pyg_explainer(method)(x_dict, graph.edge_index_dict, index=0)
+            explanation = self._get_pyg_explainer(method)(x_dict, edge_index_dict, index=0)
         except Exception as exc:
             print(f"    {method} failed: {exc}")
             return {}

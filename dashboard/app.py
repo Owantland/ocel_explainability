@@ -1,10 +1,18 @@
 """Interactive dashboard for the perturbation-analysis explainability layer.
 
-Explores the held-out TEST SET of a trained HGT model -- this is NOT a live
-process-monitoring feed; every order shown here is from an already-completed
-trace, not an in-progress case (unlike Galanti et al. 2023b's IBM Process Mining
-dashboard, which this loosely follows for presentation style: a case picker plus
-Global/Local explanation views).
+Explores the held-out TEST SET of a trained HGT model, for any of the five analysed KPIs
+(dashboard/kpis.py) -- not a live process-monitoring feed; every trace shown is already
+completed (presentation loosely follows Galanti et al. 2023b: a case picker plus
+local/aggregate explanation views).
+
+Two modes:
+  * Perturbation -- LOO identification + Shapley quantification:
+      - Single trace: explain_trace_shapley() on one trace prefix (cached on disk).
+      - Aggregate: the precomputed LAST-EVENT aggregate (explain_aggregate_shapley(),
+        scope='last_event') read from each KPI's own output folder. The all-prefix /
+        time-normalized global Shapley analyses are deliberately not shown here.
+  * Counterfactual -- explain_counterfactual(): the most similar test-set trace with a
+    contrasting prediction, shown as a single-panel union graph.
 
 Run with (from repo root): PYTHONPATH=. streamlit run dashboard/app.py
 """
@@ -14,39 +22,46 @@ import pandas as pd
 import streamlit as st
 
 from dashboard import cache as dc
-from dashboard import precompute as dpc
-import explainer as exp
+from dashboard import charts
+from dashboard import kpis
 
-DATASETS = {
-    'order_management': 2000,
-    'logistics': 1000,
-}
 MODE_LABELS = {
-    'loo': 'Exhaustive LOO',
+    'perturbation': 'Perturbation (LOO + Shapley)',
     'cf': 'Counterfactual',
 }
+CF_EXAMPLES_CSV = "thesis_parts/figures_tables/cf_union_examples/selection.csv"
 
 st.set_page_config(page_title="Perturbation Analysis Explorer", layout="wide")
 
 
-@st.cache_resource
-def get_explainer(database, cant):
-    return exp.Explainer(database, cant)
+@st.cache_resource(show_spinner="Loading model and test set…")
+def get_explainer(slug):
+    return kpis.make_explainer(slug)
 
 
-def order_ids_for(explainer):
-    """Smaller, curated subset -- the same DEMO_N orders dashboard_precompute.py
-    already warms into dashboard_cache/, so the default (last-event) prefix view
-    for these orders stays cache-aligned instead of drifting into a second,
-    independent definition of "the demo set"."""
-    return dpc.demo_order_ids(explainer, dpc.DEMO_N)
+def curated_cf_example(slug):
+    """The KPI's curated 4-5-event counterfactual example (thesis_scripts/
+    cf_union_graph_examples.py), or None if that selection hasn't been generated."""
+    if not os.path.exists(CF_EXAMPLES_CSV):
+        return None
+    sel = pd.read_csv(CF_EXAMPLES_CSV)
+    rows = sel[sel['kpi'] == slug]
+    return None if rows.empty else rows.iloc[0].to_dict()
+
+
+def order_ids_for(explainer, slug):
+    """The first DEMO_N last-event test traces (the ones precompute.py warms), plus this
+    KPI's curated counterfactual example so it is always reachable from the picker."""
+    ids = kpis.demo_order_ids(explainer)
+    ex = curated_cf_example(slug)
+    if ex is not None and int(ex['query_id']) not in ids:
+        ids.append(int(ex['query_id']))
+    return ids
 
 
 def prefix_options_for(explainer, order_id):
-    """All valid n_events (event-count) prefixes recorded for this order in the
-    test split, ascending -- mirrors _locate_test_graph()'s own available-prefix
-    enumeration (explainer.py) so the picker only ever offers values guaranteed
-    to resolve to a real graph."""
+    """All n_events prefixes recorded for this trace in the test split, ascending --
+    mirrors _locate_test_graph()'s own enumeration, so every option resolves."""
     vp = explainer.kpi_viewpoint
     return sorted(
         g['Events'].x.size(0)
@@ -55,44 +70,34 @@ def prefix_options_for(explainer, order_id):
     )
 
 
-def compute_local(explainer, database, cant, mode, order_id,
-                   min_gap_hours=0.0, direction='lower', n_events=None, top_k=5):
-    # Ties a cached result to the exact model checkpoint that produced it -- found via
-    # direct investigation that a retrain silently orphans old cached predictions (e.g.
-    # predicted_hours) without this, since nothing about the cache key otherwise reflects
-    # which checkpoint the cached values came from.
-    checkpoint_fingerprint = int(os.path.getmtime(explainer.model_path))
-    if mode == 'loo':
-        # Shapley-based, not LOO, despite the mode name -- explain_trace_shapley()
-        # returns the same dict shape as explain_trace() (see its own docstring),
-        # so every downstream renderer/consumer here is unaffected. explain_trace()
-        # itself is untouched -- compare_loo_vs_shapley() and other citable
-        # pathways still call it directly.
-        compute_fn = lambda: explainer.explain_trace_shapley(order_id, top_k=top_k, n_events=n_events)
-        return dc.get_or_compute(database, cant, mode, order_id, compute_fn,
-                                 n_events=n_events, top_k=top_k,
-                                 checkpoint_fingerprint=checkpoint_fingerprint)
+def _trace_dir(explainer, order_id, n_events, tag):
+    suffix = f"_ev{n_events}" if n_events is not None else ""
+    return os.path.join(kpis.dashboard_dir(explainer), f"order_{order_id}{suffix}_{tag}")
 
-    if mode == 'cf':
-        # Deliberately NOT cached -- explain_counterfactual() returns a bare list of
-        # candidate dicts each holding a live PyG HeteroData (not JSON-serializable,
-        # and a different shape than the loo/gnn_primary dict return), so adapting it
-        # into dashboard_cache's schema isn't a clean fit. There's also a correctness
-        # reason, not just convenience: min_gap_hours/direction are themselves part of
-        # the query, so a result cached only by order_id would silently go stale the
-        # moment either control changes. find_counterfactuals() is a forward-pass sweep
-        # over the candidate pool (no 200-epoch optimization like GNNExplainer), so
-        # it's in the same "fast enough live" tier as this section's own top-K
-        # attribution/LOO comparison, not gnn_primary.
-        results = explainer.explain_counterfactual(order_id, min_gap_hours=min_gap_hours,
-                                                    direction=direction, n_events=n_events)
-        suffix = f"_ev{n_events}" if n_events is not None else ""
-        save_dir = os.path.join(explainer.path_dict['explainer_path'], f"order_{order_id}{suffix}_cf")
-        query_graph = explainer._locate_test_graph(order_id, n_events)
-        query_predicted_hours = explainer._predict_value_for_graph(query_graph, 0) / 3600.0
-        return {'results': results, 'save_dir': save_dir,
-                'query_predicted_hours': query_predicted_hours,
-                'n_events': query_graph['Events'].x.size(0)}, False
+
+def compute_perturbation(explainer, order_id, n_events, top_k):
+    checkpoint_fingerprint = int(os.path.getmtime(explainer.model_path))
+    save_dir = _trace_dir(explainer, order_id, n_events, "shapley")
+    return dc.get_or_compute(
+        kpis.cache_scope(explainer), dc.PERTURBATION_MODE, order_id,
+        lambda: explainer.explain_trace_shapley(order_id, top_k=top_k, n_events=n_events,
+                                                save_dir=save_dir),
+        n_events=n_events, top_k=top_k, checkpoint_fingerprint=checkpoint_fingerprint,
+    )
+
+
+def compute_counterfactual(explainer, order_id, n_events, min_gap_hours, direction):
+    # Not cached: the result holds live HeteroData graphs (not JSON-serializable), and
+    # min_gap_hours/direction are part of the query. A forward-pass sweep over the candidate
+    # pool, so fast enough to run live.
+    save_dir = _trace_dir(explainer, order_id, n_events, "cf")
+    results = explainer.explain_counterfactual(order_id, min_gap_hours=min_gap_hours,
+                                               direction=direction, n_events=n_events,
+                                               save_dir=save_dir)
+    query_graph = explainer._locate_test_graph(order_id, n_events)
+    return {'results': results, 'save_dir': save_dir,
+            'query_predicted_hours': explainer._predict_value_for_graph(query_graph, 0) / 3600.0,
+            'n_events': query_graph['Events'].x.size(0)}
 
 
 _TEMPORAL_LABELS = {
@@ -107,13 +112,9 @@ _VIEWPOINT_LABELS = {
 
 
 def humanize_feature_name(raw_name):
-    """Raw internal column name -> readable label, for features calculated
-    following Adams et al. 2022's OCEL feature-extraction definitions (temporal,
-    C3 activity-frequency counts, O1 object counts). Literal pass-through data
-    values (raw attribute columns, event/role/company/ID names) are left
-    unchanged -- they're not "calculated" features and mostly already read fine
-    as-is. Dashboard-display-only; explainer.py's own saved/thesis-citable PNGs
-    are unaffected (this is never applied there by default)."""
+    """Raw internal column name -> readable label, for features calculated following
+    Adams et al. 2022's OCEL feature-extraction definitions (temporal, C3 activity-frequency
+    counts, O1 object counts). Literal data values pass through unchanged. Display-only."""
     if raw_name in _TEMPORAL_LABELS:
         return _TEMPORAL_LABELS[raw_name]
     if raw_name in _VIEWPOINT_LABELS:
@@ -128,78 +129,103 @@ def humanize_feature_name(raw_name):
 
 
 def _characterization_color(score):
-    """Linear red->green interpolation for a characterization score in [0, 1],
-    reusing this project's own established increase/decrease palette (the same
-    hex pair plot_feature_importances()/plot_aggregate_explanation_bars() use in
-    explainer.py) rather than introducing a new one. Clamped defensively --
-    characterization_score is documented as bounded [0, 1] but isn't asserted
-    to be at the call site."""
+    """Linear red->green for a characterization score in [0, 1], using the project's
+    increase/decrease palette (same hex pair as explainer.py's bar charts)."""
     score = max(0.0, min(1.0, score))
     red = (0xd6, 0x27, 0x28)
     green = (0x2c, 0xa0, 0x2c)
-    r = round(red[0] + (green[0] - red[0]) * score)
-    g = round(red[1] + (green[1] - red[1]) * score)
-    b = round(red[2] + (green[2] - red[2]) * score)
+    r, g, b = (round(red[i] + (green[i] - red[i]) * score) for i in range(3))
     return f"rgb({r}, {g}, {b})"
 
 
-def render_local(result, cached, explainer, order_id, top_k=5):
+def _image(path, caption=None):
+    if os.path.exists(path):
+        st.image(path, caption=caption)
+
+
+# ---------------------------------------------------------------------------
+# Trace picker (shared by single-trace perturbation and counterfactual)
+# ---------------------------------------------------------------------------
+
+def pick_trace(explainer, slug):
+    """Order + prefix pickers. Widget keys are scoped per KPI (and per order for the prefix)
+    so switching KPI never carries a stale value over, and so the curated-example button can
+    set them by key. Returns (order_id, n_events) with n_events=None for the complete trace,
+    matching every explain_*() call's "last recorded prefix" convention (and precompute.py's
+    cache keys)."""
+    ids = order_ids_for(explainer, slug)
+    order_key = f"order_{slug}"
+    if st.session_state.get(order_key) not in ids:
+        st.session_state[order_key] = ids[0]
+    order_id = st.selectbox(f"{explainer.kpi_viewpoint} ID", ids, key=order_key)
+
+    prefix_opts = prefix_options_for(explainer, order_id)
+    last_prefix = prefix_opts[-1]
+    prefix_key = f"prefix_{slug}_{order_id}"
+    if st.session_state.get(prefix_key) not in prefix_opts:
+        st.session_state[prefix_key] = last_prefix
+    selected = st.select_slider(
+        "Prefix (events completed)", options=prefix_opts, key=prefix_key,
+        format_func=lambda n: f"{n} (complete)" if n == last_prefix else str(n),
+    )
+    return order_id, (None if selected == last_prefix else selected)
+
+
+def _load_curated_example(slug, ex):
+    """on_click callback: runs before the rerun, so widget state can still be set."""
+    order_id = int(ex['query_id'])
+    st.session_state[f"order_{slug}"] = order_id
+    st.session_state[f"prefix_{slug}_{order_id}"] = int(ex['query_events'])
+    st.session_state["cf_min_gap"] = float(ex['min_gap_h'])
+    st.session_state["cf_direction"] = "Below current prediction"
+    st.session_state.pop('result_ctx', None)
+
+
+# ---------------------------------------------------------------------------
+# Single-trace perturbation
+# ---------------------------------------------------------------------------
+
+def render_perturbation_trace(result, cached, explainer, order_id, top_k):
     st.caption("served from cache" if cached else "computed just now (now cached for next time)")
 
-    quality = result['metrics']
-    score = quality['characterization_score']
+    score = result['metrics']['characterization_score']
     metric_col, events_col, score_col = st.columns(3)
     with metric_col:
         st.metric("Predicted remaining time", f"{result['predicted_hours']:.1f} h")
     with events_col:
         st.metric("Events completed", str(result['n_events']))
     with score_col:
+        # No hard-coded label colour, so it stays readable in light and dark themes.
         st.markdown(
-            f"<div style='font-size: 0.875rem; color: white;'>"
-            f"Characterization score</div>"
+            "<div style='font-size: 0.875rem; opacity: 0.8;'>Characterization score</div>"
             f"<div style='font-size: 2.25rem; font-weight: 600; "
             f"color: {_characterization_color(score)};'>{score:.2f}</div>",
             unsafe_allow_html=True,
         )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        png = os.path.join(result['save_dir'], "node_type_summary.png")
-        if os.path.exists(png):
-            st.image(png, caption="Node-type importance")
-    with col2:
-        png = os.path.join(result['save_dir'], "explanation_subgraph.png")
-        if os.path.exists(png):
-            st.image(png, caption="Explanation subgraph")
-
-    # Human-readable identifier (Events activity name, or a real identity for any
-    # other encoding-listed type, real OCEL_ID from ocel.csv for everything
-    # else -- Items/Products/Packages/... now resolve to their actual
-    # database identifier, e.g. "i-880001", not a positional placeholder),
-    # same decoder explain_trace()'s console/CSV output already uses -- computed
-    # here (cheap graph lookup, no model inference) rather than inside the "Top
-    # nodes" block below, since the node-type/instance selectors further down
-    # need graph/id_map too, regardless of whether node_rows is non-empty.
+    # Human-readable identifiers (activity names / real OCEL ids), cheap graph lookup.
     graph = explainer._locate_test_graph(order_id, result['n_events'])
     id_map = explainer._decode_all_identifiers(graph, order_id, result['n_events'])
 
     node_rows = result.get('node_importances') or []
     if node_rows:
-        st.subheader("Top nodes")
         df = pd.DataFrame(
             node_rows,
             columns=['node_type', 'node_idx', 'shift_seconds', 'large_shift', 'signed_shift_seconds'],
-        )
-        df['shift_hours'] = df['shift_seconds'] / 3600.0
+        ).head(top_k)
         df['signed_shift_hours'] = df['signed_shift_seconds'] / 3600.0
+        std_lookup = {(nt, idx): sd / 3600.0 for nt, idx, sd in result.get('node_shapley_std', [])}
+        df['std_hours'] = [std_lookup.get((nt, idx), 0.0)
+                           for nt, idx in zip(df['node_type'], df['node_idx'])]
         df['identifier'] = df.apply(
-            lambda r: id_map.get((r['node_type'], r['node_idx']),
-                                 f"{r['node_type']}[{r['node_idx']}]"),
+            lambda r: id_map.get((r['node_type'], r['node_idx']), f"{r['node_type']}[{r['node_idx']}]"),
             axis=1,
         )
+        render_trace_node_bars(df, result, order_id, top_k)
 
-        df = df[['node_type', 'node_idx', 'identifier', 'signed_shift_hours', 'large_shift']]
-        st.dataframe(df.head(top_k), width='stretch')
+        st.subheader("Top nodes")
+        st.dataframe(df[['node_type', 'node_idx', 'identifier', 'signed_shift_hours', 'std_hours',
+                         'large_shift']], width='stretch', hide_index=True)
 
     edge_rows = result.get('edge_importances') or []
     if edge_rows:
@@ -210,25 +236,36 @@ def render_local(result, cached, explainer, order_id, top_k=5):
         )
         edf['signed_shift_hours'] = edf['signed_shift_seconds'] / 3600.0
         st.dataframe(edf[['edge_type', 'signed_shift_hours', 'large_shift']].head(top_k),
-                    width='stretch')
+                     width='stretch')
 
     render_top_features_by_attribution(explainer, graph, id_map, result, order_id, top_k)
 
-    st.subheader("Explanation quality (exhaustive sweep)")
-    st.json(result['metrics'])
+    with st.expander("Explanation quality metrics"):
+        st.json(result['metrics'])
+
+
+def render_trace_node_bars(df, result, order_id, top_k):
+    """Showcase-style bar chart (as loo_shapley_trace_showcase.png): the trace's top-K
+    Shapley-quantified nodes, labelled "Type: identifier", with ±1 std whiskers across the
+    sampler's permutations (same n for every bar, so it goes in the title)."""
+    n = result.get('n_samples', 100)
+    png = os.path.join(result['save_dir'], f"top_nodes_shapley_k{top_k}.png")
+    charts.plot_shapley_bars(
+        [f"{nt}: {ident}" for nt, ident in zip(df['node_type'], df['identifier'])],
+        df['signed_shift_hours'].tolist(), df['std_hours'].tolist(), [n] * len(df), png,
+        title=f"Top {top_k} nodes by Shapley value, #{order_id} "
+              f"(whiskers = ±1 std across {n} sampled permutations)",
+        show_n=False)
+    st.subheader(f"Top {top_k} nodes by Shapley value")
+    _image(png)
+    st.caption("Red pushes the predicted remaining time later, blue earlier.")
 
 
 def render_top_features_by_attribution(explainer, graph, id_map, result, order_id, top_k):
-    """Top-K (node, feature) pairs across the WHOLE trace, ranked by |attribution|
-    -- not scoped to one selected node. Computed live (no caching), same cost
-    tier as before: one Captum backward pass over the whole graph already
-    returns every node instance's own attribution vector -- flattening and
-    ranking it is cheap by comparison. Also shows the Shapley value for these
-    SAME features (not a separate re-ranking), so the two charts are a direct,
-    feature-for-feature comparison of what each method says about the identical
-    set. Was LOO before this was swapped to Shapley -- LOO's own
-    reg_feature_importance_for_node_in_graph() is untouched, still used
-    elsewhere (e.g. compare_loo_vs_shapley())."""
+    """Top-K (node, feature) pairs across the whole trace by |InputXGradient attribution|,
+    next to the Shapley value of the SAME features -- a feature-for-feature comparison of
+    the two methods. Computed live (one backward pass + one Shapley sweep per node); the
+    sweeps run batched (many coalitions per forward pass), ~seconds instead of minutes."""
     masks = explainer._compute_attribution_for_graph(graph, method='InputXGradient')
     rows = []
     for node_type, arr in masks.items():
@@ -245,23 +282,16 @@ def render_top_features_by_attribution(explainer, graph, id_map, result, order_i
                 })
     df = pd.DataFrame(rows).sort_values('abs', ascending=False).head(top_k)
 
-    # Shapley value for the SAME (node, feature) pairs attribution picked --
-    # baseline computed fresh (not from a cached result, see earlier stale-baseline fix),
-    # and grouped by node instance so each node's Shapley sweep runs once regardless of
-    # how many of its features made the top-K. feature_indices=None (not the page's
-    # top_k) so the sweep covers every one of that node's nonzero features -- otherwise
-    # the specific feature index needed could be truncated out of a smaller top-k slice.
+    # Fresh baseline (never a cached one), one Shapley sweep per distinct node; None only
+    # for an exactly-zero input feature (skipped by the Shapley zero-value guard).
     baseline_seconds = explainer._predict_value_for_graph(graph, 0)
     shapley_lookup = {}
     for node_type, node_idx in df[['node_type', 'node_idx']].drop_duplicates().itertuples(index=False):
         feats = explainer.shapley_feature_importance_for_node(
-            graph, node_type, node_idx, baseline_seconds, target_object_idx=0, n_samples=100
+            graph, node_type, node_idx, baseline_seconds, target_object_idx=0, n_samples=100,
+            batched=True,
         )
         shapley_lookup[(node_type, node_idx)] = {f: sv / 3600.0 for f, sv in feats.items()}
-    # None only for a feature whose input value is exactly 0 (skipped by the Shapley
-    # method's own zero-value guard, same as LOO's) -- rare in practice, since
-    # InputXGradient's own attribution for a zero-valued input is itself 0 and wouldn't
-    # usually rank in the top-K to begin with.
     df['shapley_value_hours'] = df.apply(
         lambda r: shapley_lookup.get((r['node_type'], r['node_idx']), {}).get(r['feature_idx']),
         axis=1,
@@ -269,335 +299,205 @@ def render_top_features_by_attribution(explainer, graph, id_map, result, order_i
 
     save_dir = result['save_dir']
     labels = [f"{r['node']}: {r['feature']}" for _, r in df.iterrows()]
-
     attr_png = os.path.join(save_dir, "top_features_attribution.png")
     explainer.plot_top_features_bar(labels, df['signed'].tolist(), attr_png,
-                                    title=f"Top {top_k} features by attribution, order #{order_id}")
-
+                                    title=f"Top {top_k} features by attribution, #{order_id}")
     shapley_png = os.path.join(save_dir, "top_features_shapley.png")
-    shapley_values = df['shapley_value_hours'].fillna(0.0).tolist()
-    explainer.plot_top_features_bar(labels, shapley_values, shapley_png,
-                                    title=f"Shapley value, same features, order #{order_id}",
+    explainer.plot_top_features_bar(labels, df['shapley_value_hours'].fillna(0.0).tolist(),
+                                    shapley_png,
+                                    title=f"Shapley value, same features, #{order_id}",
                                     xlabel="Shift in Hours")
 
     st.subheader(f"Top {top_k} features by attribution, compared against Shapley value")
     col1, col2 = st.columns(2)
     with col1:
-        if os.path.exists(attr_png):
-            st.image(attr_png)
+        _image(attr_png)
         st.caption("Feature attribution (InputXGradient)")
     with col2:
-        if os.path.exists(shapley_png):
-            st.image(shapley_png)
+        _image(shapley_png)
         st.caption("Shapley value (hours)")
-    st.dataframe(
-        df[['node_type', 'node', 'feature', 'signed', 'abs', 'shapley_value_hours']],
-        width='stretch',
-    )
+    st.dataframe(df[['node_type', 'node', 'feature', 'signed', 'abs', 'shapley_value_hours']],
+                 width='stretch')
 
 
+# ---------------------------------------------------------------------------
+# Aggregate perturbation (precomputed, last-event)
+# ---------------------------------------------------------------------------
 
-def render_local_cf(result, explainer):
-    """Counterfactual's result shape (a ranked list of candidate matches, not a
-    single prediction + node-importance table) doesn't fit render_local()'s
-    assumptions -- a separate render path."""
-    st.caption("Not cached -- recomputed on every click (threshold/direction are part "
-              "of the query, so a stale cache could silently answer the wrong question).")
+def render_perturbation_aggregate(explainer, slug, top_k):
+    """Dataset-wide top-K nodes / features from the KPI's precomputed last-event aggregate
+    (explain_aggregate_shapley(): exhaustive LOO identification over the first 50 last-event
+    test traces, then Shapley requantification of the top ~20 winners). Read-only: the CSVs
+    keep ~20 rows so the chart can be re-sliced to the current top-K live, with no model
+    inference; charts are written to the dashboard folder, never the thesis-cited one."""
+    src = kpis.aggregate_dir(slug)
+    out = os.path.join(kpis.dashboard_dir(explainer), "aggregate")
+    os.makedirs(out, exist_ok=True)
+
+    metrics_csv = os.path.join(src, "aggregate_metrics.csv")
+    if os.path.exists(metrics_csv):
+        m = pd.read_csv(metrics_csv)
+        m = m[pd.to_numeric(m['trace'], errors='coerce').notna()]
+        cols = st.columns(3)
+        cols[0].metric("Traces aggregated", f"{len(m)}")
+        cols[1].metric("Mean characterization score", f"{m['characterization_score'].mean():.2f}")
+        cols[2].metric("Mean fidelity+ (h)", f"{m['fidelity_plus'].mean():.1f}")
+    st.caption(f"Source: `{src}` — last-event prefixes only.")
+
+    for csv_name, what in (("aggregate_explanation_bars.csv", "nodes"),
+                           ("aggregate_feature_bars.csv", "features")):
+        csv_path = os.path.join(src, csv_name)
+        st.subheader(f"Top {top_k} {what} by mean Shapley shift")
+        if not os.path.exists(csv_path):
+            st.warning(f"No precomputed aggregate at `{csv_path}`.")
+            continue
+        df = pd.read_csv(csv_path)
+        top = df.sort_values('mean_signed_shift', key=abs, ascending=False).head(top_k)
+        png = os.path.join(out, f"aggregate_{what}_top{top_k}.png")
+        charts.plot_shapley_bars(
+            top['label'].tolist(), top['mean_signed_shift'].tolist(), top['std_shift'].tolist(),
+            top['count'].astype(int).tolist(), png,
+            title=f"Top {top_k} {what} by aggregate Shapley value "
+                  f"(whiskers = ±1 std across revisits; none when n=1)")
+        _image(png)
+        st.caption("Red pushes the predicted remaining time later, blue earlier; "
+                   "n = traces revisited for the Shapley value.")
+        st.dataframe(top.rename(columns={'mean_signed_shift': 'mean_signed_shift_h',
+                                         'std_shift': 'std_shift_h',
+                                         'count': 'traces_containing'}),
+                     width='stretch', hide_index=True)
+
+    with st.expander("Recomputing the aggregate"):
+        st.caption("Not available from the dashboard: regenerating overwrites the thesis-cited "
+                   "CSVs above and takes a long time. Only needed after retraining; run from "
+                   "the repo root, matching the parameters originally used for this KPI "
+                   "(e.g. revisit_n):")
+        st.code("PYTHONPATH=. python3 -c \"from dashboard import kpis; "
+                f"kpis.make_explainer('{slug}').explain_aggregate_shapley("
+                f"n_traces=50, save_dir='{src}')\"", language="bash")
+
+
+# ---------------------------------------------------------------------------
+# Counterfactual
+# ---------------------------------------------------------------------------
+
+def render_counterfactual(result, explainer):
+    st.caption("Recomputed on every click (threshold and direction are part of the query).")
     metric_col, events_col = st.columns(2)
-    with metric_col:
-        st.metric("Predicted remaining time (query)", f"{result['query_predicted_hours']:.1f} h")
-    with events_col:
-        st.metric("Events completed (query)", str(result['n_events']))
+    metric_col.metric("Predicted remaining time (query)", f"{result['query_predicted_hours']:.1f} h")
+    events_col.metric("Events completed (query)", str(result['n_events']))
 
     results = result['results']
     if not results:
-        st.warning("No counterfactuals found for this order under the current threshold/direction.")
+        st.warning("No counterfactual found for this trace under the current threshold and "
+                   "direction. Lower the minimum gap or flip the direction.")
         return
 
-    st.subheader(f"Top {len(results)} counterfactual(s)")
-    df = pd.DataFrame([
-        {'rank': i, 'order_id': r['order_id'], 'predicted_hours': r['predicted_hours'],
+    best = results[0]
+    st.subheader(f"Best counterfactual: #{best['order_id']} — "
+                 f"{best['predicted_hours']:.1f} h predicted "
+                 f"({best['predicted_hours'] - result['query_predicted_hours']:+.1f} h)")
+    save_dir = result['save_dir']
+    _image(os.path.join(save_dir, "cf_union_graph.png"),
+           "Union of query and counterfactual: red = query only, green = counterfactual only, "
+           "grey = shared")
+
+    st.subheader(f"Top {len(results)} candidate(s)")
+    st.dataframe(pd.DataFrame([
+        {'rank': i, 'trace_id': r['order_id'], 'predicted_hours': r['predicted_hours'],
          'dissimilarity': r['dissimilarity'], 'n_events': r['n_events'],
          'feat': r['components']['feat'], 'type': r['components']['type'],
          'edge': r['components']['edge'], 'struct': r['components']['struct']}
         for i, r in enumerate(results, 1)
-    ])
-    st.dataframe(df, width='stretch')
+    ]), width='stretch', hide_index=True)
 
-    save_dir = result['save_dir']
-    png = os.path.join(save_dir, "cf_graph_structure_comparison.png")
-    if os.path.exists(png):
-        st.image(png, caption="Graph structure comparison (query vs. best CF)")
-
-    png = os.path.join(save_dir, "cf_diff_graph.png")
-    if os.path.exists(png):
-        st.image(png, caption="Highlighted differences (query vs. best CF)")
-
-    png = os.path.join(save_dir, "cf_union_graph.png")
-    if os.path.exists(png):
-        st.image(png, caption="Union graph (query and best CF in one view)")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        png = os.path.join(save_dir, "cf_node_type_comparison.png")
-        if os.path.exists(png):
-            st.image(png, caption="Node-type counts (query vs. best CF)")
-    with col2:
-        png = os.path.join(save_dir, "cf_dissimilarity_breakdown.png")
-        if os.path.exists(png):
-            st.image(png, caption="Dissimilarity breakdown")
-
-    col3, col4 = st.columns(2)
-    with col3:
-        png = os.path.join(save_dir, "cf_event_type_diff.png")
-        if os.path.exists(png):
-            st.image(png, caption="Event-type differences")
-    with col4:
-        vp = explainer.kpi_viewpoint
-        png = os.path.join(save_dir, f"cf_{vp.lower()}_feature_diff.png")
-        if os.path.exists(png):
-            st.image(png, caption=f"{vp} feature differences")
+    with st.expander("More comparisons (query vs. best counterfactual)"):
+        _image(os.path.join(save_dir, "cf_diff_graph.png"), "Side-by-side highlighted differences")
+        _image(os.path.join(save_dir, "cf_graph_structure_comparison.png"), "Graph structures")
+        col1, col2 = st.columns(2)
+        with col1:
+            _image(os.path.join(save_dir, "cf_node_type_comparison.png"), "Node-type counts")
+            _image(os.path.join(save_dir, "cf_event_type_diff.png"), "Event-type differences")
+        with col2:
+            _image(os.path.join(save_dir, "cf_dissimilarity_breakdown.png"), "Dissimilarity breakdown")
+            vp = explainer.kpi_viewpoint
+            _image(os.path.join(save_dir, f"cf_{vp.lower()}_feature_diff.png"),
+                   f"{vp} feature differences")
 
 
-def render_global(database, mode):
-    base = os.path.join("files", "explainer_outputs", database)
-    if mode == 'cf':
-        csv_path = os.path.join(base, "aggregate", "aggregate_cf_dissimilarity.csv")
-        png_path = os.path.join(base, "aggregate", "aggregate_cf_components.png")
-    elif mode == 'loo':
-        csv_path = os.path.join(base, "aggregate", "aggregate_metrics.csv")
-        png_path = os.path.join(base, "aggregate", "aggregate_node_type_importance.png")
-    else:
-        csv_path = os.path.join(base, "aggregate_gnnprimary", "aggregate_gnnprimary_metrics.csv")
-        png_path = os.path.join(base, "aggregate_gnnprimary", "aggregate_gnnprimary_type_summary.png")
+# ---------------------------------------------------------------------------
+# Layout
+# ---------------------------------------------------------------------------
 
-    if os.path.exists(csv_path):
-        df = pd.read_csv(csv_path)
-        st.caption(f"From {csv_path} (n={len(df)} traces)")
-        numeric_cols = df.select_dtypes(include='number').columns
-        st.dataframe(df[numeric_cols].agg(['mean', 'std']), width='stretch')
-    else:
-        st.warning(f"No precomputed aggregate found at {csv_path}. Run it via Regenerate below, "
-                  f"or from the command line first.")
+def render_trace_flow(explainer, slug, mode, top_k, min_gap_hours, direction):
+    order_id, n_events = pick_trace(explainer, slug)
+    ctx = (slug, mode, order_id, n_events, top_k, min_gap_hours, direction)
 
-    if os.path.exists(png_path):
-        st.image(png_path)
-
-
-def render_regenerate(explainer, database, cant, mode,
-                      min_gap_hours=0.0, direction='lower'):
-    cost_notes = {
-        'loo': "The two flat 'top K' charts use Shapley values (permutation-sampled on top "
-              "of an exhaustive LOO identification pass); the node-type chart and metrics "
-              "below stay LOO-based. Exhaustive LOO alone is already slow "
-              "(O(n_traces x nodes+edges) forward passes); Shapley requantification adds a "
-              "bounded amount on top of that.",
-        'cf': "Counterfactual retrieval evaluates predictions over the full candidate pool per "
-              "trace -- moderate cost, no gradient-based optimization involved.",
-    }
-    st.caption("Recomputes the aggregate from scratch and overwrites the CSV/PNG shown above -- "
-              f"only needed after retraining the underlying model. {cost_notes[mode]}")
-    if st.button(f"Regenerate {MODE_LABELS[mode]} aggregate (n_traces=50)", key=f"regen_{mode}"):
-        with st.spinner("Running aggregate explanation -- this can take a while..."):
-            if mode == 'loo':
-                # explain_aggregate() still runs (unchanged) -- it's what produces the
-                # node-type chart and metrics CSV, which stay LOO-based;
-                # explain_aggregate_shapley() additionally refreshes the two flat
-                # "top K" bar charts with Shapley values, writing to the same file
-                # paths so one button keeps every view on this tab current.
-                explainer.explain_aggregate(n_traces=50)
-                explainer.explain_aggregate_shapley(n_traces=50)
-            elif mode == 'cf':
-                explainer.explain_aggregate_counterfactuals(
-                    n_traces=50, min_gap_hours=min_gap_hours, direction=direction
-                )
-        st.success("Done. Reload the page to see the updated figures.")
-
-
-def render_local_flow(explainer, database, cant, mode, top_k, min_gap_hours=0.0, direction='lower'):
-    """Order picker through persisted render -- extracted from main() so it can be
-    called either inside a tab (loo, which also gets an Aggregate tab alongside this
-    one) or directly (cf, which stays a flat single view, no tabs)."""
-    # Global (aggregate) tab dropped for now for non-loo modes -- render_global()/
-    # render_regenerate() are left defined but unused there, not deleted, since this
-    # is a temporary scoping choice, not a permanent removal. loo gets its own
-    # Aggregate tab via render_loo_aggregate(), wired up in main().
-    ids = order_ids_for(explainer)
-    order_id = st.selectbox("Order ID", ids, key="order_picker")
-
-    prefix_opts = prefix_options_for(explainer, order_id)
-    last_prefix = prefix_opts[-1]
-    selected_prefix = st.select_slider(
-        "Prefix (events completed)", options=prefix_opts, value=last_prefix,
-        key="prefix_picker",
-        format_func=lambda n: f"{n} (complete)" if n == last_prefix else str(n),
-    )
-    # The complete prefix maps back to n_events=None, not the literal max int, even
-    # though both resolve to the same graph -- preserves exact parity with every other
-    # explain_*() call's "last recorded prefix" convention, and keeps hitting
-    # dashboard_precompute.py's already-warmed cache (keyed under n_events=None) for
-    # the default view instead of silently missing it on a different cache key.
-    n_events = None if selected_prefix == last_prefix else selected_prefix
-
-    if st.button("Explain this order"):
+    if st.button("Explain this trace", type="primary"):
         try:
-            with st.spinner("Computing..."):
-                result, cached = compute_local(explainer, database, cant, mode, order_id,
-                                                min_gap_hours=min_gap_hours, direction=direction,
-                                                n_events=n_events, top_k=top_k)
-            if mode == 'cf':
-                render_local_cf(result, explainer)
-            else:
-                # Stored rather than rendered inline -- lets the render survive reruns
-                # triggered by other sidebar interactions (e.g. Top-K) without forcing a
-                # re-click of "Explain this order" each time. See the persisted-render
-                # block below.
-                st.session_state['local_ctx'] = (database, cant, mode, order_id, n_events, top_k)
-                st.session_state['local_result'] = result
-                st.session_state['local_cached'] = cached
+            with st.spinner("Computing…"):
+                if mode == 'perturbation':
+                    payload = compute_perturbation(explainer, order_id, n_events, top_k)
+                else:
+                    payload = (compute_counterfactual(explainer, order_id, n_events,
+                                                      min_gap_hours, direction), False)
+            # Persisted, not rendered inline: survives reruns from other widgets; any
+            # control change alters ctx and naturally retires the stale render.
+            st.session_state['result_ctx'] = ctx
+            st.session_state['result'] = payload
         except ValueError as ex:
-            # explain_trace()'s own guards (e.g. a legitimately-empty edge type on the
-            # LOO side) -- show a clear message instead of a raw traceback.
-            st.error(f"This order isn't explainable in {MODE_LABELS[mode]} mode: {ex}")
+            st.error(f"This trace isn't explainable in {MODE_LABELS[mode]} mode: {ex}")
 
-    # loo renders from persisted state, not inline in the button block above -- this fires
-    # both on the same rerun right after a successful click (ctx matches immediately) and
-    # on later reruns triggered by other controls. Any sidebar/toggle change changes ctx
-    # and naturally stops the stale render, with no extra invalidation logic needed.
-    ctx = (database, cant, mode, order_id, n_events, top_k)
-    if mode == 'loo' and st.session_state.get('local_ctx') == ctx:
-        render_local(st.session_state['local_result'], st.session_state['local_cached'],
-                    explainer, order_id, top_k=top_k)
-
-
-def render_loo_aggregate(explainer, database, cant, top_k):
-    """Dataset-wide "top K nodes"/"top K features" bar charts -- Shapley-based, not
-    LOO, despite the function name (kept for the mode='loo' call site; the tab
-    itself is still labeled "Exhaustive LOO" since candidate identification still
-    is). The underlying data is whatever was last computed via Regenerate
-    (explain_aggregate_shapley(), n_traces=50: an exhaustive LOO sweep to identify
-    the top ~20 candidates per chart, then a bounded Shapley requantification of
-    just those) -- not recomputed live per Top-K change, since that would mean
-    re-running the sweep on every dropdown interaction. The DISPLAY (chart +
-    table), however, IS live: explain_aggregate_shapley() saves a generous
-    top_n=20 rows precisely so this can cheaply slice/re-render down to the
-    current top_k on every rerun, matplotlib-only, no model inference -- same
-    cost tier as the single-trace tab's own live charts. Reuses
-    plot_top_features_bar() (not plot_aggregate_explanation_bars(), which also
-    feeds explain_gnn_primary_aggregate()'s thesis-citable output and is left on
-    its own existing color convention) so this chart automatically matches the
-    single-trace tab's color scheme.
-
-    The node-type chart and the feature-attribution-by-depth heatmap below stay
-    LOO-based (see explain_aggregate_shapley()'s own docstring for why: both are
-    exhaustive-by-design, and Shapley-izing them fully would multiply their
-    already-largest cost ~100x)."""
-    base = os.path.join("files", "explainer_outputs", database, "aggregate")
-    csv_path = os.path.join(base, "aggregate_explanation_bars.csv")
-
-    if not os.path.exists(csv_path):
-        st.warning(f"No precomputed aggregate found at {csv_path}. Use Regenerate below to "
-                  "compute it (an exhaustive LOO sweep over 50 traces to identify candidates, "
-                  "then Shapley requantification of the top ~20 -- can take a while).")
-    else:
-        df = pd.read_csv(csv_path)
-        df_top = df.sort_values('mean_signed_shift', key=abs, ascending=False).head(top_k)
-
-        chart_png = os.path.join(base, "aggregate_explanation_bars_topk.png")
-        explainer.plot_top_features_bar(
-            df_top['label'].tolist(), df_top['mean_signed_shift'].tolist(), chart_png,
-            title=f"Top {top_k} nodes by aggregate value",
-            xlabel="Shift in Hours",
-        )
-
-        st.caption(f"From {csv_path} (top {len(df_top)} of {len(df)} saved nodes by mean "
-                  f"|signed shift| across traces)")
-        st.subheader("Top nodes by aggregate value")
-        if os.path.exists(chart_png):
-            st.image(chart_png)
-        st.dataframe(df_top, width='stretch')
-
-    feat_csv_path = os.path.join(base, "aggregate_feature_bars.csv")
-    if not os.path.exists(feat_csv_path):
-        st.warning(f"No precomputed feature aggregate found at {feat_csv_path}. Use Regenerate "
-                  "below to compute it.")
-    else:
-        fdf = pd.read_csv(feat_csv_path)
-        fdf_top = fdf.sort_values('mean_signed_shift', key=abs, ascending=False).head(top_k)
-
-        feat_chart_png = os.path.join(base, "aggregate_feature_bars_topk.png")
-        explainer.plot_top_features_bar(
-            fdf_top['label'].tolist(), fdf_top['mean_signed_shift'].tolist(), feat_chart_png,
-            title=f"Top {top_k} features by aggregate value",
-            xlabel="Shift in Hours",
-        )
-
-        st.caption(f"From {feat_csv_path} (top {len(fdf_top)} of {len(fdf)} saved features by "
-                  f"mean |signed shift| across traces)")
-        st.subheader("Top features by aggregate value")
-        if os.path.exists(feat_chart_png):
-            st.image(feat_chart_png)
-        st.dataframe(fdf_top, width='stretch')
-
-    with st.expander("Regenerate (advanced)"):
-        render_regenerate(explainer, database, cant, 'loo')
+    if st.session_state.get('result_ctx') == ctx:
+        result, cached = st.session_state['result']
+        if mode == 'perturbation':
+            render_perturbation_trace(result, cached, explainer, order_id, top_k)
+        else:
+            render_counterfactual(result, explainer)
 
 
 def main():
     st.title("Perturbation Analysis Explorer")
-    st.caption(
-        "Exploring the held-out **test set** of a trained HGT model -- static, already-completed "
-        "traces, not a live process feed."
-    )
+    st.caption("Exploring the held-out **test set** of a trained HGT model: static, already "
+               "completed traces, not a live process feed.")
 
     with st.sidebar:
-        database = st.selectbox("Dataset", list(DATASETS.keys()))
-        cant = DATASETS[database]
-        mode = st.radio(
-            "Explanation mode", list(MODE_LABELS.keys()),
-            format_func=lambda m: MODE_LABELS[m],
-        )
-        min_gap_hours, direction = 0.0, 'lower'
-        top_k = 5
-        if mode == 'loo':
-            top_k = st.selectbox(
-                "Top K Explanations", [3, 5, 10, 15, 20], index=1, key="top_k_picker",
-                help="Number of nodes/edges shown in the importance tables.",
-            )
-        if mode == 'cf':
-            direction_label = st.radio(
-                "Search direction",
-                ["Below current prediction", "Above current prediction"],
-                key="cf_direction_picker",
-            )
+        slug = st.selectbox("KPI", list(kpis.KPIS), format_func=lambda s: kpis.KPIS[s]['label'])
+        mode = st.radio("Explanation mode", list(MODE_LABELS), format_func=MODE_LABELS.get)
+        top_k, min_gap_hours, direction = 5, 0.0, 'lower'
+        if mode == 'perturbation':
+            top_k = st.selectbox("Top K", [3, 5, 10, 15, 20], index=1,
+                                 help="Number of nodes, edges and features shown.")
+            st.caption("Leave-one-out identifies candidate nodes, edges and features; Shapley "
+                       "sampling quantifies their effect on the predicted remaining time.")
+        else:
+            ex = curated_cf_example(slug)
+            if ex is not None:
+                st.button("Load curated example", on_click=_load_curated_example,
+                          args=(slug, ex),
+                          help=f"#{int(ex['query_id'])} at {int(ex['query_events'])} events, "
+                               f"minimum gap {ex['min_gap_h']:g} h (the thesis union-graph "
+                               f"example for this KPI).")
+            direction_label = st.radio("Search direction",
+                                       ["Below current prediction", "Above current prediction"],
+                                       key="cf_direction")
             direction = 'lower' if direction_label.startswith("Below") else 'higher'
             min_gap_hours = st.number_input(
-                "Minimum predicted-hours gap (threshold)", min_value=0.0, value=0.0, step=1.0,
-                key="cf_min_gap_picker",
-                help="Minimum |query - candidate| predicted-hours gap a counterfactual "
-                     "must have to be eligible.",
-            )
-            st.caption("Retrieves the most similar test-set trace(s) with a contrasting "
-                      "predicted outcome -- not a perturbation method, complements the "
-                      "other mode.")
-        else:
-            st.caption("Exhaustive sweep over every node, edge, and feature -- the only source "
-                      "of edge importance.")
+                "Minimum predicted-hours gap", min_value=0.0, step=1.0, key="cf_min_gap",
+                help="Minimum |query − candidate| predicted-hours gap a counterfactual must have.")
+            st.caption("Retrieves the most similar test-set trace with a contrasting predicted "
+                       "outcome. Not a perturbation method; it complements the other mode.")
 
-    explainer = get_explainer(database, cant)
+    explainer = get_explainer(slug)
 
-    # Aggregate tab scoped to loo only, per what was asked -- cf keeps today's flat,
-    # tab-free layout. render_local_flow() is shared between both branches so the
-    # (fairly stateful) order-picker-through-persisted-render logic isn't duplicated.
-    if mode == 'loo':
-        tab_local, tab_aggregate = st.tabs(["Local (single case)", "Aggregate"])
-        with tab_local:
-            render_local_flow(explainer, database, cant, mode, top_k)
+    if mode == 'perturbation':
+        tab_trace, tab_aggregate = st.tabs(["Single trace", "Aggregate"])
+        with tab_trace:
+            render_trace_flow(explainer, slug, mode, top_k, min_gap_hours, direction)
         with tab_aggregate:
-            render_loo_aggregate(explainer, database, cant, top_k)
+            render_perturbation_aggregate(explainer, slug, top_k)
     else:
-        render_local_flow(explainer, database, cant, mode, top_k,
-                          min_gap_hours=min_gap_hours, direction=direction)
+        render_trace_flow(explainer, slug, mode, top_k, min_gap_hours, direction)
 
 
 if __name__ == '__main__':
