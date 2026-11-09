@@ -21,8 +21,14 @@ import copy
 
 class Modelling:
     def __init__(self, database, cant, seed=42, target_transform='zscore', kpi_event=None,
-                 graph_dir=None):
+                 graph_dir=None, test_only=False):
         """
+        :param test_only: load only test_graphs_sg.pt (train_data/val_data become []). The
+            target z-score stats then come from the checkpoint's <task_id>_norm.json and the
+            node-feature stats from <graph_dir>/feature_stats.pt (written by
+            save_feature_stats(), tied to that exact test file by sha256), so test_data,
+            predictions and feature names are identical to a full load. Used by the dashboard,
+            whose download bundle ships no train/val caches. Default False: unchanged.
         :param target_transform: 'zscore' (default, unchanged behavior -- every currently-cited
             checkpoint was trained this way) or 'log1p'. 'log1p' applies log1p() to the raw
             remaining-time target (seconds) before fitting/applying the usual z-score, to test
@@ -32,7 +38,11 @@ class Modelling:
         """
         if target_transform not in ('zscore', 'log1p'):
             raise ValueError(f"target_transform must be 'zscore' or 'log1p', got {target_transform!r}")
+        if test_only and target_transform != 'zscore':
+            raise ValueError("test_only needs target_transform='zscore' (log1p refits its stats "
+                             "on the train split)")
         self.target_transform = target_transform
+        self.test_only = test_only
         self.database = database
         self.cant = cant
         self.init_seed = seed  # only affects model weight init below, not training-loop seeding
@@ -51,9 +61,15 @@ class Modelling:
         )
 
         # Load relevant datasets
-        self.train_data = torch.load(f"{self.path_dict['pytorch_path']}/train_graphs_sg.pt", weights_only=False)
-        self.val_data = torch.load(f"{self.path_dict['pytorch_path']}/val_graphs_sg.pt", weights_only=False)
+        if test_only:
+            self.train_data, self.val_data = [], []
+        else:
+            self.train_data = torch.load(f"{self.path_dict['pytorch_path']}/train_graphs_sg.pt", weights_only=False)
+            self.val_data = torch.load(f"{self.path_dict['pytorch_path']}/val_graphs_sg.pt", weights_only=False)
         self.test_data = torch.load(f"{self.path_dict['pytorch_path']}/test_graphs_sg.pt", weights_only=False)
+        # Graphs used only to read feature-vector widths for feature names: the train split as
+        # always, or the test split under test_only (widths are identical across splits).
+        _ref_data = self.test_data if test_only else self.train_data
 
         # Model parameters
         # Matches sweep()'s budget and HOEG's Table 5/7 (single unified
@@ -112,9 +128,11 @@ class Modelling:
         # (skipped for target_transform='log1p' -- a cached _norm.json on disk was fit on the
         # raw/untransformed target by a prior 'zscore' run, so reusing it here would silently
         # apply the wrong stats; log1p always recomputes its own mean/std fresh below).
-        train_y_all = torch.cat([g[self.kpi_viewpoint].y for g in self.train_data])
         _model_dir = f"{self.path_dict['model_path']}/Hetero"
         _norm_path = f"{_model_dir}/{self.task_id}_norm.json"
+        if test_only and not os.path.exists(_norm_path):
+            raise FileNotFoundError(f"test_only needs the saved target stats {_norm_path}")
+        train_y_all = None if test_only else torch.cat([g[self.kpi_viewpoint].y for g in self.train_data])
         if self.target_transform == 'log1p':
             train_y_all = torch.log1p(train_y_all)
             target_mean, target_std = train_y_all.mean(), train_y_all.std()
@@ -145,13 +163,16 @@ class Modelling:
             list((self.path_dict.get('time_attributes') or {}).keys()) +
             ['Events']
         )
+        saved_stats = self._load_feature_stats() if test_only else None
         for node_type in continuous_node_types:
-            x_train = [g[node_type].x for g in self.train_data if g[node_type].num_nodes > 0]
-            if not x_train:
-                continue
-            x_cat = torch.cat(x_train, dim=0)
-            feat_mean = x_cat.mean(dim=0)
-            feat_std = x_cat.std(dim=0).clamp(min=1e-8)
+            if test_only:
+                if node_type not in saved_stats:
+                    continue
+                feat_mean, feat_std = saved_stats[node_type]
+            else:
+                feat_mean, feat_std = self._fit_feature_stats(node_type)
+                if feat_mean is None:
+                    continue
             for split in [self.train_data, self.val_data, self.test_data]:
                 for g in split:
                     if g[node_type].num_nodes > 0:
@@ -169,7 +190,7 @@ class Modelling:
         # Events layout: [ev_type one-hot | temporal | C3 activity counts | O1-ext obj counts]
         _temporal_names = ['elapsed_h', 'waiting_h', 'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos']
         _order_extra = ['n_items', 'total_weight', 'n_products', 'n_packages']
-        if self.train_data and self.train_data[0]['Events'].num_nodes > 0:
+        if _ref_data and _ref_data[0]['Events'].num_nodes > 0:
             # Cached on self (not a local var) so callers needing per-order lookups later
             # (e.g. explainer.py's _decode_ocel_ids()) can reuse this same read rather than
             # re-parsing this file -- 20-40MB depending on dataset -- on every call.
@@ -207,8 +228,8 @@ class Modelling:
             # Employees may have zero nodes in early/short prefixes even though it's
             # populated later, so graph 0 alone isn't a reliable presence check.
             _graph_with_type = next(
-                (g for g in self.train_data if g[_ob_type].num_nodes > 0), None
-            ) if self.train_data else None
+                (g for g in _ref_data if g[_ob_type].num_nodes > 0), None
+            ) if _ref_data else None
             if _graph_with_type is None:
                 continue
             _n_dims = _graph_with_type[_ob_type].x.shape[1]
@@ -230,9 +251,9 @@ class Modelling:
             if len(_names) == _n_dims:
                 self.feature_names[_ob_type] = _names
 
-        if self.train_data and self.train_data[0][self.kpi_viewpoint].num_nodes > 0:
+        if _ref_data and _ref_data[0][self.kpi_viewpoint].num_nodes > 0:
             vp = self.kpi_viewpoint
-            n_vp = self.train_data[0][vp].x.shape[1]
+            n_vp = _ref_data[0][vp].x.shape[1]
             base_names = list((self.path_dict.get('attributes') or {}).get(vp, []))
             self.feature_names[vp] = (base_names + _order_extra)[:n_vp]
 
@@ -241,6 +262,62 @@ class Modelling:
         if not os.path.exists(f"{model_path}/Hetero"):
             os.makedirs(f"{model_path}/Hetero")
         self.model_path = f"{model_path}/Hetero/{self.task_id}.pth"
+
+    # Node-feature standardization stats (fit on the train split) and their on-disk copy for
+    # test_only loading. Stored next to the graph cache because they are a property of that
+    # cache's train split, and tied by sha256 to its test file so a later cache swap (thesis
+    # scripts swap the .pt files in place) can never pair the stats with the wrong graphs.
+    _FEATURE_STATS_FILE = "feature_stats.pt"
+
+    def _fit_feature_stats(self, node_type):
+        """(mean, std) of node_type's features over the train split, as the training run used
+        them, or (None, None) if the type never occurs there. Call before standardization."""
+        x_train = [g[node_type].x for g in self.train_data if g[node_type].num_nodes > 0]
+        if not x_train:
+            return None, None
+        x_cat = torch.cat(x_train, dim=0)
+        return x_cat.mean(dim=0), x_cat.std(dim=0).clamp(min=1e-8)
+
+    def _test_file_sha256(self):
+        import hashlib
+        h = hashlib.sha256()
+        with open(f"{self.path_dict['pytorch_path']}/test_graphs_sg.pt", 'rb') as f:
+            for block in iter(lambda: f.read(1 << 20), b''):
+                h.update(block)
+        return h.hexdigest()
+
+    def save_feature_stats(self):
+        """Write <graph_dir>/feature_stats.pt for test_only loading. Needs a full load (the
+        train split, freshly read: this instance's train_data is already standardized)."""
+        if self.test_only:
+            raise RuntimeError("save_feature_stats() needs a full (not test_only) load")
+        raw = Modelling.__new__(Modelling)
+        raw.train_data = torch.load(f"{self.path_dict['pytorch_path']}/train_graphs_sg.pt",
+                                    weights_only=False)
+        continuous_node_types = (
+            list((self.path_dict.get('attributes') or {}).keys()) +
+            list((self.path_dict.get('time_attributes') or {}).keys()) +
+            ['Events']
+        )
+        stats = {}
+        for node_type in continuous_node_types:
+            mean, std = raw._fit_feature_stats(node_type)
+            if mean is not None:
+                stats[node_type] = (mean, std)
+        path = f"{self.path_dict['pytorch_path']}/{self._FEATURE_STATS_FILE}"
+        torch.save({'test_sha256': self._test_file_sha256(), 'stats': stats}, path)
+        return path
+
+    def _load_feature_stats(self):
+        path = f"{self.path_dict['pytorch_path']}/{self._FEATURE_STATS_FILE}"
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"test_only needs {path} (write it with save_feature_stats() "
+                                    f"from a full load)")
+        saved = torch.load(path, weights_only=False)
+        if saved['test_sha256'] != self._test_file_sha256():
+            raise RuntimeError(f"{path} was written for a different test_graphs_sg.pt (cache "
+                               f"swapped since?); regenerate it with save_feature_stats()")
+        return saved['stats']
 
     # Define model parameter functions
     @property
@@ -273,7 +350,9 @@ class Modelling:
     def _build_model(self, params):
         return HGT.HGT(hidden_channels=params['hidden_channels'], out_channels=1,
                        num_layers=params['num_layers'], num_heads=params['num_heads'],
-                       data=self.train_data[0], viewpoint=self.kpi_viewpoint)
+                       # node/edge types only; the test split under test_only (an
+                       # incomplete metadata would fail the checkpoint's strict load)
+                       data=(self.train_data or self.test_data)[0], viewpoint=self.kpi_viewpoint)
 
     """
         Heterogeneous Regression training and validation functions

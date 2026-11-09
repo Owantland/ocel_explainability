@@ -7,10 +7,11 @@ from torch_geometric.explain import Explainer as PyGExplainer, CaptumExplainer, 
 
 
 class Explainer(Modelling):
-    def __init__(self, database, cant, kpi_event=None, graph_dir=None):
+    def __init__(self, database, cant, kpi_event=None, graph_dir=None, test_only=False):
         # kpi_event/graph_dir: optional per-KPI overrides (see SupportFunctions.__init__);
-        # None keeps config.yml's KPI and graph cache.
-        super().__init__(database, cant, kpi_event=kpi_event, graph_dir=graph_dir)
+        # None keeps config.yml's KPI and graph cache. test_only: see Modelling.__init__.
+        super().__init__(database, cant, kpi_event=kpi_event, graph_dir=graph_dir,
+                         test_only=test_only)
         # Found via direct investigation: identical inputs (bit-identical node features
         # and edges, confirmed directly) + identical, fully state_dict-matched weights
         # still produced different raw model outputs across separate Explainer()

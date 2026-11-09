@@ -56,7 +56,7 @@ KPIS = {
 DEMO_N = 5  # first N last-event test traces per KPI (same ordering explain_aggregate() uses)
 
 
-def make_explainer(slug):
+def make_explainer(slug, test_only=True):
     """Explainer for this KPI with its trained checkpoint already loaded. Explainer() itself
     builds an untrained model (each explain_* method loads the weights on entry), so loading
     here keeps direct helpers like _predict_value_for_graph() meaningful from the start."""
@@ -68,8 +68,10 @@ def make_explainer(slug):
             raise RuntimeError(f"{k['graph_dir']} currently holds the cache from "
                                f"{k['not_same_as']} (another KPI was swapped in); swap the "
                                f"{slug} cache back before exploring it.")
+    # test_only: the dashboard never trains, and its download bundle ships only the test
+    # split (plus the saved normalization stats that make this load identical to a full one).
     e = exp.Explainer(k['database'], k['cant'], kpi_event=k['kpi_event'],
-                      graph_dir=k['graph_dir'])
+                      graph_dir=k['graph_dir'], test_only=test_only)
     e.model.load_state_dict(torch.load(e.model_path, weights_only=False))
     e.model.eval()
     return e
