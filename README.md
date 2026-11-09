@@ -77,8 +77,9 @@ models (already-completed traces, not a live process-monitoring feed).
 ### Quick start
 
 You need **Python 3.11**, **git**, an internet connection for the first run,
-and about **4 GB of free disk** (≈1.2 GB environment, ≈0.6 GB download,
-≈1 GB unpacked data).
+and about **2 GB of free disk**: ≈1.2 GB for the Python environment
+(macOS; Linux's default CUDA build of PyTorch is larger), an 81 MB download
+and 0.63 GB of unpacked data.
 
 ```
 git clone https://github.com/Owantland/ocel_explainability.git

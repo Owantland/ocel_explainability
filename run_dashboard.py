@@ -230,7 +230,13 @@ def main():
         say("Everything is set up. Start the dashboard with: python3 run_dashboard.py")
         return
 
-    say("Starting the dashboard at http://localhost:8501 (Ctrl+C to stop) ...")
+    port = "8501"
+    for i, a in enumerate(streamlit_args):
+        if a.startswith("--server.port="):
+            port = a.split("=", 1)[1]
+        elif a == "--server.port" and i + 1 < len(streamlit_args):
+            port = streamlit_args[i + 1]
+    say(f"Starting the dashboard at http://localhost:{port} (Ctrl+C to stop) ...")
     env = dict(os.environ, PYTHONPATH=REPO + os.pathsep + os.environ.get("PYTHONPATH", ""))
     cmd = [py, "-m", "streamlit", "run", APP, "--browser.gatherUsageStats", "false",
            *streamlit_args]
