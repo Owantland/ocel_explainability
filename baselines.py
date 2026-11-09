@@ -1,0 +1,521 @@
+"""
+Baseline comparison for the HGT remaining-time regression model.
+
+Two baselines are evaluated against the trained HGT on the test split:
+  1. Mean predictor   — always predicts the training-set mean remaining time
+  2. Gradient Boosted Trees (GBT) — sklearn GradientBoostingRegressor on
+     handcrafted tabular features extracted from the raw graph objects
+
+Usage: python baselines.py
+Output: printed metrics table + baseline_comparison.png
+"""
+import warnings
+warnings.filterwarnings("ignore")
+
+import os
+import json
+import time
+import argparse
+import torch
+import torch_geometric.nn as pygnn
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.preprocessing import StandardScaler
+
+import training as t
+
+# ── constants ─────────────────────────────────────────────────────────────
+DATABASE = 'order_management'
+CANT     = 2000
+
+# temporal feature indices in Events.x (after 11 one-hot event-type dims)
+_ELAPSED_IDX = 11
+_WAITING_IDX = 12
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+def load_raw_split(path: str, viewpoint: str = 'Orders') -> pd.DataFrame:
+    """Load a raw (un-normalised) .pt graph file and return a feature DataFrame.
+    Viewpoint raw features are read generically (vp_feat_0..k-1) since different
+    databases' viewpoint node types carry different numbers of raw attributes
+    (e.g. order_management's Orders has 4, logistics' TransportDocument has 1)."""
+    graphs = torch.load(path, weights_only=False)
+    rows = []
+    for g in graphs:
+        n_ev = g['Events'].num_nodes
+        if n_ev > 0:
+            elapsed_h = g['Events'].x[-1, _ELAPSED_IDX].item()
+            waiting_h = g['Events'].x[-1, _WAITING_IDX].item()
+        else:
+            elapsed_h = waiting_h = 0.0
+        vp_x = g[viewpoint].x[0]
+        row = {
+            'n_events':   n_ev,
+            'elapsed_h':  elapsed_h,
+            'waiting_h':  waiting_h,
+            'y_h':        g[viewpoint].y[0].item() / 3600.0,
+            'order_id':   int(g[viewpoint].id[0].item()),
+            'last_event': bool(g[viewpoint].last_event[0].item()),
+        }
+        for i in range(vp_x.shape[0]):
+            row[f'vp_feat_{i}'] = vp_x[i].item()
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    """MAE, RMSE, R² — same formulas as validate.py."""
+    ae   = np.abs(y_true - y_pred)
+    mae  = ae.mean()
+    rmse = np.sqrt((ae ** 2).mean())
+    ss_res = ((y_true - y_pred) ** 2).sum()
+    ss_tot = ((y_true - y_true.mean()) ** 2).sum()
+    r2   = 1.0 - ss_res / ss_tot if ss_tot > 0 else float('nan')
+    return {'mae': mae, 'rmse': rmse, 'r2': r2}
+
+
+def mae_bootstrap_ci(y_true: np.ndarray, y_pred: np.ndarray,
+                      n_boot: int = 2000, ci: float = 0.95,
+                      seed: int = 42) -> tuple[float, float]:
+    """Bootstrap percentile CI for MAE: resample the per-sample absolute errors
+    with replacement n_boot times, take the ci-level percentiles of the resampled
+    means. Avoids assuming the sampling distribution of the mean is normal, which
+    matters since abs-error distributions are typically right-skewed."""
+    ae = np.abs(y_true - y_pred)
+    n = len(ae)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n, size=(n_boot, n))
+    boot_means = ae[idx].mean(axis=1)
+    alpha = (1.0 - ci) / 2.0
+    lo, hi = np.percentile(boot_means, [100 * alpha, 100 * (1 - alpha)])
+    return float(lo), float(hi)
+
+
+def depth_mae(y_true: np.ndarray, y_pred: np.ndarray,
+              n_events: np.ndarray) -> dict:
+    """MAE broken down by prefix-depth bins (1-3, 4-6, 7-9, 10+)."""
+    bins   = [(1, 3), (4, 6), (7, 9), (10, 9999)]
+    labels = ['1-3', '4-6', '7-9', '10+']
+    result = {}
+    for (lo, hi), lbl in zip(bins, labels):
+        mask = (n_events >= lo) & (n_events <= hi)
+        if mask.sum() > 0:
+            result[lbl] = np.abs(y_true[mask] - y_pred[mask]).mean()
+        else:
+            result[lbl] = float('nan')
+    return result
+
+
+def fmt_time(v) -> str:
+    """Format a fit-time value (seconds) for the scalability table, or 'n/a' if
+    unavailable. Shared by this module's own run() and training.py's
+    compare_models(), which used to carry an identical local copy."""
+    return f"{v:.4f}" if v is not None else "n/a"
+
+
+# ── baseline models ────────────────────────────────────────────────────────
+
+class MeanPredictor:
+    def fit(self, y_train: np.ndarray):
+        self.mean_ = y_train.mean()
+
+    def predict(self, n: int) -> np.ndarray:
+        return np.full(n, self.mean_)
+
+
+class GBTPredictor:
+    def __init__(self):
+        self.scaler = StandardScaler()
+        self.model  = GradientBoostingRegressor(
+            n_estimators=300, max_depth=4, learning_rate=0.05,
+            subsample=0.8, random_state=42, verbose=0
+        )
+
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray):
+        self.scaler.fit(X_train)
+        self.model.fit(self.scaler.transform(X_train), y_train)
+
+    def predict(self, X_test: np.ndarray) -> np.ndarray:
+        return self.model.predict(self.scaler.transform(X_test))
+
+    @property
+    def feature_importances_(self):
+        return self.model.feature_importances_
+
+
+# ── HGT inference ──────────────────────────────────────────────────────────
+
+def hgt_predictions(m) -> tuple[pd.DataFrame, float]:
+    """Run the trained HGT on m.test_data; return denormalised predictions plus the
+    wall-clock prediction time in seconds (model loading excluded, matching how
+    fitting/prediction time are measured separately elsewhere)."""
+    m.model.load_state_dict(torch.load(m.model_path, weights_only=False))
+    m.model.eval()
+    vp = m.kpi_viewpoint
+    records = []
+    pred_time_s = 0.0
+    with torch.no_grad():
+        for g in m.test_data:
+            # test_data's graphs are loaded straight from the .pt cache (CPU), never moved
+            # to the training device -- a cpu-vs-mps mismatch once an MPS device is in play
+            # (see training.py's device selection); a no-op when m.device is 'cpu'.
+            g = g.to(m.device)
+            _t0 = time.time()
+            out = m.model(g.x_dict, g.edge_index_dict)
+            pred_h = (out[0].item() * m.target_std.item() + m.target_mean.item()) / 3600.0
+            pred_time_s += time.time() - _t0
+            true_h = (g[vp].y[0].item() * m.target_std.item() + m.target_mean.item()) / 3600.0
+            records.append({
+                'order_id':   int(g[vp].id[0].item()),
+                'last_event': bool(g[vp].last_event[0].item()),
+                'n_events':   g['Events'].num_nodes,
+                'true_h':     true_h,
+                'hgt_pred_h': pred_h,
+            })
+    return pd.DataFrame(records), pred_time_s
+
+
+def read_hgt_fit_time(m) -> float | None:
+    """Read back the fitting time recorded by training.Modelling.Het_Reg_Modelling's
+    _norm.json sidecar — baselines.py never retrains HGT, so its fit time has to come
+    from the actual training run instead of being measured here."""
+    norm_path = m.model_path.replace(".pth", "_norm.json")
+    if os.path.exists(norm_path):
+        with open(norm_path) as f:
+            return json.load(f).get("fit_time_s")
+    return None
+
+
+# ── HomoGNN inference ────────────────────────────────────────────────────────
+# Extracted from training.Modelling.compare_models()'s inline logic so it can be
+# reused elsewhere (e.g. a full model-vs-all-baselines table) without duplicating
+# the loading/prediction loop -- compare_models() itself is untouched.
+
+def homo_predictions(m) -> "tuple[pd.DataFrame, float]":
+    """Run the persisted HomoGNN (REG_GNN) checkpoint on m.test_data; return
+    denormalised predictions plus the wall-clock prediction time in seconds."""
+    from model_classes import REG_GNN
+
+    vp = m.kpi_viewpoint
+    het_test = [g for g in m.test_data if g[vp].y.shape[0] > 0]
+    homo_test = m._hetero_to_homo(m.test_data)
+    homo_model_path = m.model_path.replace(".pth", "_homo.pth")
+
+    in_ch = homo_test[0].x.size(-1)
+    homo_model = REG_GNN.REG_GNN(
+        in_channels=in_ch,
+        hidden_channels=m.params.get('hidden_channels', 48),
+        num_layers=m.params.get('num_layers', 3),
+    ).to(m.device)
+    homo_model.load_state_dict(torch.load(homo_model_path, weights_only=False))
+    homo_model.eval()
+
+    denorm = lambda v: (v * m.target_std.item() + m.target_mean.item()) / 3600.0
+    records = []
+    pred_time_s = 0.0
+    with torch.no_grad():
+        for g_het, g_hom in zip(het_test, homo_test):
+            g_het = g_het.to(m.device)
+            g_hom = g_hom.to(m.device)
+
+            _t0 = time.time()
+            pred_n = homo_model(
+                g_hom.x.unsqueeze(0) if g_hom.x.dim() == 1 else g_hom.x,
+                g_hom.edge_index,
+                torch.zeros(g_hom.num_nodes, dtype=torch.long, device=m.device),
+            ).item()
+            pred_time_s += time.time() - _t0
+
+            records.append({
+                'order_id':      int(g_het[vp].id[0].item()),
+                'true_h':        denorm(g_het[vp].y[0].item()),
+                'homo_pred_h':   denorm(pred_n),
+                'n_events':      g_het['Events'].num_nodes,
+                'last_event':    bool(g_het[vp].last_event[0].item()),
+            })
+    return pd.DataFrame(records), pred_time_s
+
+
+def read_homo_fit_time(m) -> float | None:
+    """Read back the fitting time recorded by training.Modelling.Homo_Reg_Modelling's
+    _homo_meta.json sidecar, mirroring read_hgt_fit_time(m)."""
+    homo_model_path = m.model_path.replace(".pth", "_homo.pth")
+    meta_path = homo_model_path.replace(".pth", "_meta.json")
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            return json.load(f).get("fit_time_s")
+    return None
+
+
+# ── k-dim GNN inference ─────────────────────────────────────────────────────
+# HOEG's (Smit et al. 2024) own architecture (Morris et al. 2019 k-dim GNN), ported to
+# model_classes/KDIM_GNN.py and wrapped with the same to_hetero() transform Smit et
+# al.'s own code uses. Unlike homo_predictions() (which runs on _hetero_to_homo()'s
+# stripped-down Events-only graph), this operates on the SAME full heterogeneous graph
+# hgt_predictions() does -- to_hetero() duplicates message passing per node type rather
+# than collapsing the graph first -- so this mirrors hgt_predictions() almost exactly,
+# just reconstructing/wrapping the model first (mirroring homo_predictions()'s
+# reconstruct-then-load-state-dict pattern) and indexing the wrapped model's
+# per-node-type output dict for the viewpoint type.
+
+def kdim_predictions(m) -> "tuple[pd.DataFrame, float]":
+    """Run the persisted k-dim GNN (to_hetero()-wrapped KDimGNN) checkpoint on
+    m.test_data; return denormalised predictions plus the wall-clock prediction time
+    in seconds."""
+    from model_classes import KDIM_GNN
+
+    vp = m.kpi_viewpoint
+    kdim_model_path = m.model_path.replace(".pth", "_kdim.pth")
+
+    base_model = KDIM_GNN.KDimGNN(
+        hidden_channels=m.params.get('hidden_channels', 32),
+        out_channels=1,
+        num_layers=m.params.get('num_layers', 2),
+    )
+    kdim_model = pygnn.to_hetero(base_model, m.train_data[0].metadata()).to(m.device)
+
+    # Dummy forward pass to materialize to_hetero()'s lazily-initialized dimensions --
+    # required before load_state_dict() can match shapes, same reasoning as
+    # KDim_Reg_Modelling's own pre-optimizer dummy pass.
+    with torch.no_grad():
+        g0 = m.test_data[0].to(m.device)
+        kdim_model(g0.x_dict, g0.edge_index_dict)
+
+    kdim_model.load_state_dict(torch.load(kdim_model_path, weights_only=False))
+    kdim_model.eval()
+
+    denorm = lambda v: (v * m.target_std.item() + m.target_mean.item()) / 3600.0
+    records = []
+    pred_time_s = 0.0
+    with torch.no_grad():
+        for g in m.test_data:
+            g = g.to(m.device)
+            _t0 = time.time()
+            out = kdim_model(g.x_dict, g.edge_index_dict)[vp]
+            pred_h = denorm(out[0].item())
+            pred_time_s += time.time() - _t0
+            records.append({
+                'order_id':    int(g[vp].id[0].item()),
+                'true_h':      denorm(g[vp].y[0].item()),
+                'kdim_pred_h': pred_h,
+                'n_events':    g['Events'].num_nodes,
+                'last_event':  bool(g[vp].last_event[0].item()),
+            })
+    return pd.DataFrame(records), pred_time_s
+
+
+def read_kdim_fit_time(m) -> float | None:
+    """Read back the fitting time recorded by training.Modelling.KDim_Reg_Modelling's
+    _kdim_meta.json sidecar, mirroring read_homo_fit_time(m)."""
+    kdim_model_path = m.model_path.replace(".pth", "_kdim.pth")
+    meta_path = kdim_model_path.replace(".pth", "_meta.json")
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            return json.load(f).get("fit_time_s")
+    return None
+
+
+# ── printing helpers ───────────────────────────────────────────────────────
+
+def _fmt(m: dict) -> str:
+    return f"{m['mae']:7.1f}  {m['rmse']:7.1f}  {m['r2']:6.3f}"
+
+
+def print_table(results: dict):
+    header = (f"{'Model':<18}  {'ALL PREFIXES':^30}  {'LAST-EVENT ONLY':^30}\n"
+              f"{'':18}  {'MAE(h)':>7}  {'RMSE(h)':>7}  {'R²':>6}  "
+              f"{'MAE(h)':>7}  {'RMSE(h)':>7}  {'R²':>6}")
+    sep = '─' * 76
+    print()
+    print(header)
+    print(sep)
+    for name, (m_all, m_last) in results.items():
+        print(f"{name:<18}  {_fmt(m_all)}  {_fmt(m_last)}")
+    print()
+
+
+# ── main ───────────────────────────────────────────────────────────────────
+
+def run(database, cant):
+    """Runs the full baseline comparison (Mean/GBT/HGT/HomoGNN, incl. MAE-by-depth)
+    for one (database, cant) pair. Previously this logic only ever ran hardcoded
+    for order_management/2000 -- factored into a function, with the viewpoint and
+    feature columns derived dynamically from `m` instead of hardcoded, so it also
+    works for logistics/CustomerOrder (see docs/archive/OPEN_ISSUES_FEASIBILITY.md item 7)."""
+    out_dir = f"files/explainer_outputs/{database}/validation_{cant}"
+
+    # ── 1. Load data ──────────────────────────────────────────────────────
+    import sup_funcs as sf
+    path_dict = sf.SupportFunctions(database, cant).get_paths()
+    pt_path   = path_dict['pytorch_path']
+
+    m = t.Modelling(database, cant)  # built early -- need m.kpi_viewpoint for load_raw_split
+    vp = m.kpi_viewpoint
+
+    print("Loading raw graph splits...")
+    train_df = load_raw_split(f"{pt_path}/train_graphs_sg.pt", viewpoint=vp)
+    test_df  = load_raw_split(f"{pt_path}/test_graphs_sg.pt", viewpoint=vp)
+
+    # feat_cols derived dynamically, not a fixed list -- viewpoints carry different
+    # numbers of raw features per database (e.g. Orders has 4, CustomerOrder has 1),
+    # same fix explainer.py's compare_to_baselines() already applies.
+    feat_cols = [c for c in train_df.columns if c not in ('y_h', 'order_id', 'last_event')]
+    X_train = train_df[feat_cols].values
+    y_train = train_df['y_h'].values
+    X_test  = test_df[feat_cols].values
+    y_test  = test_df['y_h'].values
+    last_mask = test_df['last_event'].values
+
+    # ── 2. Fit baselines (timed, HOEG Table 7-style) ────────────────────────
+    print("Fitting Mean predictor...")
+    mean_pred = MeanPredictor()
+    _t0 = time.time()
+    mean_pred.fit(y_train)
+    mean_fit_time_s = time.time() - _t0
+    _t0 = time.time()
+    mean_preds = mean_pred.predict(len(test_df))
+    mean_pred_time_s = time.time() - _t0
+
+    print("Fitting GBT (n_estimators=300)...")
+    gbt = GBTPredictor()
+    _t0 = time.time()
+    gbt.fit(X_train, y_train)
+    gbt_fit_time_s = time.time() - _t0
+    _t0 = time.time()
+    gbt_preds = gbt.predict(X_test)
+    gbt_pred_time_s = time.time() - _t0
+
+    # ── 3. HGT + HomoGNN predictions ────────────────────────────────────────
+    print("Loading HGT model and running inference...")
+    hgt_fit_time_s = read_hgt_fit_time(m)  # from training.py's recorded fit time — never retrained here
+    hgt_df, hgt_pred_time_s = hgt_predictions(m)
+    hgt_preds = hgt_df['hgt_pred_h'].values
+
+    # sanity: test split order matches (same number of graphs)
+    assert len(hgt_df) == len(test_df), (
+        f"HGT ({len(hgt_df)}) and raw test ({len(test_df)}) have different lengths"
+    )
+
+    print("Loading HomoGNN model and running inference...")
+    homo_df, homo_pred_time_s = homo_predictions(m)
+    homo_fit_time_s = read_homo_fit_time(m)
+    # homo_df is NOT row-aligned with test_df/hgt_df: _hetero_to_homo() filters out
+    # prefixes where the viewpoint object hasn't appeared yet, so HomoGNN's test set
+    # can be shorter (same reason compare_to_baselines() keeps it separate rather
+    # than merging). Depth-binning below uses homo_df's own self-consistent
+    # true_h/homo_pred_h/n_events, not test_df's.
+
+    # ── Scalability table (fitting/prediction time, seconds) ────────────────
+    _fmt_time = fmt_time
+
+    print(f"\n{'Model':<18}  {'Fitting Time (s)':>18}  {'Prediction Time (s)':>20}")
+    print(f"{'Mean predictor':<18}  {_fmt_time(mean_fit_time_s):>18}  {mean_pred_time_s:>20.4f}")
+    print(f"{'GBT':<18}  {_fmt_time(gbt_fit_time_s):>18}  {gbt_pred_time_s:>20.4f}")
+    print(f"{'HGT (ours)':<18}  {_fmt_time(hgt_fit_time_s):>18}  {hgt_pred_time_s:>20.4f}")
+    print(f"{'HomoGNN (GCN)':<18}  {_fmt_time(homo_fit_time_s):>18}  {homo_pred_time_s:>20.4f}")
+
+    # ── 4. Compute metrics ────────────────────────────────────────────────
+    results = {}
+    for name, preds in [('Mean predictor', mean_preds),
+                         ('GBT',            gbt_preds),
+                         ('HGT (ours)',      hgt_preds)]:
+        m_all  = metrics(y_test,             preds)
+        m_last = metrics(y_test[last_mask],  preds[last_mask])
+        results[name] = (m_all, m_last)
+    homo_last_mask = homo_df['last_event'].values
+    results['HomoGNN (GCN)'] = (
+        metrics(homo_df['true_h'].values, homo_df['homo_pred_h'].values),
+        metrics(homo_df['true_h'].values[homo_last_mask], homo_df['homo_pred_h'].values[homo_last_mask]),
+    )
+
+    print_table(results)
+
+    print("GBT feature importances:")
+    for feat, imp in sorted(zip(feat_cols, gbt.feature_importances_),
+                             key=lambda x: -x[1]):
+        print(f"  {feat:<14}: {imp:.3f}")
+
+    # ── 5. MAE by depth ───────────────────────────────────────────────────
+    n_ev = test_df['n_events'].values
+    BINS = ['1-3', '4-6', '7-9', '10+']
+    depth_results = {
+        'Mean':    depth_mae(y_test, mean_preds, n_ev),
+        'GBT':     depth_mae(y_test, gbt_preds, n_ev),
+        'HGT':     depth_mae(hgt_df['true_h'].values, hgt_df['hgt_pred_h'].values,
+                              hgt_df['n_events'].values),
+        'HomoGNN': depth_mae(homo_df['true_h'].values, homo_df['homo_pred_h'].values,
+                              homo_df['n_events'].values),
+    }
+
+    print("\nMAE by prefix depth (all prefixes):")
+    print(f"  {'Bin':<6}  {'Mean':>7}  {'GBT':>7}  {'HGT':>7}  {'HomoGNN':>7}")
+    for b in BINS:
+        row = "  ".join(f"{depth_results[mdl][b]:7.1f}" for mdl in ['Mean', 'GBT', 'HGT', 'HomoGNN'])
+        print(f"  {b:<6}  {row}")
+
+    depth_df = pd.DataFrame({'depth_bin': BINS})
+    for mdl in ['HGT', 'HomoGNN', 'Mean', 'GBT']:
+        depth_df[mdl] = [depth_results[mdl][b] for b in BINS]
+    depth_csv_path = f"{out_dir}/mae_by_depth_{m.task_id}.csv"
+    depth_df.to_csv(depth_csv_path, index=False)
+    print(f"Saved {depth_csv_path}")
+
+    # ── 6. Visualization ──────────────────────────────────────────────────
+    os.makedirs(out_dir, exist_ok=True)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    # — Left: Predicted vs True scatter (last-event only) —
+    ax = axes[0]
+    y_true_last = y_test[last_mask]
+    lim = max(y_true_last.max(), gbt_preds[last_mask].max(), hgt_preds[last_mask].max()) * 1.08
+
+    ax.scatter(y_true_last, gbt_preds[last_mask],
+               alpha=0.55, s=22, color='steelblue',
+               label=f"GBT  (MAE={results['GBT'][1]['mae']:.1f}h)")
+    ax.scatter(y_true_last, hgt_preds[last_mask],
+               alpha=0.55, s=22, color='tomato',
+               label=f"HGT  (MAE={results['HGT (ours)'][1]['mae']:.1f}h)")
+    ax.plot([0, lim], [0, lim], 'k--', lw=1, label='Perfect prediction')
+    ax.set_xlim(0, lim); ax.set_ylim(0, lim)
+    ax.set_xlabel('True remaining time (h)')
+    ax.set_ylabel('Predicted remaining time (h)')
+    ax.set_title('Predicted vs True — last-event prefixes')
+    ax.legend(fontsize=9)
+
+    # — Right: MAE by depth (grouped bar chart, all prefixes) —
+    ax = axes[1]
+    x     = np.arange(len(BINS))
+    width = 0.2
+    colors = {'Mean': 'silver', 'GBT': 'steelblue', 'HGT': 'tomato', 'HomoGNN': 'seagreen'}
+    for i, (name, clr) in enumerate(colors.items()):
+        vals = [depth_results[name][b] for b in BINS]
+        bars = ax.bar(x + (i - 1.5) * width, vals, width, label=name, color=clr,
+                      edgecolor='white', linewidth=0.5)
+        for bar, v in zip(bars, vals):
+            if not np.isnan(v):
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
+                        f'{v:.0f}', ha='center', va='bottom', fontsize=7)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(BINS)
+    ax.set_xlabel('Prefix depth (n events seen)')
+    ax.set_ylabel('MAE (h)')
+    ax.set_title('MAE by prefix depth — all prefixes')
+    ax.legend(fontsize=9)
+
+    plt.suptitle(f'Baseline Comparison — {database} (cant={cant})', fontsize=12, y=1.01)
+    plt.tight_layout()
+    out_path = f"{out_dir}/baseline_comparison.png"
+    plt.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"\nPlot saved to {out_path}")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--database', default=DATABASE)
+    parser.add_argument('--cant', type=int, default=CANT)
+    args = parser.parse_args()
+    run(args.database, args.cant)

@@ -1,0 +1,166 @@
+{
+  "Order Management / Orders -> PayOrder": {
+    "kpi_label": "Order Management / Orders -> PayOrder",
+    "order_id": 1801,
+    "n_events": 4,
+    "true_hours": 404.62083311987004,
+    "predicted_hours": 211.92586805555555,
+    "rows": [
+      {
+        "label": "Customers: Eastern Oak Insurance Zrt.",
+        "signed_shift_hours": -10.588928472222223
+      },
+      {
+        "label": "Events: ConfirmOrder",
+        "signed_shift_hours": 10.3535734375
+      },
+      {
+        "label": "Events: PickItem",
+        "signed_shift_hours": -8.655182465277777
+      },
+      {
+        "label": "Items: i-886996",
+        "signed_shift_hours": 6.6714640625
+      },
+      {
+        "label": "Events: CreatePackage",
+        "signed_shift_hours": -3.321052951388889
+      },
+      {
+        "label": "Products: MacBook Pro",
+        "signed_shift_hours": 2.980582638888889
+      },
+      {
+        "label": "Items: i-886995",
+        "signed_shift_hours": 0.6381446180555556
+      },
+      {
+        "label": "Products: iPad mini",
+        "signed_shift_hours": 0.1818071180555555
+      }
+    ]
+  },
+  "Logistics / CustomerOrder -> LoadToVehicle": {
+    "kpi_label": "Logistics / CustomerOrder -> LoadToVehicle",
+    "order_id": 911,
+    "n_events": 29,
+    "true_hours": 556.2233240319354,
+    "predicted_hours": 319.866875,
+    "rows": [
+      {
+        "label": "Events: CreateTransportDocument",
+        "signed_shift_hours": 0.7749663194444444
+      },
+      {
+        "label": "Events: RegisterCustomerOrder",
+        "signed_shift_hours": 0.587715625
+      },
+      {
+        "label": "Events: BookVehicles",
+        "signed_shift_hours": 0.120246875
+      },
+      {
+        "label": "TransportDocument: td911",
+        "signed_shift_hours": 0.0571680555555555
+      },
+      {
+        "label": "Container: cr3106",
+        "signed_shift_hours": -0.0212791666666666
+      },
+      {
+        "label": "Vehicle: vh204",
+        "signed_shift_hours": -0.0118440972222222
+      },
+      {
+        "label": "Truck: tr1",
+        "signed_shift_hours": -0.0023555555555555
+      },
+      {
+        "label": "Vehicle: vh198",
+        "signed_shift_hours": -0.0022614583333333
+      }
+    ]
+  },
+  "Order Management / Orders -> PackageDelivered": {
+    "kpi_label": "Order Management / Orders -> PackageDelivered",
+    "order_id": 1935,
+    "n_events": 4,
+    "true_hours": 958.2160911637213,
+    "predicted_hours": 183.93383680555556,
+    "rows": [
+      {
+        "label": "Events: ConfirmOrder",
+        "signed_shift_hours": 36.60302595486111
+      },
+      {
+        "label": "Events: ItemOutOfStock",
+        "signed_shift_hours": 23.455130381944446
+      },
+      {
+        "label": "Events: PickItem",
+        "signed_shift_hours": -14.208616666666666
+      },
+      {
+        "label": "Customers: Iberian Sun Solaridades SA",
+        "signed_shift_hours": 6.700780381944445
+      },
+      {
+        "label": "Employees: Sales",
+        "signed_shift_hours": -1.3211452256944445
+      },
+      {
+        "label": "Items: i-887450",
+        "signed_shift_hours": 0.4356604166666666
+      },
+      {
+        "label": "Products: Echo Dot",
+        "signed_shift_hours": 0.3822384548611111
+      },
+      {
+        "label": "Products: iPad Air",
+        "signed_shift_hours": 0.3681483506944444
+      }
+    ]
+  },
+  "Logistics / CustomerOrder -> Depart": {
+    "kpi_label": "Logistics / CustomerOrder -> Depart",
+    "order_id": 959,
+    "n_events": 24,
+    "true_hours": 536.0247279634078,
+    "predicted_hours": 352.8070833333333,
+    "rows": [
+      {
+        "label": "Events: OrderEmptyContainers",
+        "signed_shift_hours": -18.46411284722222
+      },
+      {
+        "label": "Events: RegisterCustomerOrder",
+        "signed_shift_hours": 4.043784375
+      },
+      {
+        "label": "Events: CreateTransportDocument",
+        "signed_shift_hours": 1.943030902777778
+      },
+      {
+        "label": "Vehicle: vh214",
+        "signed_shift_hours": 0.7638170138888889
+      },
+      {
+        "label": "Vehicle: vh208",
+        "signed_shift_hours": 0.7444111111111111
+      },
+      {
+        "label": "TransportDocument: td959",
+        "signed_shift_hours": -0.1741072916666666
+      },
+      {
+        "label": "Container: cr3282",
+        "signed_shift_hours": -0.066065625
+      },
+      {
+        "label": "Container: cr3281",
+        "signed_shift_hours": 0.0164666666666666
+      }
+    ]
+  }
+}

@@ -1,0 +1,218 @@
+{
+  "Order Management / Orders -> PayOrder": {
+    "kpi_label": "Order Management / Orders -> PayOrder",
+    "n_traces": 50,
+    "rows": [
+      {
+        "label": "Events=ReorderItem",
+        "mean_signed_shift": -25.62628115354938,
+        "std_shift": 13.666397488544906,
+        "count": 3
+      },
+      {
+        "label": "Customers=Riviera Robotics SAS",
+        "mean_signed_shift": -15.335636574074073,
+        "std_shift": 3.1268015210184483,
+        "count": 3
+      },
+      {
+        "label": "Customers=Mediterranea Luxury Cruises S.p.A.",
+        "mean_signed_shift": 12.480381944444444,
+        "std_shift": 2.206665428388639,
+        "count": 3
+      },
+      {
+        "label": "Events=ConfirmOrder",
+        "mean_signed_shift": -9.208908950617284,
+        "std_shift": 1.4378288571371003,
+        "count": 3
+      },
+      {
+        "label": "Customers=Eastern Oak Insurance Zrt.",
+        "mean_signed_shift": -8.310581597222223,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "Customers=Celtica Green Farms Oy",
+        "mean_signed_shift": -6.313576388888889,
+        "std_shift": 0.3806595432743047,
+        "count": 3
+      },
+      {
+        "label": "Items=i-887099",
+        "mean_signed_shift": -5.945345775462964,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "Items=i-887042",
+        "mean_signed_shift": 5.9304592013888895,
+        "std_shift": 0.0,
+        "count": 1
+      }
+    ]
+  },
+  "Logistics / CustomerOrder -> LoadToVehicle": {
+    "kpi_label": "Logistics / CustomerOrder -> LoadToVehicle",
+    "n_traces": 50,
+    "rows": [
+      {
+        "label": "Events=BringToLoadingBay",
+        "mean_signed_shift": -107.78657214506173,
+        "std_shift": 151.15957787084557,
+        "count": 3
+      },
+      {
+        "label": "TransportDocument=td866",
+        "mean_signed_shift": 4.059756944444445,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "TransportDocument=td884",
+        "mean_signed_shift": 3.7012152777777776,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "TransportDocument=td885",
+        "mean_signed_shift": 3.33875,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "TransportDocument=td864",
+        "mean_signed_shift": 3.315,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "TransportDocument=td908",
+        "mean_signed_shift": 1.9997569444444443,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "TransportDocument=td902",
+        "mean_signed_shift": 1.5197222222222222,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "TransportDocument=td881",
+        "mean_signed_shift": 1.474236111111111,
+        "std_shift": 0.0,
+        "count": 1
+      }
+    ]
+  },
+  "Order Management / Orders -> PackageDelivered": {
+    "kpi_label": "Order Management / Orders -> PackageDelivered",
+    "n_traces": 50,
+    "rows": [
+      {
+        "label": "Events=ConfirmOrder",
+        "mean_signed_shift": -11.073077353395062,
+        "std_shift": 0.7713280168990126,
+        "count": 3
+      },
+      {
+        "label": "Events=PayOrder",
+        "mean_signed_shift": -8.62284982638889,
+        "std_shift": 1.087944033675436,
+        "count": 3
+      },
+      {
+        "label": "Events=PlaceOrder",
+        "mean_signed_shift": -6.847305941358026,
+        "std_shift": 1.30349202617666,
+        "count": 3
+      },
+      {
+        "label": "Customers=Iberian Sun Solaridades SA",
+        "mean_signed_shift": -3.8178067129629625,
+        "std_shift": 1.2048709498747188,
+        "count": 3
+      },
+      {
+        "label": "Customers=Baltic Wave Energies Ltd.",
+        "mean_signed_shift": 1.9647395833333337,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "Customers=Mediterranea Luxury Cruises S.p.A.",
+        "mean_signed_shift": -1.955324074074074,
+        "std_shift": 2.7370951599364304,
+        "count": 3
+      },
+      {
+        "label": "Packages=p-660971",
+        "mean_signed_shift": -1.1568793402777775,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "Packages=p-660954",
+        "mean_signed_shift": -1.0611631944444444,
+        "std_shift": 0.0,
+        "count": 1
+      }
+    ]
+  },
+  "Logistics / CustomerOrder -> Depart": {
+    "kpi_label": "Logistics / CustomerOrder -> Depart",
+    "n_traces": 50,
+    "rows": [
+      {
+        "label": "Events=BringToLoadingBay",
+        "mean_signed_shift": -39.198066936728395,
+        "std_shift": 55.44174399285084,
+        "count": 3
+      },
+      {
+        "label": "TransportDocument=td920",
+        "mean_signed_shift": 0.5105555555555555,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "Events=CreateTransportDocument",
+        "mean_signed_shift": 0.4548825231481481,
+        "std_shift": 0.4189224967563168,
+        "count": 3
+      },
+      {
+        "label": "TransportDocument=td863",
+        "mean_signed_shift": 0.3010416666666666,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "TransportDocument=td890",
+        "mean_signed_shift": 0.2957638888888889,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "TransportDocument=td872",
+        "mean_signed_shift": 0.2871875,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "TransportDocument=td864",
+        "mean_signed_shift": 0.2668402777777778,
+        "std_shift": 0.0,
+        "count": 1
+      },
+      {
+        "label": "TransportDocument=td906",
+        "mean_signed_shift": 0.2424305555555555,
+        "std_shift": 0.0,
+        "count": 1
+      }
+    ]
+  }
+}

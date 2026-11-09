@@ -1,0 +1,98 @@
+Intro and Preliminaries
+	Predictive process monitoring refers to the practice of predicting the outcome of an ongoing process before the process is finished in order to give stakeholders a chance to influence the process output.
+	Predictive process monitoring relies on the concept of Object Centric Event Logs, a way to represent a business process flows through the relationship between events in a process execution and the different objects associated with each event step.
+		An OCEL table would show all the object types (with their respective IDs) of the objects related to that particular event, for example the items associated with a particular order or the truck assigned to perform a delivery
+		All this information is taken from the initial database, we need to have our events and objects clearly defined as well as the relationship between events to objects and objects to objects. The event-to-event relationship can be inferred from the provided information
+		A core elements of OCELS are the process executions or traces. Traces can be defined in two ways, the one we chose refers to selecting a viewpoint object to serve as the basis for identifying the events and relationships that make up a whole process. In other words, we choose a start point for each trace, and given a certain connection depth or hop distance we can identify the end of the process. 
+		Traces can be broken down into their individual event steps, also known as prefixes. A given prefix defines the trace at a particular moment in time.
+		In a graph point of view each trace is a strongly connected component of the original graph.
+		Explain how this means we end up with a list of distinct elements as opposed to one huge, interconnected graph. A global envisioning of the process is possible but is outside the scope of this thesis (Mention Pietro's work in the area)
+		KPIs: A KPI is described as a function T that, given a trace and a value i provides the value of a given measure in the trace after i events have occurred. Two common examples can be
+			- Time remaining: How much time is left until the current process ends at any given event in the trace. Calculated as end_ev_time - current_ev_time
+			 - Appearance of an event: Calculates the probability of a certain event happening in the current trace. At any given point in the trace, before the trace appears the KPI can have value either True (if the event will happen) or False (If the event won't happen in the future.)
+		Prediction problem: As stated before, the goal of a predictive process monitoring process is to provide a prediction for a certain KPI value given the current information in the trace. Formally it wants to find a prediction for T() at a given value i where i is higher than the value of i at the current time.
+		In order to perform this prediction we can use different methods, chief among them Neural Networks given their predictive power. 
+
+		(Adams)
+		An important aspect to note is that OCEL data can be presented in a variety of forms. Traditional architectures presented the information as a series of steps in a table, however this assigns a temporal constraint on the information, making it seem like there is stringent process ordering when, in reality, different processes could be occurring at the same time. 
+			Because of this graph respresentations are considered to be a lossy way of representing OCEL information and have been pushed out of use in favor of methods that preserve the original information of the process system.
+			-- Check Adams for the intermediate point between table and graph -- 
+			Graph representation: The OCEL can also be represented as a graph, with form (N, V) for nodes and vertices. These have become the standard way of defining OCEL's given their ability to encode the information present in the process definition without having to change its original form.
+				Homogeneous: Homogeneous representations defined the OCEL as a series of event nodes that are connected in the graph when they events have the same object related to them. For example, the CreateOrder(?) event has an associated Order and item objects so it will be connected to other events (within a defined hop distance) that also use those objects (For example, the PickItem events and the ConfirmOrder event)
+				Heterogeneous: Given the benefit of representing the OCEL in it's original graph form heterogeneous graphs allow for an even more complete representation, allowing the use of different node and edge types to properly represent the flow of the process. Here, it's not just event nodes connecting to other event nodes to denote the flow of the process, it's object nodes denoting the appearance of new elements (and their assigned attributes) as the process flows. Ideally, it should allow for more powerful predictive models by encoding even more information about the process into the already benefitial graph implementation.
+
+		(Smit et al)
+		Since we want to represent the information as a graph the obvious choice for predictive work is using Graph Neural Networks (GNNs)
+			This involves transforming each trace into a tuple (x,y) where X is the heterogeneous graph representation of the prefix and Y is the associated 
+			Datasets KPI value therefore we're performing a supervised learning process
+			Datasets
+				Explain the choice of datasets, both Order Management and Logistics are synthetic OCEL 2.0 Standard datasets that can be downloaded from the official OCEL site.
+				Explain the processes each dataset models, and the choice of KPIs for each one. If we have enough time we could try to add BIC17 or another of the Smit ones to pad this out a bit more
+			Train test split
+				The train test split was performed ensuring a temporal separation between the three sets. To ensure this all processes present in the training set began after the end of all the processes in the validation set, which in turn all began after the end of every process in the training set. This way we ensure that there's no information leakage between the sets and a model learns from future events.
+			Model architecture and metric decision
+				We used MAE and RME to check the performance of the model. Need to check why these metrics are correct for this type of analysis. Also explain the choice of optimizer. And the model choice - Why HGT and not other types of heterogeneous models.
+			Tuning
+				A hyperparameter sweep was employed to indentify the most effective hyperparameters for the model. For the Order Management database the number of layers was constrained to a max of 2 following the information presented in the HOEGG paper.
+				For Logistics, tests showed that the model was not performing correctly with the same sweep space so it was provided with a greater choice of layer depth, following Pietro's work. This allowed the model to properly identify the most effective design choice
+				Weight decay was also found to be a problem for the proper training of the model.  If possible look into why weight decay impacted the training negatively
+			Training validation
+				The chosen model was trained in batches using the training data and then checked against the validation data. The best overall result of the run over 30 epochs was selected 
+			Baselines for comparison 
+				The model was compared against the Mean (as the most basic baseline), a Gradient Boosted model trained on a tabular representation of the data and a Homogeneous model trained on a homogeneous representation of the information. The purpose of this was to showcase that heterogeneous models are able to provide better explanations than other structures since they're able to codify a greater variety of information into a usable shape.
+				Also, mention how it was checked wether the model was performing better or worse as prefix length increased, since we would like the model to be more precise the farther along a process we are.
+		
+		While Neural Networks outperform other predictive methods, especially whitebox approaches that can be easily interpreted by the end user, the tradeoff is an offuscation of the predictive process itself. The goal of the thesis is to provide insight into the inner workings of these models so an end user is capable of understanding why the predictive model is giving the result it provided and, in that way, provide greater insight into the prediction, the model itself and maybe even the dataset that was used.
+			We can explain how we began by investigating the possible options for explainability applied to heterogeneous graphs
+				We can mention the Explain layer in Pytorch geometric and how it purports to support heterogeneous models but that it relies heavily on model design so, for our chosen model it could not be fully used.
+				We can mention HGExplainer, and how it was defined but had no code implementation in the open so attempting to design one was outside the scope of this thesis
+				We can mention HTGExplainer and how it's added importance on time attributes made it seem perfect for our application. However, since it was designed using the DALG library the framework was not directly applicable to Pytorch Geometric. A test was conducted locally on the original files and it functioned as shown in the paper but when an attempt was made to translate the implementation into PYG framework the change resulted in the examples not being able to run. Future works on this area could see if building the rest of the pipeline on DALG can be done to leverage the power of this explainer.
+			We mention the foundational work for our application, Zhin et al's work on adding post-hoc explainability to a heterogeneous graph neural network.
+				We talk about how we also decided on a three layer approach to provide information
+					Perturbation analysis: Our GNNExplainer + Perturbation vs. their ablation analysis
+						Here we could consider adding a way to try to quantify the change by changing the values along a set space and seeing how the prediction changes so we can quantify how, for example, adding 1 more package changes the average prediction time in the set.
+						Explain how the analysis can be performed both on single traces but also on the entire test set to obtain both individual process execution importance as well as more generalized idea on the importance of elements.
+						Show how the aggregate is calculated.
+					Feature attribution: A direct application of their work, leveraging the power of the Captum Explainer
+						Feature attribution uses two methods InputGradients and Integrated Gradients to calculate an attribution value for each feature in a given node over the provided space (Can be used either on a single prefix or as an aggregate)
+							We showcase both, how the analysis gives a look into the importance of different attributes and how, in combination with layer 1, we can provide an estimate of the impact the select feature has on the predicted KPI value (for example, this feature going from current value to NAN increases prediction time by X hours)
+							For aggregated we can follow the example of the original paper and show a heatmap of the attribution score for the distinct elements over graphs in distinct places in their timeline. Must find a way to deepen this
+					Counterfactual analysis: A direct reference to their work.
+						We mention how they used it on a classifier problem so the selection process for the counterfactual candidates had to be adapted for a regression problem
+							In the original work, since it's a classifier, they only needed to filter for values with the desired classification value
+							For our regression value this meant establishing a threshold for a minimal difference in value between the predictions of two models so we're not just selecting a counterfactual that's only 2 seconds faster, but one that is meaningfully different.
+						We also need to mention the way the possible CF candidates were chosen
+							The original work used nodes which were all of similar overall length. Given the nature of our process analysis we cannot just look over the entire test set since we would end up comparing a process that's almost done with one only beginning. 
+							Rules were set in place to properly identify prefixes of processes that were at similar states in their lifetimes
+							We could also argue that we only check on processes that have already occurred, so the CF cannot be computed against events that have not yet happened.
+						Then we explain how the actual dissimilarity score was calculated
+							Explain each distinct value and how the combination provides a dissimilarity score that can be used to evaluate two subgraphs and identify proper counterfactuals
+						Explain the process
+							Subgraph 1 is selected for analysis
+							A group of similar prefixes with prediction value lower (or higher) by a given threhsold is compiled
+							Each subgraph in the group is compared against subgraph 1 and their dissimilarity score calculated
+								The value with the lowest score is identified as the closest example to subgraph 1 in the current data set
+								Then we can break down where the differences lie by looking at the breakdown of the dissimilarity score
+								We show the end user the places were the differences lie so they can understand what is causing the impact.
+Results
+	OCEL and trace values
+		Give an overview of the total size of the data being processed for each dataset.
+		Provide examples of the generated OCEL, event log and individual graph structure if possible
+	Model
+		Show results of the sweep for different KPIs, go a bit deeper into the need to user more layers for Logistcs vs. Order Management since Logistics is composed of a deeper graph structure, it's traces require a greater number of hops to properly take into account all the distinct elements. If a lower number of layers is chosen the model is incapable of assigning weights to all elements in the graph and certain nodes can be completely excluded, severely limiting the predicting capabilities of the model.
+
+		Show the results of the comparison against the baselines. Mention what Massimiliano said that, given the spread, we cannot be 100% sure that heterogeneous is head and shoulders above the others but it's a comfortable prediction. If possible give a read on the R2 values and what they mean and also show the MAE against prefix depth graph to show that heterogeneous shows significant improvement over time.
+
+	Explainability
+		Ideally here we'll be able to show screenshots of a simple GUI that provides the end user with an intuitive way of working with the information of the model.
+		Layer 1:
+			Show examples of how we can identify the most important nodes and quantify their effect for the end user. Explain the value of this, an end user can understand how the appearance of a given event in their timeline signifies a change in the prediction. Not just events, can be applied to Orders, items, anything that appears in the trace
+			We can try to add a way for the user to change values in a node and see how that affects the prediction.
+				Maybe a way to generate a synthetic graph, with more nodes to check the impact on the analysis.
+			Can also be done on aggregate to provide a concise average measure of the impact each element has on the model at large
+		Layer 2:
+			Show the generated heatmaps and provide an explanation on the information they provide. Explain how it makes sense that certain elements in the Order node have different importance at distinct times over the process lifespan
+			Also mention how it can be done on aggregate as well as single trace and combined with layer 1 to give an approximated value shift over the original prediction.
+		Layer 3:
+			Provide
+

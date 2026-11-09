@@ -1,0 +1,78 @@
+model,database,task_id,hidden_channels,lr,num_layers,val_mae_normalized
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,256,0.001,,0.43002377618705073
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,32,0.001,,0.4512898740909433
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,48,0.001,,0.4361409825342958
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,48,0.01,,0.4878937475463396
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,128,0.01,,0.4732070209518556
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,24,0.001,,0.44876554223798937
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,16,0.001,,0.4334492341324847
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,256,0.001,,0.4244215020569422
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,64,0.001,,0.44697180806949577
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,16,0.01,,0.43739062050978345
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,8,0.001,,0.4314840198844992
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,24,0.01,,0.43483774748540693
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,128,0.001,,0.4473880595096978
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,256,0.001,,0.43002377618705073
+Order Management / Orders → PayOrder,order_management,TimeFrom_Orders_to_PayOrder,8,0.01,,0.4273824920897843
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,256,0.001,,0.7628594424520926
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,32,0.001,,0.7375402423047731
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,48,0.001,,0.7512867934391146
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,48,0.01,,0.7556698827829929
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,128,0.01,,0.8024639817946321
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,24,0.001,,0.7226531422014788
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,16,0.001,,0.7416173038141186
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,256,0.001,,0.7465298566147621
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,64,0.001,,0.7403232038432509
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,32,0.01,,0.7530720531683321
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,16,0.01,,0.7292386375438354
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,8,0.001,,0.7268335230397808
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,24,0.01,,0.7218059974049987
+Order Management / Orders → PackageDelivered,order_management,TimeFrom_Orders_to_PackageDelivered,128,0.001,,0.7351161999832051
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,64,0.001,5.0,0.817227726982062
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,32,0.001,5.0,0.8164202827640004
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,24,0.01,4.0,0.8153178674827859
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,64,0.001,3.0,0.6951872551730238
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,32,0.01,4.0,0.8160501156393699
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,24,0.01,3.0,0.6639676948578195
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,8,0.001,5.0,0.8156404969361142
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,16,0.01,5.0,0.8152104155778404
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,48,0.01,5.0,0.8152599906008267
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,48,0.01,3.0,0.6703630668857709
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,64,0.01,5.0,0.815552950518522
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,64,0.001,5.0,0.8158306920357612
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,24,0.001,4.0,0.7114149051322208
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,24,0.001,5.0,0.7914366191227062
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,16,0.001,4.0,0.6952117115149684
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,48,0.001,5.0,0.8159239276652385
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,8,0.001,4.0,0.6706752187053041
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,24,0.001,3.0,0.7344174887856344
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,48,0.001,4.0,0.7267334718593861
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,48,0.001,3.0,0.694395679614283
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,16,0.001,3.0,0.6745149166366355
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,32,0.001,3.0,0.6671710715245273
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,32,0.001,4.0,0.7007108451840984
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,16,0.01,3.0,0.6471701085895935
+Logistics / CustomerOrder → Depart,logistics,TimeFrom_CustomerOrder_to_Depart,8,0.001,3.0,0.6589278731174892
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,64,0.001,5.0,0.7910690386110693
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,32,0.001,5.0,0.7909844487089628
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,24,0.01,4.0,0.7909957705686108
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,32,0.01,4.0,0.792472189184025
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,24,0.01,3.0,0.7910635913359829
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,8,0.001,5.0,0.7650821029530309
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,16,0.01,5.0,0.7921478801009583
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,48,0.01,3.0,0.7903874479383184
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,48,0.01,4.0,0.7914534720713379
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,16,0.001,5.0,0.6457967817621785
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,24,0.001,4.0,0.665344763222895
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,8,0.01,5.0,0.7920288507712324
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,16,0.001,4.0,0.6483633646051683
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,48,0.001,5.0,0.7911197441251635
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,24,0.001,3.0,0.6765903514314022
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,48,0.001,4.0,0.641273547939083
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,48,0.001,3.0,0.6664310976231522
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,16,0.001,3.0,0.6809629549549377
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,32,0.001,3.0,0.7097009513647473
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,32,0.001,4.0,0.6660185817689831
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,16,0.01,3.0,0.6419089367044262
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,64,0.01,4.0,0.7757185442720934
+Logistics / CustomerOrder → LoadToVehicle,logistics,TimeFrom_CustomerOrder_to_LoadToVehicle,8,0.001,3.0,0.6855212769215289

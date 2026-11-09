@@ -1,54 +1,63 @@
 import pandas as pd
+
 import sup_funcs as sf
+
 
 class TrainTestBuilder:
     def __init__(self, database, cant):
         self.database = database
         self.cant = cant
         self.num_vp_obj = self.cant
-        self.funcs = sf.SupportFunctions(database)
+        self.funcs = sf.SupportFunctions(database, cant)
         self.path_dict = self.funcs.get_paths()
 
         self.pd_df = pd.read_csv(self.path_dict['ev_log_path'])
         self.pd_active_orders = self.get_active_orders()
 
         # Assigns train/test split values
-        self.index_train = round(0.6 * self.cant)
+        self.index_train = round(0.70 * self.cant)
         self.split_test_index = .5
-        self.step_size = round(0.1 * self.cant) #Step size is about 10% of the total data
 
     def get_active_orders(self):
         # Finds the timeframe for each order and puts them in chronological order
         # depending on when their last related event occurs
         active_orders = []
+        skipped = []
         for i in range(self.num_vp_obj):
             vwpnt_id = i+1
             temp = self.pd_df[self.pd_df['vwpnt_id'] == vwpnt_id]
-            start_time = temp.iloc[0,2]
+            try:
+                start_time = temp.iloc[0,2]
 
-            # Select the final event of the chosen type for marking the end time of the process
-            temp = temp[temp['type'] == self.path_dict['kpi_event']]
-            end_time = temp.iloc[-1, 2]
+                # Select the final event of the chosen type for marking the end time of the process
+                kpi_rows = temp[temp['type'] == self.path_dict['kpi_event']]
+                end_time = kpi_rows.iloc[-1, 2]
+            except IndexError:
+                # No rows for this trace, or none of the chosen kpi_event type within
+                # them — skip it (leave its rows untouched) instead of crashing the
+                # whole pipeline on one bad trace.
+                skipped.append(vwpnt_id)
+                continue
+
             active_orders.append([vwpnt_id, start_time, end_time])
 
             # Curtail the dataframe to avoid events that happen after our chosen end event
             del_index = self.pd_df[(self.pd_df['vwpnt_id'] == vwpnt_id) & (self.pd_df['timestamp'] > end_time)].index
             self.pd_df = self.pd_df.drop(del_index, inplace=False)
-            self.pd_df.to_csv(self.path_dict['ev_log_path'], index=False)
+
+        if skipped:
+            preview = skipped[:10]
+            print(f"  WARN [TrainTestBuilder]: skipped {len(skipped)} trace(s) with no rows or "
+                  f"no '{self.path_dict['kpi_event']}' event in window: {preview}"
+                  f"{', ...' if len(skipped) > 10 else ''}")
+
+        # Single write at the end, not once per trace — a failure partway through the
+        # loop above now never leaves ev_log.csv half-trimmed on disk.
+        self.pd_df.to_csv(self.path_dict['ev_log_path'], index=False)
 
         pd_active_orders = pd.DataFrame(active_orders)
         pd_active_orders.sort_values(by=2, inplace=True)
         return pd_active_orders
-
-    def sample_equally(self, input_list, num_samples):
-        # Handle edge cases
-        if num_samples - 1 <= 0:
-            return []
-        if num_samples >= len(input_list):
-            return input_list
-        step = int((len(input_list) - 1) / (num_samples - 1))
-        sampled_list = [input_list[i * step] for i in range(num_samples)]
-        return sampled_list
 
     def timestamps_generator(self):
         # Finds the timestamp related to the chosen train/test split
@@ -77,11 +86,10 @@ class TrainTestBuilder:
             (self.pd_active_orders[1] > last_timestamp) & (self.pd_active_orders[2] <= split_timestamp_val)][0]
         test_orders = self.pd_active_orders[self.pd_active_orders[1] > last_timestamp_val][0]
 
-        train_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(train_orders.values)]['timestamp'].values
-        val_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(val_orders.values)]['timestamp'].values
-        test_timestamps = self.pd_df[self.pd_df['vwpnt_id'].isin(test_orders.values)]['timestamp'].values
-
-        train_sampled_timestamps = self.sample_equally(train_timestamps, int(len(train_timestamps) / self.step_size))
-        val_sampled_timestamps = self.sample_equally(val_timestamps, int(len(val_timestamps) / self.step_size))
-        test_sampled_timestamps = self.sample_equally(test_timestamps, int(len(test_timestamps) / self.step_size))
-        return train_sampled_timestamps, val_sampled_timestamps, test_sampled_timestamps
+        print(f"\n[TrainTestBuilder] Split for {self.cant} traces:")
+        print(f"  Train : {len(train_orders):4d}  ({100*len(train_orders)/self.cant:.1f}%)")
+        print(f"  Val   : {len(val_orders):4d}  ({100*len(val_orders)/self.cant:.1f}%)")
+        print(f"  Test  : {len(test_orders):4d}  ({100*len(test_orders)/self.cant:.1f}%)")
+        gap = self.cant - len(train_orders) - len(val_orders) - len(test_orders)
+        print(f"  Gap   : {gap:4d}  ({100*gap/self.cant:.1f}%)  [temporal no-overlap exclusions]")
+        return train_orders, val_orders, test_orders

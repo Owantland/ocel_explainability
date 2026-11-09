@@ -138,6 +138,7 @@ celerybeat.pid
 .env
 .envrc
 .venv
+.venv1
 env/
 venv/
 ENV/
@@ -206,3 +207,39 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 /files/databases/
+/explainer_tests/
+
+# macOS
+.DS_Store
+
+# Generated pipeline artifacts (graphs, checkpoints, outputs) - regenerable, not source
+/files/graph_structures/
+/files/hetero_structures/
+/files/models/
+/files/output_tables/
+/files/explainer_outputs/
+/files/results.csv
+/dashboard_cache/
+/data/
+
+# Stray R session files (no R project here, but RStudio has been opened in thesis_parts/)
+.Rhistory
+
+# LaTeX build artifacts (thesis_parts/latex_template/) - regenerable from the .tex source
+*.aux
+*.bbl
+*.blg
+*.lof
+*.lot
+*.out
+*.toc
+*.xmpi
+
+# Legacy/vendored/reference material - large, not source, would otherwise be at risk of an
+# accidental bulk `git add -A`/`git add .` staging several GB into history
+/old_version/
+/shelved_ideas/
+/GNN-land-use-main/
+/OCPPM-master/
+/files/papers/
+/files/papers_full/

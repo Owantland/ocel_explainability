@@ -3,13 +3,14 @@ order_management:
   graph_output_path: "files/graph_structures/order_management/"
   pytorch_path: 'files/hetero_structures/order_management/'
   model_output_path: 'files/models/order_management/'
+  explainer_output_path: 'files/explainer_outputs/order_management/'
   viewpoint: "Orders"
   added_depth: 0
   unique_ids: ['Orders', 'Items', 'Packages']
   kpi_type: 0
-  kpis:
-#    PackageDelivered: ['Orders'] #Time until order is delivered
-    PayOrder: ['Orders'] #Time until order is payd
+  kpi_event: "PayOrder" #"CreatePackage" "PackageDelivered" "PayOrder"
+  kpi_viewpoint: "Orders"
+  batch_size: 16
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:
     Orders: ['price']
@@ -18,45 +19,63 @@ order_management:
   time_attributes:
     Products: ['weight', 'price'] # First value is the set attribute and the second one is the time sensitive one
   encoding: ['Customers', 'Employees']
+  role_encoding:
+    Employees: 'role'   # encode by role (Sales/Shipment/Warehousing → 3D) instead of OCEL_ID (18D)
 
 logistics:
   ocel_path: "files/databases/logistics.sqlite"
   graph_output_path: "files/graph_structures/logistics/"
   pytorch_path: 'files/hetero_structures/logistics/'
   model_output_path: 'files/models/logistics/'
+  explainer_output_path: 'files/explainer_outputs/logistics/'
   viewpoint: "CustomerOrder"
   added_depth: 2
   unique_ids: ['CustomerOrder', 'TransportDocument', 'Container', 'HandlingUnit']
   kpi_type: 0
-  kpis:
-    Depart: ['TransportDocument'] # Time until order is fulfilled
+  kpi_event: "LoadToVehicle" # Depart
+  kpi_viewpoint: "CustomerOrder"
+  batch_size: 16
   filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
   attributes:
     CustomerOrder: ['AmountofGoods']
     Container: ['AmountofHandlingUnits', 'Weight']
     TransportDocument: ['AmountofContainers']
   time_attributes:
-    Products: [ 'weight', 'price' ] # First value is the set attribute and the second one is the time sensitive one
   encoding: ['HandlingUnit', 'Truck', 'Forklift', 'Vehicle']
 
-
-aoe:
-  viewpoint: "Session"
-  added_depth: False
-  ocel_path: "files/databases/aoe.sqlite"
-  ev_output_path: "files/output_tables/aoe_ev_table.csv"
-  ob_output_path: "files/output_tables/aoe_ob_table.csv"
-  ocel_output_path: "files/output_tables/aoe_ocel.csv"
-  filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
-  encoding: []
-
-
-iot:
-  viewpoint: "Pickupplan"
-  added_depth: False
+cargo_pickup_iot:
   ocel_path: "files/databases/CargoPickup_IoT.sqlite"
-  ev_output_path: "files/output_tables/iot_ev_table.csv"
-  ob_output_path: "files/output_tables/iot_ob_table.csv"
-  ocel_output_path: "files/output_tables/iot_ocel.csv"
-  filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type', 'event_IoTobject', 'object_IoTobject']
-  encoding: []
+  graph_output_path: "files/graph_structures/cargo_pickup_iot/"
+  pytorch_path: 'files/hetero_structures/cargo_pickup_iot/'
+  model_output_path: 'files/models/cargo_pickup_iot/'
+  explainer_output_path: 'files/explainer_outputs/cargo_pickup_iot/'
+  viewpoint: "Pickupplan"   # raw OCEL_TYPE is "Pickup Plan"; OCEL_TYPE_MAP (space-free) must be used here
+  added_depth: 2            # Silo is 2 hops from Pickupplan (Pickupplan->Truck->Silo) -- traced the
+                            # loop's own iteration semantics precisely: depth=1 only runs the
+                            # expansion pass ONCE, which is what *discovers* Truck; reaching Silo
+                            # needs a second pass to follow Silo->Truck using the now-expanded set.
+  unique_ids: ['Pickupplan', 'Truck', 'Cargo', 'Silo']
+  episode_scoped_ids:
+    # Truck is a many-to-many SHARED resource (300 trucks serve ~13,779 plan-assignments across
+    # 2000 plans) -- unlike Pickupplan/Cargo/Silo, naive object_object traversal through it pulls
+    # in its entire cross-case history. Scopes Truck's own event/traversal inclusion to the
+    # [Assigned, Dropped] window for this specific plan (see process_generation.py:related_nodes()
+    # and CARGOPICKUP_IOT_VALIDATION.md). Qualifiers are raw object_object.ocel_qualifier strings
+    # -- no _MAP_TYPE-style cleaning exists for them.
+    Truck:
+      start_qualifier: "Assigned truck for pickup plan"
+      end_qualifier: "Dropped truck from pickup plan"
+  kpi_type: 0
+  kpi_event: "EvaluateTruckExit"  # provisional validation choice, not a thesis-scope commitment
+  kpi_viewpoint: "Pickupplan"
+  batch_size: 16
+  filtered_tables: ['object_object', 'event_object', 'event_map_type', 'object_map_type']
+  attributes: {}
+  # Pickupplan/Cargo have no space-free attribute columns (e.g. "Num of trucks", "Cargo stock
+  # weight(scheduled)") -- ocel_generator.py interpolates attribute column names unquoted, so
+  # using them crashes with a SQL syntax error. Left empty deliberately; see CARGOPICKUP_IOT_VALIDATION.md.
+  time_attributes:
+    Silo: ['Temperature', 'Humidity']  # both space-free and genuinely time-varying sensor readings
+  encoding: ['Pickupplan', 'Cargo']    # >50 distinct ids each -> degenerate placeholder [1] (same as other large-cardinality types)
+  role_encoding:
+    Truck: 'Is_normal'   # categorical (''/normal/abnormal) weigh-check status

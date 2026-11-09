@@ -1,62 +1,92 @@
 # A collection of support functions used by multiple scripts in the project
+import re
 import sqlite3
 import yaml
 import os
 
+_IDENTIFIER_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+def _validate_identifier(name):
+    """SQLite can only bind values, not table/column identifiers, so any name pulled from the
+    database (event types, config-driven viewpoints) and interpolated into a query string is
+    checked against an allow-list pattern first."""
+    if not _IDENTIFIER_RE.match(str(name)):
+        raise ValueError(f"Unsafe SQL identifier: {name!r}")
+    return name
+
+_REQUIRED_KEYS = ['ocel_path', 'graph_output_path', 'pytorch_path', 'model_output_path',
+                  'explainer_output_path', 'viewpoint', 'added_depth', 'unique_ids',
+                  'kpi_event', 'kpi_viewpoint', 'filtered_tables', 'attributes',
+                  'time_attributes', 'encoding', 'kpi_type']
+
+def _require(cfg, key, database):
+    if key not in cfg:
+        raise KeyError(f"config.yml['{database}'] is missing required key '{key}'")
+    return cfg[key]
+
 class SupportFunctions:
-    def __init__(self, database):
+    def __init__(self, database, cant, kpi_event=None, graph_dir=None):
+        """kpi_event / graph_dir: optional overrides of config.yml's kpi_event and of the
+        cant-suffixed pytorch_path, so a KPI whose graph cache lives in a *_backup folder can be
+        loaded without swapping config.yml or the cache files (used by the dashboard's KPI
+        registry). None (default) keeps config.yml's values -- unchanged behavior."""
         self.database = database
+        self.cant = cant
+        self.kpi_event_override = kpi_event
+        self.graph_dir_override = graph_dir
         self.path_dict = self.get_paths()
         conn = sqlite3.connect(self.path_dict['ocel_path'])
         self.cursor = conn.cursor()
 
     def get_paths(self):
+        """Builds the path/config dict for this database. Side effect: also creates the
+        graph_output_path/pytorch_path/explainer_path directories on disk if they don't
+        already exist, every time this is called -- every caller in the codebase relies
+        on this happening as part of construction."""
         with open('files/config.yml', 'r') as file:
             db_configs = yaml.safe_load(file)
-        path_dict = {'ocel_path': db_configs[self.database]['ocel_path'],
-                     'graph_output_path': db_configs[self.database]['graph_output_path'],
-                     'pytorch_path': db_configs[self.database]['pytorch_path'],
-                     'model_path': db_configs[self.database]['model_output_path'],
-                     'viewpoint': db_configs[self.database]['viewpoint'],
-                     'depth': db_configs[self.database]['added_depth'],
-                     'unique_ids': db_configs[self.database]['unique_ids'],
-                     'kpis': db_configs[self.database]['kpis'],
-                     'filtered_tables': db_configs[self.database]['filtered_tables'],
-                     'attributes': db_configs[self.database]['attributes'],
-                     'time_attributes': db_configs[self.database]['time_attributes'],
-                     'encoding': db_configs[self.database]['encoding'],
-                     'kpi_type': db_configs[self.database]['kpi_type'],}
-
-        # Calculated values
-        kpi_event = [x for x in path_dict['kpis'].keys()]
-        path_dict['kpi_event'] = kpi_event[0]
+        db_cfg = db_configs[self.database]
+        path_dict = {key: _require(db_cfg, key, self.database) for key in _REQUIRED_KEYS}
+        path_dict['model_path'] = path_dict.pop('model_output_path')
+        path_dict['explainer_path'] = path_dict.pop('explainer_output_path')
+        path_dict['depth'] = path_dict.pop('added_depth')
+        path_dict['results_path'] = "files/results.csv"
+        path_dict['role_encoding'] = db_cfg.get('role_encoding') or {}
+        # Optional: shared-resource unique_ids types (e.g. a Truck serving many Pickup Plans)
+        # whose own event/traversal inclusion must be scoped to a bounded object_object episode
+        # rather than the object's entire cross-case history. Empty/absent -> no behavior change
+        # (see process_generation.py:related_nodes()).
+        path_dict['episode_scoped_ids'] = db_cfg.get('episode_scoped_ids') or {}
 
         # Generate the appropriate path for saving the process execution log
-        path_dict['ev_log_path'] = f"{path_dict['graph_output_path']}{path_dict['kpi_event']}"
-        if not os.path.exists(path_dict['ev_log_path']):
-            os.makedirs(path_dict['ev_log_path'])
-        path_dict['ev_log_path'] = f"{path_dict['ev_log_path']}/ev_table.csv"
+        path_dict['graph_output_path'] = f"{path_dict['graph_output_path']}{self.cant}/"
+        if not os.path.exists(path_dict['graph_output_path']):
+            os.makedirs(path_dict['graph_output_path'])
+        path_dict['ev_log_path'] = f"{path_dict['graph_output_path']}/ev_log.csv"
 
-        # Generate appropriate path for saving the heterographs
-        path = f"{path_dict['pytorch_path']}{path_dict['kpi_event']}"
-        if not os.path.exists(path):
-            os.makedirs(path)
-        path_dict['hetero_path'] = path
+        # Namespace hetero-graph and model artifacts by cant too, so rerunning at a
+        # different dataset size doesn't silently overwrite a previous size's outputs.
+        path_dict['pytorch_path'] = f"{path_dict['pytorch_path']}{self.cant}/"
+        if not os.path.exists(path_dict['pytorch_path']):
+            os.makedirs(path_dict['pytorch_path'])
+        path_dict['model_path'] = f"{path_dict['model_path']}{self.cant}/"
 
-        # Generate appropriate path for saving models
-        path = f"{path_dict['model_path']}{path_dict['kpi_event']}"
-        # Save the model into the appropriate directory for the KPI type selected
-        if path_dict['kpi_type'] == 0:
-            path = f"{path}/trace"
-        else:
-            path = f"{path}/prefixes"
-        if not os.path.exists(path):
-            os.makedirs(path)
-        path_dict['model_output_path'] = path
+        # Validate that explainer path exists
+        if not os.path.exists(path_dict['explainer_path']):
+            os.makedirs(path_dict['explainer_path'])
+
+        # Optional per-KPI overrides (see __init__). Applied last so they win over config.yml
+        # and over the cant suffixing above; a missing graph_dir is an error, not a mkdir.
+        if self.kpi_event_override is not None:
+            path_dict['kpi_event'] = self.kpi_event_override
+        if self.graph_dir_override is not None:
+            if not os.path.isdir(self.graph_dir_override):
+                raise FileNotFoundError(f"graph_dir override not found: {self.graph_dir_override}")
+            path_dict['pytorch_path'] = self.graph_dir_override.rstrip('/') + '/'
         return path_dict
 
     def col_names(self, table_name):
-        self.cursor.execute(f"PRAGMA table_info({table_name});")
+        self.cursor.execute(f"PRAGMA table_info({_validate_identifier(table_name)});")
         columns_info = self.cursor.fetchall()
         column_names = [column[1] for column in columns_info]
         return column_names

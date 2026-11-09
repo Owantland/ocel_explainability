@@ -1,0 +1,332 @@
+%!TEX root = ../dissertation.tex
+
+\chapter{Preliminaries}
+\label{chp:preliminaries}
+    In this chapter I introduce the reader to the preliminary concepts that will be used in the rest of the thesis as well as the datasets chosen for this research and their associated processing. The goal of this chapter is to provide readers with a complete view of the data processing pipeline that was performed so it may be replicated.
+    In Section \ref{sec:dataset_event_logs} I introduce concepts from the literature on
+    traditional event logs, KPIs, and a formalization of the problem of predictive process analytics. In Section \ref{sec:dataset_OCEL} I report on the characteristics of object-centric event logs while in Section \ref{sec:dataset_GNNS} I expand on the use of predictive analytics on object-centric processes. Afterwards, in Section \ref{sec:dataset_explanations} I give a rundown of existing explainability methods and a formal definition of the ones chosen for this thesis' framework.
+
+    \section{Single-id event logs and predictive process monitoring}
+    \label{sec:dataset_event_logs}
+        I present the following definitions based on the formalizations provided by Galanti et al. \cite{galanti2023a}.
+
+        \begin{definition}[Single-id Event Log]
+        \label{def:sing_id_ev_log}
+            A single-id event log is a tuple: $L = (E, Tr, A, C, \pi_{time}, \pi_{act}, \pi_{att})$.\\ 
+            Let $\mathcal{E}$ be the universe of events, $\mathcal{A}$ be the universe of activities, $\mathcal{C}$ be the universe of attributes, $T$ be the universe of event timestamps, and $\mathcal{AV}$ be the universe of attribute values. \\
+            Let $A\subseteq \mathcal{A}$ be a set of activities and $C\subseteq \mathcal{C}$ be a set of attributes such that L is composed of:
+            \begin{itemize}
+                \item a set $E\subseteq\mathcal{E}$ of events,
+                \item a set $Tr \subset E^*$ of traces, i.e. sequences of event identifiers.
+                \item a time mapping $\pi_{time}: E \to T$ associating each event to that event's timestamp,
+                \item an activity mapping $\pi_{act}: E \to A$ associating each event to that event's activity and,
+                \item an attribute mapping $\pi_{att}:E\times C \nrightarrow \mathcal{AV}$ associating each event to that event's attribute assignment.
+            \end{itemize}
+        \end{definition}
+        
+        The goal of predictive process monitoring methods is to predict the value of a key performance indicator. Therefore, it is necessary to provide a definition of the KPI function
+
+        \begin{definition}[KPI Function]
+        \label{def:sing_id_kpi}
+            Let $L = (E, Tr, A, C, \pi_{time}, \pi_{act}, \pi_{att})$. be a single-id event log.\\ 
+            Let $\mathcal{W}_k$ be a set of possible KPI values.
+            A KPI is a function $\mathcal{T}_L: Tr\times \mathbb{N} \nrightarrow \mathcal{W}_k$ such that, given a trace $\tau\in Tr$ and an integer index $i\leq|\tau|, \mathcal{T}_L(\tau, i)$ returns the KPI value of $\tau$ after the occurrence of the first $i$ events.
+        \end{definition}
+        
+        My KPI definition assumes it to be computed a posteriori, once the entire process execution has been completed and a complete set of traces is available. KPI definitions aim to be generic to account for all possible domains. The KPI value may be updated after each execution or it may only be known after the completion. Here, I present an example of a KPI function:
+
+        \begin{description}
+            \item[Remaining Time] The KPI function provides a measure of the amount of time left before the process execution is complete. It is defined as the difference between the timestamp of the final event in the process execution, $e_n$ and the last occurred event $e_i$: $\mathcal{T}_{remaining}(\tau,i) = \pi_{time}(e_n)-\pi_{time}(e_i)$
+        \end{description}
+        
+        I will now formalize the definition of the prediction problem on single-id event logs
+
+        \begin{definition}[Prediction Problem on Single-ID Event Logs]
+        \label{def:sing_id_pred_prob}
+        Let $L = (E, Tr, A, C, \pi_{time}, \pi_{act}, \pi_{att})$. be a single-id event log.
+        Let $\mathcal{T}_L$ be a KPI function defined for the process execution.\\
+        Let $\tau=\langle e_1,...,e_k \rangle$ be a trace of a running process execution which will eventually complete as $\tau_T=\langle e_1,...,e_k,e_{k+1},...,e_n \rangle$\\
+        The prediction problem can be formulated as forecasting the value of $\mathcal{T}_L(\tau_T,i)$ for all $k<i\leq n$.
+        \end{definition}
+        
+    \section{Object-centric event logs}
+    \label{sec:dataset_OCEL}
+        Object-centric event logs are extended versions of the single-id event logs defined previously meant to provide a representation that more closely resembles real-world applications. In a typical object-centric event log each event may refer to one or multiple objects, as opposed to single-id event logs which assume each object is of the same type and each event is associated with exactly one object. 
+
+        \begin{figure}
+            \centering
+            \includegraphics[width=1\textwidth]{figures/ocel_example.png}
+            \caption{Object-Centric Event Log With Associated Objects}
+            \label{fig:1}
+        \end{figure}
+
+        Figure \ref{fig:1} shows an example of an object-centric event log for a synthetic order management database meant to emulate the placement of orders composed of multiple items, the creation of packages and the delivery of the products. The event log consists of 4 object types: Order, Customer, Items, and Packages, each with its own identifier. These 4 objects are a representative subset of the full collection of object types present in the dataset. The first object type, Order, identifies the Order that is being placed. Customer refers to the person or entity that placed the order. Items identifies the items, or products, that form the order that must be delivered. Finally, packages refers to the physical package that is created to house the items as they're shipped to their respective customers. The entire process may be complicated by the appearance of events such as Item Out of Stock or a Failed Delivery indicating that the package could not be delivered to the customer. Some events are associated with a single object identifier, but most events are related to two or more objects.
+        Objects can be related to each other to enable synchronization and data exchange. These relationships can be of many-to-many or many-to-one in nature. Each event is also associated with the attributes, or features, of each related object. Orders have an associated price which quantifies the cost of the order that must be paid by the customer while packages have an associated weight. This is only an illustrative subset of the full set of features associated with each event in an actual process execution. Formal definitions are adapted from the work of Adams et al. as well as de Leoni \& Volpato \cite{adams2022}\cite{deleonieVolpato}
+
+        \begin{definition}[Object-Centric Event Log]
+        \label{def:ocel}
+        Let $T$ be the universe of event timestamps.
+        An object-centric event log is a tuple
+        $L \; = \; (E, O, OT, A, C, AV, CT, \pi_{atype}, \pi_{otype}, \pi_{act}, \pi_{time}, \pi_{eatt}, \pi_{oatt}, E2O, O2O, \pi_{trace})$ 
+        such that:
+        \begin{itemize} 
+        \item Set $E \subseteq \mathcal{E}$ where $\mathcal{E}$ is the universe of events,
+        \item set $O \subseteq \mathcal{O}$ where $\mathcal{O}$ is the universe of objects,
+        \item set $OT \subseteq \mathcal{OT}$ where $\mathcal{OT}$ is the universe of object types,
+        \item set $A \subseteq \mathcal{A}$ where $\mathcal{A}$ is the universe of activities,
+        \item set $C \subseteq \mathcal{C}$ where $\mathcal{C}$ is the universe of attributes,
+        \item set $AV \subseteq \mathcal{AV}$ where $\mathcal{AV}$ is the universe of attribute values,
+        \item set $CT \subseteq \mathcal{CT}$ where $\mathcal{CT}$ is the universe of attribute types,
+        \item $\pi_{atype}: C \cup AV \to CT$ is a function associating an attribute name or value to its corresponding type
+        \item $\pi_{otype}: O \to OT$ is a function that assigns one object type to each object instance
+        \item $\pi_{act}: E \to A$ is a function associating each event to its corresponding activity
+        \item $\pi_{time}: E \to T$ is a function associating each event to its corresponding timestamp
+        \item $\pi_{eatt}: E\times C \nrightarrow AV$ is a function that assigns values to event attributes
+        \item $\pi_{oatt}: O\times C \nrightarrow AV$ is a function that assigns values to object attributes
+        \item $E2O \subseteq E \times \mathcal{Q} \times O$ where $\mathcal{Q}$ represents the universe of qualifiers describing relationships among entities,
+        \item $O2O \subseteq O \times \mathcal{Q} \times O$ where $\mathcal{Q}$ represents the universe of qualifiers describing relationships among entities,
+        \item $\pi_{trace}: O \to E^*$ is a function that maps each object to a sequence of events such that for every object $o \in O, \pi_{trace}(o)=\langle e_1,...,e_n \rangle$ where $\forall_i \in \{1,...,n-1\}$ $\pi_{time}(e_i)\leq \pi_{time}(e_{i+1})$ and $\forall_i \in \{1,...,n\}$ $\exists_s \in \mathcal{Q}: (e_i, s, o) \in E2O$ where $\mathcal{Q}$ represents the universe of qualifiers describing relationships among entities and $\{e_1,...,e_n\} = \{e\in E \mid \exists s\in\mathcal{Q}: (e,s,o)\in E2O\}$ is the complete set of events related to $o$.
+        \end{itemize}
+        \end{definition}
+        The relationships between objects in an OCEL can be expressed in the form of a graph built around the relationship that exists between events, objects to the events and the objects amongst themselves.
+
+        \begin{definition}[Event-Object Graph]
+        \label{def:ev_ob_graph}
+            Let $L \; = \; (E, O, OT, A, C, AV, CT, \pi_{atype}, \pi_{otype}, \pi_{act}, \pi_{time}, \pi_{eatt}, \pi_{oatt},\\ E2O, O2O, \pi_{trace})$ be an object-centric event log. 
+            The event-object graph $OG_L=(O \cup E,I)$ is an undirected graph where the set of undirected edges is defined as $I = \{\{x,s,y\} \mid (x,s,y)\in E2O\cup O2O \lor (y,s,x)\in E2O\cup O2O\}$
+        \end{definition}
+        
+        To represent the complexity of the recently defined event-object graph it is necessary to use a structure that can properly handle different node and event relationships. That is why heterogeneous graphs were chosen. In line with Adams et al.'s work I induce my process executions through leading type extraction. Where a process execution is constructed for each object of a chosen leading object type, which I define as my viewpoint. 
+        We can define the distance between two nodes $n_1$ and $n_2$ within $OG_L$ as $dist:O \cup E \times O \cup E \to \mathbb{N}_0$ where, for each pair, $n_1, n_2$ of nodes, $dist(n_1,n_2)= \infty$ if the nodes are not connected.
+
+        \begin{definition}[Process Executions]
+        \label{def:proc_exec}
+            Let $L \; = \; (E, O, OT, A, C, AV, CT, \pi_{atype}, \pi_{otype}, \pi_{act}, \pi_{time}, \pi_{eatt}, \pi_{oatt},\\ E2O, O2O, \pi_{trace})$ be an event log, let $OG_L=(O \cup E,I)$ be the corresponding event-object graph, let $\mathcal{OT}$ be the universe of object types, and let $\mathcal{V} \in \mathcal{OT}$ be a viewpoint.
+            For each object $o\in O$ such that $\pi_{otype}(o)=\mathcal{V}$, a process execution for $o$ is an undirected graph $(N,A)$ where $N=O'\cup E'$ where $O'$ is the set of objects assigned to $o$ and $E'$ is the set of events related to objects in $O'$:
+            - $O'=\{o''\in O$ $|\pi_{otype}(o'') \neq \mathcal{V} \land \forall_{o'\in O}$ $\pi_{otype}(o')=\mathcal{V} \implies dist(o', o'') > dist(o, o'')\}$
+            - $E' = \{e\in E$ $|\forall_{o'\in O}$ $\pi_{otype}(o')=\mathcal{V} \implies dist(e,o') > dist(e,o)\}$
+            Arcs are then defined as: $A=\{\{e, \top, e'\} | \exists_{o^*} \in O'$ $\langle e, e'\rangle \subseteq \pi_{trace}(o^*)\}\cup$ $\{\{a,s,b\}\in I$ $| a\in N, b \in N \}$
+        \end{definition}
+        
+        Each process execution derived from this definition is a connected component of the full OCEL graph. The dataset used for predictive analysis ends up as a list of distinct components rather than one interconnected graph.
+        The use of a heterogeneous graph structure to represent process executions eliminates the need for feature aggregation. In past, homogeneous, representations, it was necessary to condense the information provided by interacting objects into the event nodes, the only node type present in the graph. By allowing for multiple node types each object and event can preserve its individual characteristics as well as provide information that may have been difficult to properly aggregate before. 
+
+        As I stated in \ref{def:sing_id_pred_prob} the goal of a predictive process is to infer the value of a KPI function when the process execution is at an intermediate state. Therefore, the definition of the object-centric process prediction problem requires the introduction of the concept of a prefix of a process execution
+
+        \begin{definition}[Prefix of a Process Execution]
+        \label{def:prefix}
+            Let $L \; = \; (E, O, OT, A, C, AV, CT, \pi_{atype}, \pi_{otype}, \pi_{act}, \pi_{time}, \pi_{eatt},\\ \pi_{oatt}, E2O, O2O, \pi_{trace})$ be an object-centric event log and $T$ the universe of timestamps for the events in $L$. Let $P$ be the universe of potential process executions from $L$. The function $Prefix:P\times T \to P$ returns a snapshot of process executions. Given a timestamp $t$ and a process execution $p\in P$, $Prefix(p,t)$ returns a snapshot of $p$ at time $t$. Formally, given a process execution $p=(N,A),$ $Prefix(p,t)=(N',A')$ where $N'=E'\cup O'$ with:
+            - $E' = \{e \in E\cap N$ $|\pi_{time}(e)\leq t\}$
+            - $O' = \{o \in O\cap N$ $|\exists e \in \pi_{trace}(o) : \pi_{time}(e) \leq t\}$
+            - $A' = \{(a,s,b) \in A$ $|a \in N', b \in N'\}$
+        \end{definition}
+        
+        Given this definition a prefix obtained from a timestamp $t$ includes in it only objects and events that have already occurred. Each prefix $\overline{p}$ is a subgraph of $p$ and is still considered a process execution. With prefixes properly defined I will now provide a formal definition of object-centric KPIs and the problem of object-centric process prediction.
+
+        \begin{definition}[Object-Centric KPI Function]
+        \label{def:ocel_kpi}
+        Let $L \; = \; (E, O, OT, A, C, AV, CT, \pi_{atype}, \pi_{otype}, \pi_{act}, \pi_{time}, \pi_{eatt},\\ \pi_{oatt}, E2O, O2O, \pi_{trace})$ be an object-centric event log, $T$ the universe of timestamps for the events in $L$ and let $P$ be the universe of potential process executions from $L$. An Object-Centric KPI is a function $K: P \times T \nrightarrow \mathcal{W}_{ko}$ such that, given any process execution $p\in P$, it returns a vector $K(p,t)$ of the KPI values at time $t$.
+        \end{definition}
+
+        \begin{definition}[Prediction Problem on Object-Centric Event Logs]
+        \label{def:pred_prob}
+            Let $P$ be the universe of potential process executions and $p$ be a complete process execution, and let $p'$ be the prefix of $p$ at time $t$ such that $p' = Prefix(p,t)$. The prediction problem on Object-Centric Event Logs can be formulated as computing the value of $K(p',t)$ where the computation of $K(p',t)$  may depend on the full execution of $p$ beyond $t$. Therefore, its computation requires the estimation of key elements within the structure of $p$.
+        \end{definition}
+        
+    \section{Predictive analytics on object-centric processes}
+    \label{sec:dataset_GNNS}
+        In this section I will explain how, following the approach for graph encoding first proposed by Adams et al. and explained in Section 2, the native object-centric presentation of OCELs can be maintained and used to obtain predictions. This approach is favored over a flattened tabular representation since it allows us to avoid problems such as deficiency, convergence, and divergence. Predictions will be obtained using graph-based predictive models, such as graph neural networks (GNNs), which are designed to operate directly on graph structured data, learning not just from the features present in the data itself but also from the underlying structure connecting the components.
+
+        The proposed GNN model is trained on a multiset of labeled examples known as the training set which is defined as set of pairs $(x,y)\in \mathcal{X} \times \mathcal{Y}$ where $\mathcal{X}$ encodes the independent variables (also known as features) with their values, and $\mathcal{Y}$ is the dependent variable which is encoded with the value we wish to predict. 
+
+        The prediction technique also requires the definition of a trace-to-instance encoding function $\rho:P \to \mathcal{X}$ which maps each trace (or process execution) $p$, or a prefix $p'$ of it, to an element $\rho(p)\in \mathcal{X}$.
+
+        The prediction model is then trained on a data set $\mathcal{D}$ created from an object-centric event log $L$.
+        $\mathcal{D}$ is composed of a series of distinct pairs $(x,y)\in (\mathcal{X} \times \mathcal{Y})$, where $x=\rho(p')$ and $y=K(p',t)$ computed for each prefix $p'$ of each trace $p\in P$. The resulting prediction model can be abstracted as an oracle function $\Phi_{\mathcal{D}}:\mathcal{X} \to \mathcal{Y}$ \cite{galantiDeleoni2024}
+
+        Although the use of GNNs for predictive process monitoring tasks using OCELs has provided mixed results regarding their accuracy when compared to more traditional models, the trade-off for maintaining the underlying graph structure is worth it in terms of explainability \cite{galantiDeleoni2024} \cite{smit2024}. By maintaining the original OCEL structure intact I can provide the explainability layer with a more complete view of the information driving the predictions and offer the end user a more holistic understanding of how it's being processed.
+
+        Graph neural networks (GNNs) are neural models that capture the dependence of graphs via message passing between the nodes of graphs. As I explained in Section 2.1.2 GNNs learn via a message-passing mechanism, built from two functions: an aggregation function and an update function.
+        At each iteration, each node collects information from the neighborhood around it in the form of messages coming from its neighbors. As the iteration progresses each node embedding is updated with information from more distant reaches of the graph. At the first iteration $(k=1)$, each node embedding contains information from its 1-hop neighborhood. A k-hop neighborhood is defined as the set of nodes with $dist$ value equal to $k$, where $dist$ is calculated within each process execution used for training the model. At the second iteration, each node embedding contains information from its 2-hop neighborhood, and so on. Each node's embedding stores information that is both feature-based as well as structural, providing information about the graph itself. 
+        In the message-passing mechanism, each node has its message stored in a feature vector which gets updated with information provided by its neighbors. This aggregation process connects nodes and forms new feature vectors by incorporating updated information.
+
+        \begin{definition}[Message Passing Mechanism in Graph Neural Networks \cite{khemani2024}]
+        \label{def:GNN}
+            Let $n$ be the number of iterations, $u$ a given node, $g$ the node's message, $AGGREGATE$ and $UPDATE$ differentiable functions, and $m_{\mathcal{N}(u)}^{(n)}$ be the aggregated message from $u$'s graph neighborhood $\mathcal{N}(u)$
+            $g_u^{(n+1)} = UPDATE^{(n)}(g_u^{(n)},AGGREGATE^{(n)}(g_v^{(n)},\forall_v \in \mathcal{N}(u)))$
+                            $=UPDATE^{(n)}(g_u^{(n)},m_{\mathcal{N}(u)}^{(n)})$
+        \end{definition}
+        
+    \section{Explanation on process predictions}
+    \label{sec:dataset_explanations}
+        In this section I explain the XAI methods proposed to enhance explainability in predictive process monitoring on object-centric event logs: perturbation-based analysis, gradient/feature-based analysis, counterfactual analysis, and a set of metric assessments. As I explained in Section 2.2 these methods are motivated by a need to instill trust in the end users and stakeholders who would rely on the provided models to generate predictions on a set of KPIs. Perturbation-based analysis provides a way to identify the key structural elements of the input graph and provide an estimate of its impact on the predicted value. Gradient-based analysis provides a deeper look at the importance of specific attributes affecting a model's output. Counterfactual analysis enables users to explore the minimal changes that could lead to a desired outcome, such as the reduction of time remaining until a process's completion. Finally, the metric assessment allows the user to validate how effective the given methods are at providing reliable explanations on the given model, ensuring the end user can trust the information provided.
+
+        The methods chosen reflect the current state of explainability approaches available for use on heterogeneous graph models. As I explained in Section 2.2.6 other methods were investigated but were not chosen because of either a lack of a publicly available code implementation or an inability to translate the explanation model into the currently used framework.
+
+        \subsection{Perturbation-based analysis}
+        \label{sec:dataset_perturb}
+            The first methods used in my framework to provide an explanation on the model are perturbation-based. These methods quantify the impact of each element in the graph by measuring the difference between the model's original prediction and the model's prediction with an element, or a set of elements perturbed, or changed, in some measurable way. Through an iterative approach these methods are able to construct a subgraph that contains all the most important elements used by the model to provide a prediction. My proposed framework applies perturbation-based analysis on the model through a combination of two approaches: exhaustive Leave-One-Out analysis used to identify the most important nodes and edges in the input graph and then Shapley Values to provide an estimate of the impact the identified nodes have on the model's prediction in a physically meaningful magnitude. As I explained in Section 2.2.2 while the usage of Shapley Values is hindered by its computational expense this can be mitigated by reducing the explanation space (the set of features of the input) to which these method needs to be applied using LOO. I will now formalize the Leave-One-Out and Shapley Value implementations used for explaining my heterogeneous models.
+
+            \begin{definition}[Leave-One-Out Perturbation]
+            \label{def:LOO}
+                Let $p=(N,A)$ be a process execution with viewpoint node $v$, let $\Phi$ be the trained GNN model, let $X=\{x_j \mid v_j \in p\}$ be the set of feature vectors associated with the nodes of $p$, and let $\hat y = \Phi(p,X)$ be the baseline prediction for $v$. For a node $v_j \in p$ with feature vector $x_j \in X$, let $X^{-v_j}$ be the perturbed feature set obtained by replacing $x_j$ with the zero vector $\mathbf{0}$, leaving every other node's features and the structure of $p$ unchanged. The Leave-One-Out shift of $v_j$ is defined as
+                $\delta(v_j) = \hat{y} - \Phi(p,X^{-v_j})$
+            \end{definition}
+
+            LOO functions by masking a particular feature, this equates to setting its associated feature values to 0. This is fundamentally different to actually removing the feature from the graph and restructuring its form around that ablation. While I considered this method for implementation I decided against it because such a structural change would provide explanations on a graph structure that did not really exist within the universe of process executions and the associated prefixes, meaning the explanations would provide no real value to the stakeholder.
+
+            Through the application of LOO to each graph feature I can obtain a reasonable estimation of the most impactful elements in the graph. 
+            Then, the true impact of the selected elements is calculated through the use of Shapley Value analysis.
+
+            \begin{definition}[Permutation-Sampling Shapley Value \cite{castro2009}]
+            \label{def:Shap_Full}
+                Let $p=(N,A)$ be a process execution with viewpoint node $v$, let $\Phi$ be the trained GNN model, and let $X=\{x_j,v_j \in p\}$ be the set of feature vectors associated with the nodes of $p$. Let $M \subseteq N$ be a candidate set of elements whose importance is to be attributed. For a coalition $S\subseteq M$, let $X^S$ denote the feature set obtained from X by replacing the feature vector of every element in $M/S$ with the zero vector $0$, leaving the features of elements outside $M$ and the structure of $p$ unchanged, then define the value function
+                $val(S) = \Phi(p,X^S)$
+                Let $val(M)=\hat{y}$ be the real baseline prediction of the model and $val(\emptyset)$ be the value once every element of $M$ has been zeroed.
+                The exact Shapley Value of $v_j \in M$ is:
+                $\phi(v_j) = \frac{1}{|M|!} \displaystyle \sum_{\pi \in \prod(M)}[val(Pre_{\pi}(v_j) \cup \{v_j\}) - val(Pre_{\pi}(v_j))]$
+                Where $\prod(M)$ is the set of all permutations of $M$ and $Pre_{\pi}(v_j)$ is the set of elements preceding $v_j$ in permutation $\pi$.
+            \end{definition}
+
+            The same overall definition can be applied when $M$ denotes a candidate set of arcs instead of nodes in order to quantify the importance of edges in the input graph.
+
+            Since evaluating all $|M|!$ permutations of the input graph is too computationally expensive, I approximate $\phi(v_j)$ using Castro et al.'s ApproShapley algorithm, formalized as:
+
+            \begin{definition}[ApproShapley Algorithm \cite{castro2009}]
+            \label{def:Shapley_approx}
+                $\hat{\phi} = \frac{1}{R}\displaystyle \sum_{r=1}^{R}[val(Pre_{\pi_r}(v_j)\cup \{v_j\}) - val(Pre_{\pi_r}(v_j))]$
+                where $\pi_1,...,\pi_R$ are $R$ permutations of $M$ sampled uniformly at random, requiring $R \cdot |M|$ evaluations of $val$.
+            \end{definition}
+
+            Through the application of LOO and Shapley Values my methodology can identify the key nodes and edges present in the graph and provide the end user with an explanation subgraph for the process execution, composed entirely of the elements that impact the model's prediction.
+
+
+            As I explained in Section 2.2.2 LOO and Shapley Values are the core explanation methods used for my framework, however, GNNExplainer is also available as a standalone comparison point to evaluate how good the chosen methods are against a different implementation.
+
+            GNNExplainer is an explainability method that computes an explanation by formulating a mean field variational approximation and learning a real-valued graph mask which selects the important subgraph of the GNN’s computation graph. The given explanation is therefore a rich subgraph of the entire graph the GNN was trained on, which maximizes the mutual information with the model's prediction.
+
+            \begin{definition}[GNNExplainer]\cite{ying2019}
+            \label{def:GNNExplainer}
+                Let $v$ be a node, $p_s \subseteq p$ be the subgraph of process execution $p$ that contains all the important information for the GNN's prediction, $X_s=\{x_j\mid v_j \in p_s \}$ be the associated features of $p_s$ where $v_j$ ranges over the nodes contained in $p_s$, Y is a random variable given by the conditional distribution $P_\Phi(Y\mid p,X)$ learned by GNN model $\Phi$ and $H(Y)$ is the entropy term of the random variable.
+                $\max\limits_{p_s}MI(Y,(p_s,X_s))=H(Y)-H(Y\mid p=p_s, X=X_s)$
+            \end{definition}
+            
+            $MI$ thus quantifies the change in the probability of prediction $\hat{y}=\Phi(p,X)$ when a viewpoint node $v$'s computational graph is limited to the explanation subgraph $p_s$ and its node features are limited to $X_s$.
+
+            Although GNNExplainer is able to identify which nodes are structurally relevant to the model's prediction in a more efficient manner, the value of its learned mask is a [0,1]-bounded attention weight rather than a meaningful measure of the change in the prediction's outcome. Additionally, its current heterogeneous implementation cannot account for edge importance when applied on a natively heterogeneous model like the chosen HGT architecture. 
+
+            In the first implementations of the explanation framework the perturbation-based explanation component was based around GNNExplainer identifying the key elements in the input graph and LOO being used to quantify the values. However, this approach was limited due to the problems outlined in this section. First, GNNExplainer's inability to account for edge importance in heterogeneous models meant that it could not be used to identify the most important edges in the graph, therefore the goal of reducing computing cost by limiting the explanation space with the more efficient model worked only on nodes. This meant that LOO had to be run exhaustively on the model anyway.\\
+            The second limitation was in the way LOO quantified the feature's impact on the prediction. As seen in this section, LOO is one of the permutations of the graph that are accounted for through the usage of Shapley Values. Since it evaluates the effect of a singular element having it's feature values set to 0 through masking while keeping everything else in the graph intact it can provide a reasonable understanding of a feature's overall impact on the prediction. However, its focus on a singular feature leads to it downplaying the impact of interconnected elements across the graph. The two methods agree only when features contribute independently. If features can substitute for each other or amplify each other they diverge. \\
+            For example, if event nodes and Order nodes both encode similar timing information, LOO will underestimate both because each masks the other whereas the Shapley Values method would be able to properly identify the magnitude of the impact each element has on the prediction. Because of this, the framework was updated to the current LOO as identifier and Shapley Values as quantifier method with GNNExplainer retained as a comparison point only.
+            
+        \subsection{Gradient/feature-based analysis}
+        \label{sec:dataset_gradient}
+            The second class of techniques used to explain the predictions of my models are gradient/features-based methods. These techniques quantify an individual feature's importance on the model's prediction through linear feature attribution scores. The following definitions are adapted from the work of Zhai et al. \cite{zhai2025}.
+
+            Let process execution $p=(N,A)$ with $N=O'\cup E'$, $NT=OT\cup{ev}$ be the set of node types in process execution $p$, where $ev$ denotes the event type. For each node type $t$ let $N_t\subseteq N$ be the nodes of type $t$ such that $N_t = \{o \in O' \mid \pi_{otype}(o)=t\}$ for $t\in OT$, and $N_t=E'$ for $t=ev$.
+            Let $X = \{X_t\}_{t\in NT}$ where $X_t\in \mathbb{R}^{|N_t|\times|\mathcal{F}_t|}$ with $\mathcal{F}_t$ as the feature set associated with node type $t$.
+            We can formalize the feature attribution scores as follows. 
+
+            \begin{definition}[Feature Attribution Scores]
+            \label{def:feat_attr} 
+                Given a target node $v_i\in N$ and a target output $\hat{y_i} =\Phi(p,X)[v_i]$, our goal is to compute the attribution scores $S$ where $S = \{S_t\}_{t\in NT}$ and $S_t \in \mathbb{R}^{|N_t| \times |\mathcal{F}_t|}$ estimating the importance of every node and feature combination. Thus, the element $S_t[k,l]$ of the attribution score matrix provides an estimate of how much the $l-th$ feature of the $k-th$ node of type $t$, $X_t[k,l]$, affected the output $\hat{y}_i$.
+            \end{definition}
+            
+            In my work I use two different gradient/feature-based methods for calculating the importance of each feature: Gradient ⋅ Input and Integrated Gradients. 
+
+            \begin{definition}[Gradient ⋅ Input Explanation]
+            \label{def:grad_input}
+                Given a trained model $\Phi$, a process execution $p=(N,A)$, a target node $v_i\in N$ and a target output $\hat{y}_i=\Phi(p,X)[v_i]$ the Gradient ⋅ Input feature attribution scores are defined as
+                $S_t^{G\cdot I}[k,l]=X_t[k,l]⋅\frac{\partial \hat{y}_i}{\partial X_t[k,l]}=X_t[k,l]⋅\frac{\partial \Phi(p,X)[v_i]}{\partial X_t[k,l]}$.
+            \end{definition}
+            
+            The main advantages of the Gradient ⋅ Input method are its conceptual simplicity, its computational efficiency and its ability to provide an accurate capture of the behavior of the model around an input. However, its attributions may be unreliable if the function of the considered model saturates for a given input or if it is highly irregular and results in a problem of shattered gradients. Because of these problems I also chose to use the second method, Integrated Gradients, which is defined as follows.
+
+            \begin{definition}[Integrated Gradients Explanation]
+            \label{def:int_grad}
+                Given a trained model $\Phi$, a process execution $p=(N,A)$, a target node $v_i\in N$, a target output $\hat{y}_i=\Phi(p,X)[v_i]$ and a reference feature set $\overline X = \{\overline{X_t}\}_{t\in NT}$ the Integrated Gradients feature attribution scores are defined as
+                $S_t^{IG}[k,l]=(X_t[k,l]-\overline{X_t[k,l]}) \cdot \int_{\alpha=0}^{1} \:{\frac{\partial \Phi(p,\overline{X} + \alpha \cdot (X-\overline{X}))[v_i]}{\partial X_t[k,l]}}d \alpha$.
+            \end{definition}
+            
+            The Integrated Gradients method solves the problems of the Gradient ⋅ Input method by not only considering the gradient at the explained input instance, but rather, by calculating an aggregate gradient on the path from some suitable reference to the current input. In my experiments, I use the baseline feature set $\overline{X}$ obtained by zeroing every feature of the same graph $p$, based on recommendations shown in the work of Sundararajan et al. \cite{sundararajan2017}. 
+
+        \subsection{Counterfactual explanations}
+        \label{sec:dataset_cf}
+            The previous two methods shown are factual explanations which seek to provide explanations to the end user by identifying the input parts that most impact the model's predictions. Counterfactual explanations, on the other hand, seek to identify the minimal changes that would be required on an input graph for the predicted output value to be a different, more desirable one. For graph data, counterfactual explanations usually take the form of subgraphs or modified graph inputs due to the connectivity in the nodes.
+
+            Zhai et al. define a 1-hop complete subgraph as a shape for the counterfactual explanation. This is due to their dataset consisting of one large, connected graph. I do not need to provide such an explanation because our dataset is composed of a list of subgraphs (prefixes) of each process execution.
+
+            Since the goal of a counterfactual explanation is to identify the minimum change that an input graph would require to change its prediction a proper counterfactual subgraph would be the one that is least dissimilar to the input graph since it would require the least amount of effort to change. Dissimilarity can be calculated in a variety of ways, here I adapt the dissimilarity function provided by Zhai et al. for use with my dataset \cite{zhai2025}.
+
+            \begin{definition}[Subgraph Dissimilarity]
+            \label{def:dissim}
+                Let $p=(N,A)$ and $p'=(N',A')$ be two process executions with node-type sets $N_t\subseteq N$, $N'_{t}\subseteq N'$ and feature matrices $X_t, X'_t$ where $NT=OT\cup {ev}$.
+                Let $\pi_{ntype}:N\to NT$ extend $\pi_{otype}$ to event nodes, such that $\pi_{ntype}(n) = \pi_{otype}(n)$ for $n\in O'$ and $\pi_{ntype}(n)=ev$ for $n\in E'$.\\
+                And let $ET_p = \{(\pi_{ntype}(a),s,\pi_{ntype}(b)) \mid \{a,s,b\} \in A\}$ be the set of edge types occurring in $p$, with $ET_{p'}$ as its analogous definition for $p'$. 
+                The dissimilarity between $p$ and $p'$ is
+                $D(p,p')=d_{feat}(p,p') + d_{type}(p,p') + d_{edge}(p,p') + d_{struct}(p,p')$
+            \end{definition}
+            
+            Since each element of the original definition needed to be adapted to better account for the fact that my process executions contain multiple node types, with multiple of them possibly repeating in the same trace I decided to give each element its own proper definition rather than overload definition 3.16.
+
+            A key difference between Zhai et al's work and mine is in their definition of nodes. Their heterogeneous graphs contain only one node type which include a type identifier as part of its features. This means that their graphs retain the same overall structure such as the number of features. In order to account for this difference I treat every node of each shared type as its own seed, allowing me to also take into account multiple instances of the same node type in a process execution.
+
+            \begin{definition}[Feature Dissimilarity Between Graphs]
+            \label{def:feat_dissim}
+            For each type $t$ with $N_t,N'_t \neq \emptyset$ and each node $k\in N_t$, let
+            \begin{itemize} 
+            \item $\ell_t(k)=\frac{1}{|N'_t|}\displaystyle\sum_{j\in N'_t} \frac{||X_t[k,:]-X'_t[j,:]||_2}{\overline{||X'_t||}+ ||X_t[k,:]||_2+\epsilon}$
+            \item $c_t(k)=1-\frac{1}{2}(1+ \frac{1}{|N'_t|} \displaystyle\sum_{j \in N'_t}\cos(X_t[k,:], X'_t[j,:]))$ where $\overline{||X'_t||}$ is the mean row-norm of $X'_t$ and $\epsilon$ is a small constant preventing division by 0.
+            \end{itemize}
+            $d_{feat}(p,p')=\frac{1}{|NT_{shared}|}\displaystyle\sum_{t\in NT_{shared}} \frac{1}{|N_t|} \displaystyle\sum_{k\in N_t} \frac{\ell_t(k) + c_t(k)}{2}$
+            where
+              $NT_{shared}=\{ t\in NT \mid N_t \neq \emptyset \land N'_t\neq \emptyset\}$
+            \end{definition}
+
+            \begin{definition}[Node Type Dissimilarity Between Graphs]
+              \label{def:node_dissim}
+                A multiset-Jaccard distance over node-type counts.
+                $d_{type}(p,p')=1-\frac{\sum_{t\in NT}\min(|N_t|,|N'_t|)}{\sum_{t\in NT}\max(|N_t|,|N'_t|)}$
+            \end{definition}
+
+            Another difference between my work and Zhai et al's is the edge types present in their data. While their work presumed their edge types form an ordinal scale my edge types are all categorical, and thus have no natural ordering. Therefore, I defined the distance in the same way as the node type dissimilarity, using a multiset-jaccard distance.
+
+            \begin{definition}[Edge Type Dissimilarity Between Graphs]
+            \label{def:edge_dissim}
+                $d_{edge}(p,p')=1-\frac{\sum_{r\in ET_p\cup ET_{p'}}\min(m_r,m'_r)}{\sum_{r\in ET_p\cup ET_{p'}}\max(m_r,m'_r)}$
+                where $m_r, m'_r$ are the number of edges of type $r$ in $p$ and $p'$ respectively.
+            \end{definition}
+            
+            A final difference is that Zhai et al define the structure dissimilarity metric as the unnormalized absolute difference in node count between the two graphs. Since this is already given by the node type dissimilarity I instead define this dissimilarity over total edge count, normalized by the larger graph's edge count for scale invariance
+
+            \begin{definition}[Structure Dissimilarity Between Graphs]
+            \label{def:struct_dissim}
+            $d_{struct}(p,p')=\frac{||A| - |A'||}{\max(|A|,|A'|,1)}$
+            \end{definition}
+            
+            Each component is bounded in $[0,1]$, so $D(p,p')\in [0,4]$. This dissimilarity is not a true distance metric as it is not symmetric: $D(p,p')\neq D(p',p)$, because the feature component treats the nodes of the first argument as seeds compared to the second.
+
+        \subsection{Explanation-quality metrics}
+        \label{sec:dataset_metrics}
+            As I explained in Section 2.2.5 an explanation's effectiveness can be evaluated through the use of metrics. These metrics are designed to not rely on the existence of a ground-truth explanation against which they can be compared, since real-world applications will typically not have them. I will now provide a formalization of the metrics used to evaluate the explanations provided by my methodology.
+
+            Fidelity is a metric used to assess whether an explanation's detected input node features are capable of describing the information. In theory, if a model is provided with a version of the input graph with the features identified as important removed it should show a considerable drop in accuracy. This is represented by the $Fidelity^+$ value. On the other hand, if the identified features are the only elements of the graph that are provided then the model's prediction should remain fairly consistent. This measure is referred to as $Fidelity^-$. Characterization is a value bounded in $[0,1]$ which provides an overview of the relationship between the two fidelity values. A characterization value closer to 1 indicates an overall more reliable explanation for the model.
+
+            \begin{definition}[Fidelity Metric of an Explanation]
+            \label{def:fidelity}
+            Let $m$ denote the explanation for a model $\Phi$, let $p^{-m},X^{-m}$ denote a process execution $p$ with $m$'s features zeroed out, and $p^m,X^m$, denote $p$ with everything except $m$ zeroed out.
+            $Fidelity^+(m) = |\hat{y}_i-\Phi(p^{-m},X^{-m})[v_i]|$
+            $Fidelity^-(m) = |\hat{y}_i-\Phi(p^{m},X^{m})[v_i]|$
+            $Characterization(m)=\frac{Fidelity^+(m)}{Fidelity^+(m)+Fidelity^-(m)}$
+            \end{definition}
+
+            Sparsity is used to quantify the proportion of features that are deemed significant by the explanation. Sparsity theory proposes that efficient explanations ought to be succinct, emphasizing only the key input elements and overlooking the remainder. Ideally, the sparsity value of an explanation would be high, indicating that the explanation is more effective in identifying the most significant features of the input while discarding those that are unimportant. This measure provides a way to quantify the overall conciseness and interpretability of the explanations provided. 
+
+            \begin{definition}[Sparsity Metric of an Explanation \cite{stevens2022}]
+            \label{def:sparsity}
+            Let $p=(N,A)$ be a process execution and $m$ denote the explanation with $m_n\subseteq N$ and $m_A \subseteq A$ denoting the nodes and edges respectively that $m$ identifies as important. The node sparsity of $m$ is
+            $Sparsity_N(m)=1-\frac{|m_N|}{|N|}$
+
+            and the edge sparsity of $m$ is
+            $Sparsity_A(m)= 1 - \frac{|m_A|}{|A|}$ if $|A|>0$, undefined otherwise.
+            \end{definition}
