@@ -1,0 +1,6 @@
+kpi,task_id,query_id,query_events,query_pred_h,cf_id,cf_events,cf_pred_h,dissimilarity,min_gap_h,figure
+om_payorder,TimeFrom_Orders_to_PayOrder,1766,4,208.17,1970,4,143.81,0.6137,20.82,cf_union_om_payorder.png
+om_packagedelivered,TimeFrom_Orders_to_PackageDelivered,1752,4,72.09,1970,4,30.06,0.8851,7.21,cf_union_om_packagedelivered.png
+logistics_depart,TimeFrom_CustomerOrder_to_Depart,863,4,354.33,999,5,311.82,0.8041,35.43,cf_union_logistics_depart.png
+logistics_loadtovehicle,TimeFrom_CustomerOrder_to_LoadToVehicle,864,5,323.31,956,5,319.89,0.4468,1.0,cf_union_logistics_loadtovehicle.png
+iot_evaluatetruckexit,TimeFrom_Pickupplan_to_EvaluateTruckExit,1824,4,48.42,1976,4,26.42,0.1463,4.84,cf_union_iot_evaluatetruckexit.png

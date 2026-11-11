@@ -1,0 +1,244 @@
+{
+ "release_tag": "dashboard-data-v1",
+ "url": "https://github.com/Owantland/ocel_explainability/releases/download/dashboard-data-v1/ocel_dashboard_data_v1.tar.gz",
+ "asset": "ocel_dashboard_data_v1.tar.gz",
+ "sha256": "9651c72b51f398593b0e0234d44322478b2db09d997b3182055105e69589cc9e",
+ "size": 80524699,
+ "files": [
+  {
+   "path": "files/databases/CargoPickup_IoT.sqlite",
+   "size": 25673728,
+   "sha256": "2fd45fd5111da0b8737ccdeeea6a136e751574a6750b32adccc03044f827b6ef"
+  },
+  {
+   "path": "files/databases/logistics.sqlite",
+   "size": 26193920,
+   "sha256": "3002a1d8802187fb149f0dc9fc4ad70609869cb3f149b9752a22f897f5ead1da"
+  },
+  {
+   "path": "files/databases/order_management.sqlite",
+   "size": 9715712,
+   "sha256": "bc625564e83cc99a113db9df02021c6eef55e67a035af0deb725f12dc44d60b1"
+  },
+  {
+   "path": "files/explainer_outputs/cargo_pickup_iot/aggregate_last_event_TimeFrom_Pickupplan_to_EvaluateTruckExit_revisit8/aggregate_explanation_bars.csv",
+   "size": 935,
+   "sha256": "a75f6d3f5d9f8727745740f73f9108ca4bf907eb47edfbd562f0db90a3d8c847"
+  },
+  {
+   "path": "files/explainer_outputs/cargo_pickup_iot/aggregate_last_event_TimeFrom_Pickupplan_to_EvaluateTruckExit_revisit8/aggregate_feature_bars.csv",
+   "size": 1243,
+   "sha256": "cd8a6ef84a1e68b6ce77d7ac72e621604280f9b3ee6c1009a8edac16d2ae365a"
+  },
+  {
+   "path": "files/explainer_outputs/cargo_pickup_iot/aggregate_last_event_TimeFrom_Pickupplan_to_EvaluateTruckExit_revisit8/aggregate_metrics.csv",
+   "size": 2556,
+   "sha256": "efd7574a9214c74fbfacc1da30861edb995e8592bedc3d38494ed55c98487ccf"
+  },
+  {
+   "path": "files/explainer_outputs/logistics/aggregate_shapley_TimeFrom_CustomerOrder_to_Depart/aggregate_explanation_bars.csv",
+   "size": 1075,
+   "sha256": "2d54fffe3067a5cea63d8d7aa3293d6071a6503a765ca154816f3f2d4c73c8a0"
+  },
+  {
+   "path": "files/explainer_outputs/logistics/aggregate_shapley_TimeFrom_CustomerOrder_to_Depart/aggregate_feature_bars.csv",
+   "size": 1282,
+   "sha256": "9bb6833fcdcad36520e95c6278c8fca279a35c1744ff0003a24faadcef7db4b2"
+  },
+  {
+   "path": "files/explainer_outputs/logistics/aggregate_shapley_TimeFrom_CustomerOrder_to_Depart/aggregate_metrics.csv",
+   "size": 2355,
+   "sha256": "c42dbf8bcd916581bf4c2cf95b9ae81575a72984b542587d2dbde9a26992fe7c"
+  },
+  {
+   "path": "files/explainer_outputs/logistics/aggregate_shapley_TimeFrom_CustomerOrder_to_LoadToVehicle/aggregate_explanation_bars.csv",
+   "size": 1032,
+   "sha256": "8681eac7b1972034aa4ed9c0ae47586dedb917561a786a2af17f809b6410fc72"
+  },
+  {
+   "path": "files/explainer_outputs/logistics/aggregate_shapley_TimeFrom_CustomerOrder_to_LoadToVehicle/aggregate_feature_bars.csv",
+   "size": 1269,
+   "sha256": "fed92f7a33736e649d7b09461eec76fb55f58d25aadcf6de5127c9b3441616bc"
+  },
+  {
+   "path": "files/explainer_outputs/logistics/aggregate_shapley_TimeFrom_CustomerOrder_to_LoadToVehicle/aggregate_metrics.csv",
+   "size": 2690,
+   "sha256": "0e5dc515c4400e6b98632fae415d51d47ab0d1eca46ead59147f4d4c127104e5"
+  },
+  {
+   "path": "files/explainer_outputs/order_management/aggregate_shapley_TimeFrom_Orders_to_PackageDelivered/aggregate_explanation_bars.csv",
+   "size": 1087,
+   "sha256": "870d2828abf8471dd18a7a533c7820e3850b3dc514a3cc29162e856f02b8ab48"
+  },
+  {
+   "path": "files/explainer_outputs/order_management/aggregate_shapley_TimeFrom_Orders_to_PackageDelivered/aggregate_feature_bars.csv",
+   "size": 1187,
+   "sha256": "c27b9553048cf17d4ff0b9e2b9fd99f193fba224ce7d587dd53fc5ed92b46405"
+  },
+  {
+   "path": "files/explainer_outputs/order_management/aggregate_shapley_TimeFrom_Orders_to_PackageDelivered/aggregate_metrics.csv",
+   "size": 2694,
+   "sha256": "02df11e3d6d9111977b81da54b9fb0afe7154b78c0f33a3daf1b5341752c3cbc"
+  },
+  {
+   "path": "files/explainer_outputs/order_management/aggregate_shapley_TimeFrom_Orders_to_PayOrder/aggregate_explanation_bars.csv",
+   "size": 1162,
+   "sha256": "8d0b6968208f56e97358ae1fbf90efe64bf94840e0d9b7cf88d42488bdf69fd0"
+  },
+  {
+   "path": "files/explainer_outputs/order_management/aggregate_shapley_TimeFrom_Orders_to_PayOrder/aggregate_feature_bars.csv",
+   "size": 1254,
+   "sha256": "c691940e598053f723c19e4e7d1149128207be6f4346e381d4d12f112d154143"
+  },
+  {
+   "path": "files/explainer_outputs/order_management/aggregate_shapley_TimeFrom_Orders_to_PayOrder/aggregate_metrics.csv",
+   "size": 2685,
+   "sha256": "ddd6eb37e246e041eb20028d3630f10116ee8e8ebac68d7b0868069b41f005cc"
+  },
+  {
+   "path": "files/graph_structures/cargo_pickup_iot/2000/ev_log.csv",
+   "size": 622068,
+   "sha256": "6f16f7a833e01776f698e55e0ca62eb22a3f718130152de01e08be640185eb49"
+  },
+  {
+   "path": "files/graph_structures/cargo_pickup_iot/2000/ocel.csv",
+   "size": 3390686,
+   "sha256": "63975343870bf44fdbde56f4d39ecf10b9daec55f14217ab5e8401704291ee15"
+  },
+  {
+   "path": "files/graph_structures/logistics/1000/ev_log.csv",
+   "size": 3581850,
+   "sha256": "de6862fdde3cd838cc9c7c2e7ea15b57d2b0d0c2bf6683359fb582a6a0bd451e"
+  },
+  {
+   "path": "files/graph_structures/logistics/1000/ocel.csv",
+   "size": 38537634,
+   "sha256": "b73c06400577cdbe2b4144c8b87c3966bd7f58080eb7a30a680f27ed83834f1d"
+  },
+  {
+   "path": "files/graph_structures/order_management/2000/ev_log.csv",
+   "size": 1518749,
+   "sha256": "97706c3d240db3a83e2809f212fd78052fd403cfc36482cfd957d7eb96971882"
+  },
+  {
+   "path": "files/graph_structures/order_management/2000/ocel.csv",
+   "size": 22835114,
+   "sha256": "ceaa00ebea5d02485cad6ba4d32206971344c4cfc4aa2e1e4cfc1627d0863a84"
+  },
+  {
+   "path": "files/hetero_structures/cargo_pickup_iot/2000/feature_stats.pt",
+   "size": 2777,
+   "sha256": "283ff17f0186b518a50a07003f666ce5471842045ef24250716d56ccfc7fbe7b"
+  },
+  {
+   "path": "files/hetero_structures/cargo_pickup_iot/2000/test_graphs_sg.pt",
+   "size": 21046377,
+   "sha256": "07fe6d8c5a51943d89dab2cbbb7d33d11813cf0783d7d740a16783517db85d07"
+  },
+  {
+   "path": "files/hetero_structures/logistics/1000_customerorder_depart_backup/feature_stats.pt",
+   "size": 3745,
+   "sha256": "36be4426cc4b3ee2827e5ef4c1f8c43aac50525fe23ac0fa2b7264b59bd9b947"
+  },
+  {
+   "path": "files/hetero_structures/logistics/1000_customerorder_depart_backup/test_graphs_sg.pt",
+   "size": 191527561,
+   "sha256": "e234ea2788bdb328235edc54c25013a58877c093694a801b854f919b58e379f7"
+  },
+  {
+   "path": "files/hetero_structures/logistics/1000_loadtovehicle_backup/feature_stats.pt",
+   "size": 3745,
+   "sha256": "b420f0ef31e6e35b2d7f8b062790020ea2b675d092740177d8213a13f6685775"
+  },
+  {
+   "path": "files/hetero_structures/logistics/1000_loadtovehicle_backup/test_graphs_sg.pt",
+   "size": 191078713,
+   "sha256": "490ed9678831b921df7bca940b46bb914901eb4bf8b0dd5ddd643ba4ca1f8a6d"
+  },
+  {
+   "path": "files/hetero_structures/order_management/2000/feature_stats.pt",
+   "size": 4261,
+   "sha256": "566aa2e5f37ca1249d075d1894109e22eeea9e7097f1d92e9226bdb49d9e33c9"
+  },
+  {
+   "path": "files/hetero_structures/order_management/2000/test_graphs_sg.pt",
+   "size": 37869373,
+   "sha256": "6fdbb3941d1c1dd76051ad1ab16a3f4b1c73ece169523cdc7eff86e80c8dbcba"
+  },
+  {
+   "path": "files/hetero_structures/order_management/_packagedelivered_graphs_backup/feature_stats.pt",
+   "size": 4261,
+   "sha256": "687431d4393054722f127b715f023b887dc01b4a1a6ec20b2679c22b6673175b"
+  },
+  {
+   "path": "files/hetero_structures/order_management/_packagedelivered_graphs_backup/test_graphs_sg.pt",
+   "size": 45490577,
+   "sha256": "7661442a0c1dfa41649c420d90ecde47259f545b7b242c2c9026ffdee9b6401a"
+  },
+  {
+   "path": "files/models/cargo_pickup_iot/2000/Hetero/TimeFrom_Pickupplan_to_EvaluateTruckExit.pth",
+   "size": 207107,
+   "sha256": "8107dde5c1da09a55cb87116ecdbb91ef9b60abf87800686ef19ba5239134b1b"
+  },
+  {
+   "path": "files/models/cargo_pickup_iot/2000/Hetero/TimeFrom_Pickupplan_to_EvaluateTruckExit_norm.json",
+   "size": 120,
+   "sha256": "a3d9bccab4aca5a07a5606a3796bd2b3211d747b91806fa1d54d070acdda29aa"
+  },
+  {
+   "path": "files/models/cargo_pickup_iot/2000/Hetero/model_params.json",
+   "size": 166,
+   "sha256": "f07a7061d1cac11e32dbab3e0bedfb5bcac07e105b34433453903f3b3f8641d4"
+  },
+  {
+   "path": "files/models/logistics/1000/Hetero/TimeFrom_CustomerOrder_to_Depart.pth",
+   "size": 289493,
+   "sha256": "6f3f2386e7af80202870d036d1cb2e19af817c94f6271ae74d458ad0f61435f6"
+  },
+  {
+   "path": "files/models/logistics/1000/Hetero/TimeFrom_CustomerOrder_to_Depart_norm.json",
+   "size": 87,
+   "sha256": "820609a345304889522d9765f845c189be1ca54873622a85351d8ee99f060073"
+  },
+  {
+   "path": "files/models/logistics/1000/Hetero/TimeFrom_CustomerOrder_to_LoadToVehicle.pth",
+   "size": 2276028,
+   "sha256": "4311f6c17be608c2a80bf3d1ab7933e929bced60cfc1ff03200bf3806ac4590f"
+  },
+  {
+   "path": "files/models/logistics/1000/Hetero/TimeFrom_CustomerOrder_to_LoadToVehicle_norm.json",
+   "size": 89,
+   "sha256": "24965d315538debc0659546fffcc28ee945b8092ac3ac5c14b76803467e8abd8"
+  },
+  {
+   "path": "files/models/logistics/1000/Hetero/model_params.json",
+   "size": 533,
+   "sha256": "d5153d047791e5301fce8598f73f199cd62409964841e7c585342e577b8a42c1"
+  },
+  {
+   "path": "files/models/order_management/2000/Hetero/TimeFrom_Orders_to_PackageDelivered.pth",
+   "size": 1822440,
+   "sha256": "743a6f14e0624e558159cb94fcbdb0210054507abb4dcf6c521b6f8f70453c03"
+  },
+  {
+   "path": "files/models/order_management/2000/Hetero/TimeFrom_Orders_to_PackageDelivered_norm.json",
+   "size": 108,
+   "sha256": "ba5db47af24c8fedfeafab17ea1cc9fe16df13e526d5951a87bfcc5e20b17ec1"
+  },
+  {
+   "path": "files/models/order_management/2000/Hetero/TimeFrom_Orders_to_PayOrder.pth",
+   "size": 1818949,
+   "sha256": "147ed3786abd46cdfa08ba813023d3d0d7ece4222f3258d8ed648161da2cdf45"
+  },
+  {
+   "path": "files/models/order_management/2000/Hetero/TimeFrom_Orders_to_PayOrder_norm.json",
+   "size": 87,
+   "sha256": "6553f4f691eaf77677312468d934af4c12d256971310f9546dc8ac26543e3b3d"
+  },
+  {
+   "path": "files/models/order_management/2000/Hetero/model_params.json",
+   "size": 308,
+   "sha256": "f03c1bbbdb3b5ab75ff0857a610102ca96bd82664303ec4c1b0f2d42f2b365b8"
+  }
+ ]
+}
