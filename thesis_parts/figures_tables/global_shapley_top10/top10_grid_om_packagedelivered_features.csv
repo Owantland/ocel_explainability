@@ -1,0 +1,21 @@
+method,,label,mean_signed_shift,std_shift,count,n_executions
+flat,0,Events.ConfirmOrder,61.860553530092595,58.97327829411784,8,
+flat,1,Events.PickItem,-26.760924768518517,52.01791270467626,8,
+flat,2,Items.weight,-26.712595775462965,7.370974919511986,8,
+flat,3,Customers.Mediterranea Luxury Cruises S.p.A.,23.151666666666667,0.0,1,
+flat,4,Orders.n_items,-20.19518811487269,25.889309440677827,8,
+flat,5,Events.ReorderItem,-19.34084548611111,0.0,1,
+flat,6,Events.o1_Employees,14.941234375,10.343747936542774,8,
+flat,7,Orders.n_packages,-14.181101200810186,20.02210357217977,8,
+flat,8,Products.price,-12.865567708333334,0.7561510416666666,2,
+flat,9,Products.weight,-11.347834780092592,4.327598668981481,2,
+norm_total,0,Events.ConfirmOrder,0.4677047187150822,0.4380502199261586,8,8.0
+norm_total,1,Items.weight,-0.1680447039468017,0.0740982117277092,8,8.0
+norm_total,2,Events.c3_PickItem,0.1597290938159314,0.1343607783449027,8,8.0
+norm_total,3,Orders.n_packages,-0.1547949934846622,0.1367006275414002,8,8.0
+norm_total,4,Customers.Mediterranea Luxury Cruises S.p.A.,0.1301291048689525,0.0,1,1.0
+norm_total,5,Events.PickItem,-0.1134467270070022,0.2444916868208811,8,8.0
+norm_total,6,Events.o1_Employees,0.0997062161992659,0.0527587344330493,8,8.0
+norm_total,7,Customers.Iberian Sun Solaridades SA,0.0905263652203032,0.0,1,1.0
+norm_total,8,Products.price,-0.0661403235638886,0.0217490461839741,2,1.0
+norm_total,9,Orders.n_products,-0.0607334591349733,0.0698791321257117,8,8.0

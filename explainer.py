@@ -738,7 +738,7 @@ class Explainer(Modelling):
 
     def plot_aggregate_explanation_bars(self, explanation_signed_shifts, save_path, title,
                                         dataset_label=None, n_traces=None, top_n=15,
-                                        n_label=None):
+                                        n_label=None, xlabel=None, show_large=True):
         """Single, global, ranked horizontal bar chart of the most influential
         'attr=value' explanations across many traces -- cf. Galanti et al. 2023b's
         Fig. 1 (a global explanation bar chart for remaining-time prediction).
@@ -753,7 +753,9 @@ class Explainer(Modelling):
         per (decoded identity or bare node type) label, values already in hours.
         n_label: optional text for the title's parenthetical, replacing the default
         "n=<n_traces> traces" -- used when the bars are NOT a mean over all
-        n_traces (see explain_aggregate_shapley())."""
+        n_traces (see explain_aggregate_shapley()).
+        xlabel / show_large: override the x-axis label and turn off the >1 target-std
+        outline, for values that are not in hours (time-normalized Shapley)."""
         import numpy as np
         summary = []
         for label, vals in explanation_signed_shifts.items():
@@ -770,7 +772,8 @@ class Explainer(Modelling):
 
         labels = [r['label'] for r in summary]
         means = [r['mean_signed_shift'] for r in summary]
-        larges = [abs(r['mean_signed_shift']) > self.target_std.item() / 3600.0 for r in summary]
+        larges = [show_large and abs(r['mean_signed_shift']) > self.target_std.item() / 3600.0
+                  for r in summary]
 
         fig, ax = plt.subplots(figsize=(8, max(3, len(labels) * 0.4)))
         colors = ["#2ca02c" if m > 0 else ("#d62728" if m < 0 else "#888888") for m in means]
@@ -782,7 +785,7 @@ class Explainer(Modelling):
         ax.set_yticklabels(labels, fontsize=9)
         ax.invert_yaxis()
         ax.axvline(0, color="black", linewidth=0.8)
-        ax.set_xlabel("Average influence on predicted remaining time (hours)")
+        ax.set_xlabel(xlabel or "Average influence on predicted remaining time (hours)")
         full_title = title
         if dataset_label is not None:
             full_title += f" — {dataset_label}"
@@ -1510,9 +1513,24 @@ class Explainer(Modelling):
 
         return all_metrics
 
+    def _prefix_times(self, graph):
+        """(elapsed_h, total_h) of a prefix graph, from de-normalized values: elapsed is
+        the largest Events.elapsed_h (time since the execution's first event), total is
+        elapsed plus the true remaining time of the viewpoint object (index 0)."""
+        i = self.feature_names['Events'].index('elapsed_h')
+        mean, std = self.node_feat_stats['Events']
+        x = graph['Events'].x[:, i].cpu()
+        elapsed_h = float((x * std[i].cpu() + mean[i].cpu()).max())
+        y = graph[self.kpi_viewpoint].y[0].item() * self.target_std.item() + self.target_mean.item()
+        if self.target_transform == 'log1p':
+            import math
+            y = math.expm1(y)
+        return elapsed_h, elapsed_h + y / 3600.0
+
     def explain_aggregate_shapley(self, n_traces=50, top_k=5, n_samples=30, revisit_n=3,
                                   max_revisit_candidates=6, save_dir=None, seed=0,
-                                  scope='last_event', pooling='execution_mean'):
+                                  scope='last_event', pooling='execution_mean', normalize=None,
+                                  elapsed_floor_h=1.0, fill_sparse=True):
         """Aggregate Shapley replacement for the dashboard's two flat "top K" bar
         charts (nodes, features) only -- NOT the per-node-type chart or the depth
         heatmap, which stay LOO-based (both are exhaustive-by-design; Shapley-izing
@@ -1573,7 +1591,30 @@ class Explainer(Modelling):
         LOO pass. Both poolings then start from identical LOO numbers. Each run
         also writes loo_pooled_nodes.csv / loo_pooled_features.csv: every label's
         pre-Shapley LOO mean under that pooling, with occurrence/execution counts
-        and the share of occurrences from its busiest execution."""
+        and the share of occurrences from its busiest execution.
+
+        normalize: divides every LOO shift (before pooling, so it also decides the top
+        20) and every Shapley revisit by a time of the graph it came from, giving a
+        unitless value (de Leoni's proposal for prefixes of differing lengths).
+          None (default) -- values stay in hours.
+          'elapsed' -- the prefix's elapsed time since the execution started, floored
+              at elapsed_floor_h (the first prefix's elapsed time is 0).
+          'total_duration' -- elapsed + true remaining time, i.e. the execution's whole
+              duration (uses the ground-truth target, not the prediction).
+        fill_sparse: for the distinct-execution revisits ('execution_mean',
+        'flat_distinct'), a label found in fewer than revisit_n executions has its
+        remaining revisits filled with other prefixes of those same executions
+        (round-robin, seeded-random order), up to revisit_n or until every prefix
+        holding it is used. Without it, a label from one execution gets one revisit
+        on one random prefix, and its bar moves whenever the random stream shifts
+        (OM, revisit_n 8 vs 16: 9 of the top-20 nodes, ~3.6 h). False reproduces
+        the earlier one-prefix-per-execution runs. The bar CSVs carry an
+        n_executions column with the distinct executions behind each bar.
+
+        Writes to <default dir>_norm_elapsed / _norm_total by default. The LOO cache
+        stays in hours, so all normalizations share one LOO pass. Every run also writes
+        loo_occurrences_nodes.csv / loo_occurrences_features.csv: one row per label
+        occurrence with its raw shift and the graph's elapsed and total time."""
         import random
 
         if scope not in ('last_event', 'all_prefixes'):
@@ -1581,6 +1622,9 @@ class Explainer(Modelling):
         if pooling not in ('execution_mean', 'flat', 'flat_distinct'):
             raise ValueError(f"pooling must be 'execution_mean', 'flat' or 'flat_distinct', "
                              f"got {pooling!r}")
+        if normalize not in (None, 'elapsed', 'total_duration'):
+            raise ValueError(f"normalize must be None, 'elapsed' or 'total_duration', "
+                             f"got {normalize!r}")
         all_prefixes = scope == 'all_prefixes'
         # per_execution: LOO values averaged within each execution before pooling.
         # distinct_revisits: Shapley revisits spread over distinct executions.
@@ -1591,8 +1635,11 @@ class Explainer(Modelling):
             dir_names = {'execution_mean': "aggregate_all_prefixes",
                          'flat': "aggregate_all_prefixes_flat",
                          'flat_distinct': "aggregate_all_prefixes_flat_distinct"}
+            norm_suffix = {None: "", 'elapsed': "_norm_elapsed",
+                           'total_duration': "_norm_total"}[normalize]
             save_dir = os.path.join(self.path_dict['explainer_path'],
-                                    dir_names[pooling] if all_prefixes else "aggregate")
+                                    (dir_names[pooling] if all_prefixes else "aggregate")
+                                    + norm_suffix)
         os.makedirs(save_dir, exist_ok=True)
 
         self.model.load_state_dict(torch.load(self.model_path, weights_only=False))
@@ -1667,21 +1714,37 @@ class Explainer(Modelling):
                 print(f"  LOO over prefixes: 100%")
             self._agg_loo_cache[cache_key] = (loo_results, n_failed)
 
+        # Per-graph time denominator (1.0 when not normalizing): shifts are in hours,
+        # so dividing by hours leaves a unitless value.
+        prefix_times, denominators = {}, {}
+        node_occurrences, feature_occurrences = [], []
+        for trace_idx, *_ in loo_results:
+            elapsed_h, total_h = self._prefix_times(sample[trace_idx])
+            prefix_times[trace_idx] = (elapsed_h, total_h)
+            denominators[trace_idx] = {None: 1.0, 'elapsed': max(elapsed_h, elapsed_floor_h),
+                                       'total_duration': total_h}[normalize]
+
         for (trace_idx, oid, n_events, node_imp, seed_feats, top_node_feats,
              baseline_value, id_map, m) in loo_results:
             baseline_values[trace_idx] = baseline_value
+            denom = denominators[trace_idx]
+            elapsed_h, total_h = prefix_times[trace_idx]
             for nt, idx, shift, _, signed_shift in node_imp:
                 decoded = id_map.get((nt, idx))
                 label = f"{nt}={decoded}" if decoded else nt
-                explanation_signed_shifts[label][oid].append(signed_shift / 3600.0)
+                explanation_signed_shifts[label][oid].append(signed_shift / 3600.0 / denom)
                 explanation_sources[label][oid].append((trace_idx, nt, idx))
+                node_occurrences.append((label, oid, trace_idx, signed_shift / 3600.0,
+                                         elapsed_h, total_h))
 
             for f, shift, _, signed_shift in seed_feats:
                 feat_names_vp = names.get(vp, [])
                 feat_label = feat_names_vp[f] if f < len(feat_names_vp) else f"feat_{f}"
                 label = f"{vp}.{feat_label}"
-                feature_signed_shifts[label][oid].append(signed_shift / 3600.0)
+                feature_signed_shifts[label][oid].append(signed_shift / 3600.0 / denom)
                 feature_sources[label][oid].append((trace_idx, vp, 0, f))
+                feature_occurrences.append((label, oid, trace_idx, signed_shift / 3600.0,
+                                            elapsed_h, total_h))
 
             if node_imp and top_node_feats:
                 top_nt, top_ni = node_imp[0][0], node_imp[0][1]
@@ -1689,8 +1752,10 @@ class Explainer(Modelling):
                 for f, shift, _, signed_shift in top_node_feats:
                     feat_label = feat_names_top[f] if f < len(feat_names_top) else f"feat_{f}"
                     label = f"{top_nt}.{feat_label}"
-                    feature_signed_shifts[label][oid].append(signed_shift / 3600.0)
+                    feature_signed_shifts[label][oid].append(signed_shift / 3600.0 / denom)
                     feature_sources[label][oid].append((trace_idx, top_nt, top_ni, f))
+                    feature_occurrences.append((label, oid, trace_idx, signed_shift / 3600.0,
+                                                elapsed_h, total_h))
 
             all_metrics.append(m)
             metric_meta.append((oid, n_events))
@@ -1720,7 +1785,18 @@ class Explainer(Modelling):
             # executions are proportionally more likely to be revisited.
             # flat_distinct revisits like execution_mean.
             if distinct_revisits:
-                return [rng.choice(srcs) for srcs in list(by_exec.values())[:revisit_n]]
+                execs = list(by_exec.values())[:revisit_n]
+                picks = [rng.randrange(len(srcs)) for srcs in execs]
+                chosen = [srcs[i] for srcs, i in zip(execs, picks)]
+                if fill_sparse and len(chosen) < revisit_n:
+                    # Too few executions: top up with their other prefixes, one
+                    # execution at a time, so a sparse label is not one random prefix.
+                    rest = [rng.sample([s for j, s in enumerate(srcs) if j != i], len(srcs) - 1)
+                            for srcs, i in zip(execs, picks)]
+                    for k in range(max(len(r) for r in rest)):
+                        chosen += [r[k] for r in rest if k < len(r)]
+                    chosen = chosen[:revisit_n]
+                return chosen
             occurrences = [s for srcs in by_exec.values() for s in srcs]
             if flat_prefixes:
                 return rng.sample(occurrences, min(revisit_n, len(occurrences)))
@@ -1743,6 +1819,11 @@ class Explainer(Modelling):
 
         _write_loo_pooled(explanation_signed_shifts, os.path.join(save_dir, "loo_pooled_nodes.csv"))
         _write_loo_pooled(feature_signed_shifts, os.path.join(save_dir, "loo_pooled_features.csv"))
+        occ_cols = ['label', 'order_id', 'trace_idx', 'raw_shift_h', 'elapsed_h', 'total_h']
+        pd.DataFrame(node_occurrences, columns=occ_cols).to_csv(
+            os.path.join(save_dir, "loo_occurrences_nodes.csv"), index=False)
+        pd.DataFrame(feature_occurrences, columns=occ_cols).to_csv(
+            os.path.join(save_dir, "loo_occurrences_features.csv"), index=False)
 
         def _revisit_node_label(nt, idx, trace_idx):
             g = sample[trace_idx]
@@ -1755,7 +1836,7 @@ class Explainer(Modelling):
                 candidates = all_same_type
             sv = self.shapley_node_importance(g, 0, baseline_value, candidates, n_samples=n_samples,
                                               rng=rng)
-            return sv[(nt, idx)] / 3600.0
+            return sv[(nt, idx)] / 3600.0 / denominators[trace_idx]
 
         def _revisit_feature_label(nt, node_idx, feat_idx, trace_idx):
             g = sample[trace_idx]
@@ -1771,20 +1852,36 @@ class Explainer(Modelling):
             sv = self.shapley_feature_importance_for_node(g, nt, node_idx, baseline_value, 0,
                                                            feature_indices=candidates, n_samples=n_samples,
                                                            rng=rng)
-            return sv[feat_idx] / 3600.0
+            return sv[feat_idx] / 3600.0 / denominators[trace_idx]
 
         # Each bar is the mean of at most revisit_n Shapley values, not of all
         # len(sample) traces -- the title says so instead of a bare "n=50 traces".
         if all_prefixes:
             pooling_text = (f"{len(sample)} prefixes, per-execution mean" if per_execution
                             else f"flat over {len(sample)} prefixes")
-            revisit_unit = "executions" if distinct_revisits else "prefixes"
+            revisit_unit = ("executions (topped up with prefixes)" if distinct_revisits and fill_sparse
+                            else "executions" if distinct_revisits else "prefixes")
             n_label = (f"top-20 picked by LOO over {len(executions)} executions "
                        f"({pooling_text}); "
                        f"Shapley on ≤{revisit_n} {revisit_unit} per label")
         else:
             n_label = (f"top-20 picked by LOO over n={len(sample)} traces; "
                        f"Shapley on ≤{revisit_n} traces per label")
+        norm_kw = {}
+        if normalize is not None:
+            unit = ("elapsed time" + f" (floor {elapsed_floor_h:g} h)" if normalize == 'elapsed'
+                    else "total execution duration")
+            n_label += f"; each value ÷ {unit}"
+            norm_kw = {'xlabel': f"Average influence ÷ {unit.split(' (')[0]} (unitless)",
+                       'show_large': False}
+        def _with_executions(summary, sources):
+            # Distinct executions behind each bar (the revisits use the first
+            # revisit_n executions holding the label).
+            df = pd.DataFrame(summary)
+            if distinct_revisits and not df.empty:
+                df['n_executions'] = df['label'].map(lambda l: min(len(sources[l]), revisit_n))
+            return df
+
         print(f"  Shapley-requantifying top nodes…")
         winners = _top_labels(explanation_signed_shifts, top_n=20)
         shapley_node_shifts = defaultdict(list)
@@ -1795,9 +1892,9 @@ class Explainer(Modelling):
         explanation_summary = self.plot_aggregate_explanation_bars(
             shapley_node_shifts, os.path.join(save_dir, "aggregate_explanation_bars.png"),
             "Global Shapley explanations for remaining time prediction",
-            dataset_label=self.database, top_n=20, n_label=n_label,
+            dataset_label=self.database, top_n=20, n_label=n_label, **norm_kw,
         )
-        pd.DataFrame(explanation_summary).to_csv(
+        _with_executions(explanation_summary, explanation_sources).to_csv(
             os.path.join(save_dir, "aggregate_explanation_bars.csv"), index=False
         )
 
@@ -1811,9 +1908,9 @@ class Explainer(Modelling):
         feature_summary = self.plot_aggregate_explanation_bars(
             shapley_feature_shifts, os.path.join(save_dir, "aggregate_feature_bars.png"),
             "Global Shapley feature attribution for remaining time prediction",
-            dataset_label=self.database, top_n=20, n_label=n_label,
+            dataset_label=self.database, top_n=20, n_label=n_label, **norm_kw,
         )
-        pd.DataFrame(feature_summary).to_csv(
+        _with_executions(feature_summary, feature_sources).to_csv(
             os.path.join(save_dir, "aggregate_feature_bars.csv"), index=False
         )
 

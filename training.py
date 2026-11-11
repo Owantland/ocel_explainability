@@ -164,6 +164,8 @@ class Modelling:
             ['Events']
         )
         saved_stats = self._load_feature_stats() if test_only else None
+        # Kept so explainers can recover raw feature values (e.g. Events.elapsed_h).
+        self.node_feat_stats = {}
         for node_type in continuous_node_types:
             if test_only:
                 if node_type not in saved_stats:
@@ -173,6 +175,7 @@ class Modelling:
                 feat_mean, feat_std = self._fit_feature_stats(node_type)
                 if feat_mean is None:
                     continue
+            self.node_feat_stats[node_type] = (feat_mean, feat_std)
             for split in [self.train_data, self.val_data, self.test_data]:
                 for g in split:
                     if g[node_type].num_nodes > 0:
