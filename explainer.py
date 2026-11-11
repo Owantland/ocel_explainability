@@ -1530,7 +1530,8 @@ class Explainer(Modelling):
     def explain_aggregate_shapley(self, n_traces=50, top_k=5, n_samples=30, revisit_n=3,
                                   max_revisit_candidates=6, save_dir=None, seed=0,
                                   scope='last_event', pooling='execution_mean', normalize=None,
-                                  elapsed_floor_h=1.0, fill_sparse=True):
+                                  elapsed_floor_h=1.0, fill_sparse=True,
+                                  execution_offset=0):
         """Aggregate Shapley replacement for the dashboard's two flat "top K" bar
         charts (nodes, features) only -- NOT the per-node-type chart or the depth
         heatmap, which stay LOO-based (both are exhaustive-by-design; Shapley-izing
@@ -1558,6 +1559,12 @@ class Explainer(Modelling):
         session's earlier compare_loo_vs_shapley() runs) while staying close to
         the originally planned budget.
 
+        execution_offset: index of the first last-event test execution to use; the
+        run covers last_event_graphs[execution_offset:execution_offset + n_traces].
+        0 (default) is the original first-n_traces window. Disjoint windows
+        (offset = w * n_traces) measure how much the top-20 depends on which
+        executions were sampled. Raises if the window would hold fewer than
+        n_traces executions.
         seed: seeds a private random.Random for the permutation orderings, so the
         bar values are reproducible across reruns (the global `random` state is
         left untouched).
@@ -1648,7 +1655,16 @@ class Explainer(Modelling):
 
         vp = self.kpi_viewpoint
         last_event_graphs = [g for g in self.test_data if g[vp]['last_event'][0].item()]
-        executions = last_event_graphs[:n_traces]
+        executions = last_event_graphs[execution_offset:execution_offset + n_traces]
+        print(f"{len(last_event_graphs)} last-event test executions; using "
+              f"[{execution_offset}:{execution_offset + len(executions)}]")
+        if len(executions) < n_traces:
+            raise ValueError(
+                f"execution window [{execution_offset}:{execution_offset + n_traces}] holds "
+                f"only {len(executions)} of {len(last_event_graphs)} last-event executions")
+        with open(os.path.join(save_dir, "executions.csv"), "w") as f:
+            f.write("execution_id\n")
+            f.writelines(f"{int(g[vp]['id'][0].item())}\n" for g in executions)
         if all_prefixes:
             # Same executions as the last-event scope, so the two outputs compare
             # directly; prefixes whose viewpoint has no target yet are skipped, as in
@@ -1683,7 +1699,7 @@ class Explainer(Modelling):
         # Per-graph LOO pass, cached so a second call with the other pooling reuses
         # it: [(trace_idx, oid, n_events, node_imp, seed_feats, top_node_feats,
         # baseline_value, id_map, metrics), ...] plus the failure count.
-        cache_key = (scope, n_traces, top_k, self.model_path)
+        cache_key = (scope, n_traces, top_k, self.model_path, execution_offset)
         if not hasattr(self, '_agg_loo_cache'):
             self._agg_loo_cache = {}
         if cache_key in self._agg_loo_cache:
